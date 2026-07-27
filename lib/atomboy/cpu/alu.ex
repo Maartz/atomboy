@@ -9,10 +9,21 @@ defmodule Atomboy.CPU.ALU do
   l'endroit où les émulateurs se trompent, et où l'erreur reste invisible le
   plus longtemps.
 
-  Ces fonctions sont publiques parce qu'elles ont un second consommateur prévu :
-  le code recompilé de la phase 5 appellera les mêmes primitives. La
-  recompilation supprime le fetch, le décodage et le dispatch — pas
-  l'arithmétique de drapeaux, qu'il n'y a aucune raison de réimplémenter.
+  ## Niveau valeurs, pas niveau état
+
+  Les fonctions prennent et rendent des octets : `add(a, v) → {résultat, f}`.
+  Elles ne connaissent pas `Atomboy.CPU.State` — c'est ce qui permet aux deux
+  backends générés de partager la même arithmétique :
+
+    * le backend struct (`Atomboy.CPU.exec/3`, l'oracle) enveloppe le résultat
+      dans une mise à jour de structure ;
+    * la boucle rapide (`Atomboy.CPU.Loop`) le passe en argument d'appel
+      terminal, sans rien construire.
+
+  Un seul endroit calcule la demi-retenue ; aucun backend n'en a sa copie.
+  Troisième consommateur prévu : le code recompilé de la phase 5 appellera ces
+  mêmes primitives — la recompilation supprime le fetch, le décodage et le
+  dispatch, pas l'arithmétique de drapeaux.
 
   ## Le registre F
 
@@ -44,50 +55,52 @@ defmodule Atomboy.CPU.ALU do
 
   import Bitwise
 
-  alias Atomboy.CPU.State
-
   @z 0x80
   @n 0x40
   @h 0x20
   @c 0x10
 
+  @type byte8 :: 0..0xFF
+  @typedoc "Le résultat d'une opération qui écrit A : `{nouvel A, nouveau F}`."
+  @type result :: {byte8(), byte8()}
+
   @doc "ADD A, v — addition."
-  @spec add(State.t(), 0..0xFF) :: State.t()
-  def add(%State{a: a} = st, value) do
-    result = a + value
-    %{st | a: result &&& 0xFF, f: add_flags(a, value, 0, result)}
+  @spec add(byte8(), byte8()) :: result()
+  def add(a, value) do
+    sum = a + value
+    {sum &&& 0xFF, add_flags(a, value, 0, sum)}
   end
 
-  @doc "ADC A, v — addition avec retenue entrante."
-  @spec adc(State.t(), 0..0xFF) :: State.t()
-  def adc(%State{a: a, f: f} = st, value) do
+  @doc "ADC A, v — addition avec la retenue entrante extraite de `f`."
+  @spec adc(byte8(), byte8(), byte8()) :: result()
+  def adc(a, f, value) do
     carry = carry_in(f)
-    result = a + value + carry
-    %{st | a: result &&& 0xFF, f: add_flags(a, value, carry, result)}
+    sum = a + value + carry
+    {sum &&& 0xFF, add_flags(a, value, carry, sum)}
   end
 
   @doc "SUB v — soustraction."
-  @spec sub(State.t(), 0..0xFF) :: State.t()
-  def sub(%State{a: a} = st, value) do
-    %{st | a: a - value &&& 0xFF, f: sub_flags(a, value, 0)}
+  @spec sub(byte8(), byte8()) :: result()
+  def sub(a, value) do
+    {a - value &&& 0xFF, sub_flags(a, value, 0)}
   end
 
-  @doc "SBC A, v — soustraction avec emprunt entrant."
-  @spec sbc(State.t(), 0..0xFF) :: State.t()
-  def sbc(%State{a: a, f: f} = st, value) do
+  @doc "SBC A, v — soustraction avec l'emprunt entrant extrait de `f`."
+  @spec sbc(byte8(), byte8(), byte8()) :: result()
+  def sbc(a, f, value) do
     carry = carry_in(f)
-    %{st | a: a - value - carry &&& 0xFF, f: sub_flags(a, value, carry)}
+    {a - value - carry &&& 0xFF, sub_flags(a, value, carry)}
   end
 
   @doc """
-  CP v — comparaison.
+  CP v — comparaison. Renvoie les drapeaux seuls.
 
-  Une soustraction dont le résultat est jeté : seuls les drapeaux subsistent.
-  D'où la réutilisation de `sub_flags/3` — dupliquer le calcul reviendrait à
-  entretenir deux fois la même subtilité d'emprunt.
+  Une soustraction dont le résultat est jeté : d'où la réutilisation de
+  `sub_flags/3` — dupliquer le calcul reviendrait à entretenir deux fois la
+  même subtilité d'emprunt.
   """
-  @spec cp(State.t(), 0..0xFF) :: State.t()
-  def cp(%State{a: a} = st, value), do: %{st | f: sub_flags(a, value, 0)}
+  @spec cp(byte8(), byte8()) :: byte8()
+  def cp(a, value), do: sub_flags(a, value, 0)
 
   @doc """
   AND v — et logique.
@@ -95,24 +108,24 @@ defmodule Atomboy.CPU.ALU do
   Seule opération logique à poser `H`. Ce n'est pas une régularité oubliée,
   c'est ainsi sur le matériel.
   """
-  @spec bit_and(State.t(), 0..0xFF) :: State.t()
-  def bit_and(%State{a: a} = st, value) do
+  @spec bit_and(byte8(), byte8()) :: result()
+  def bit_and(a, value) do
     result = a &&& value
-    %{st | a: result, f: zero(result) ||| @h}
+    {result, zero(result) ||| @h}
   end
 
   @doc "XOR v — ou exclusif. Tous les drapeaux sauf Z sont remis à zéro."
-  @spec bit_xor(State.t(), 0..0xFF) :: State.t()
-  def bit_xor(%State{a: a} = st, value) do
+  @spec bit_xor(byte8(), byte8()) :: result()
+  def bit_xor(a, value) do
     result = bxor(a, value)
-    %{st | a: result, f: zero(result)}
+    {result, zero(result)}
   end
 
   @doc "OR v — ou logique. Tous les drapeaux sauf Z sont remis à zéro."
-  @spec bit_or(State.t(), 0..0xFF) :: State.t()
-  def bit_or(%State{a: a} = st, value) do
+  @spec bit_or(byte8(), byte8()) :: result()
+  def bit_or(a, value) do
     result = a ||| value
-    %{st | a: result, f: zero(result)}
+    {result, zero(result)}
   end
 
   # ── Drapeaux ────────────────────────────────────────────────────────────────
@@ -120,11 +133,11 @@ defmodule Atomboy.CPU.ALU do
   # La retenue entrante, ramenée à 0 ou 1.
   defp carry_in(f), do: bsr(f &&& @c, 4)
 
-  defp add_flags(a, value, carry, result) do
+  defp add_flags(a, value, carry, sum) do
     # La retenue entrante participe à la demi-retenue — voir le moduledoc.
     half = if (a &&& 0x0F) + (value &&& 0x0F) + carry > 0x0F, do: @h, else: 0
-    full = if result > 0xFF, do: @c, else: 0
-    zero(result) ||| half ||| full
+    full = if sum > 0xFF, do: @c, else: 0
+    zero(sum) ||| half ||| full
   end
 
   defp sub_flags(a, value, carry) do

@@ -54,6 +54,9 @@ defmodule Atomboy.AtomVM.Main do
     :erlang.display({:atomboy, :probe})
     Atomboy.AtomVM.Probe.bench()
 
+    :erlang.display({:atomboy, :loop})
+    loop_bench()
+
     :erlang.display({:atomboy, :done})
 
     # Sur ESP32, un start/0 qui retourne peut redémarrer la carte et noyer le
@@ -130,6 +133,49 @@ defmodule Atomboy.AtomVM.Main do
   defp run(state, mem, steps, cycles) do
     {state, mem, step_cycles} = Atomboy.CPU.step(state, mem)
     run(state, mem, steps - 1, cycles + step_cycles)
+  end
+
+  # Une frame DMG : 154 scanlines × 456 T-cycles.
+  @frame_cycles 70_224
+  # Le débit de T-cycles qu'une DMG soutient : 4,194304 MHz.
+  @dmg_hz 4_194_304
+
+  # La boucle rapide, appelée comme la boucle de frame l'appellera : un budget
+  # d'une frame par appel, l'état matérialisé entre deux. Le chiffre rendu est
+  # celui qui compte pour le projet — le pourcentage du temps réel.
+  defp loop_bench do
+    rom = Atomboy.AtomVM.Probe.rom()
+    state = %State{c: 0x42, h: 0xC0, sp: 0xFFFE}
+
+    {_state, _ram, _cycles} = Atomboy.CPU.Loop.run(state, rom, %{}, @frame_cycles)
+
+    t0 = :erlang.monotonic_time(:millisecond)
+    {frames, elapsed} = loop_frames(state, rom, t0, 0)
+
+    cycles = frames * @frame_cycles
+    per_second = if elapsed > 0, do: div(cycles * 1000, elapsed), else: :too_fast
+
+    :erlang.display({:loop_frames, frames})
+    :erlang.display({:loop_elapsed_ms, elapsed})
+    :erlang.display({:loop_cycles_per_second, per_second})
+
+    if is_integer(per_second) do
+      :erlang.display({:loop_realtime_percent, div(per_second * 100, @dmg_hz)})
+    end
+  end
+
+  defp loop_frames(state, rom, t0, frames) do
+    # La ram repart vide à chaque frame : le bench mesure le CPU, pas la
+    # croissance d'une map d'écritures qu'aucun PPU ne consomme encore.
+    {state, _ram, _cycles} = Atomboy.CPU.Loop.run(state, rom, %{}, @frame_cycles)
+    frames = frames + 1
+    elapsed = :erlang.monotonic_time(:millisecond) - t0
+
+    if elapsed >= @budget_ms or frames >= 100_000 do
+      {frames, elapsed}
+    else
+      loop_frames(state, rom, t0, frames)
+    end
   end
 
   defp idle do
