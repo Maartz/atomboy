@@ -1,0 +1,73 @@
+defmodule Atomboy.CPU.Table do
+  @moduledoc """
+  La table d'instructions du SM83, en donnée.
+
+  C'est le seul fichier à éditer pour ajouter une famille d'opcodes. Il ne
+  contient aucun code exécutable, aucune manipulation d'AST, aucune convention
+  d'appel : uniquement la description de ce que fait le processeur.
+  `Atomboy.CPU.Gen` traduit, `Atomboy.CPU` accueille les clauses.
+
+  ## La décomposition octale
+
+  La table SM83 est régulière quand on lit l'octet d'opcode en trois champs :
+  `x` (bits 7-6), `y` (bits 5-3), `z` (bits 2-0).
+
+      x=0  → opérations diverses, régulières en (y, z)
+      x=1  → LD r, r'  sur 0x40-0x7F, sauf 0x76 réquisitionné par HALT
+      x=2  → ALU A, r  — 8 opérations × 8 sources
+      x=3  → sauts, pile, appels
+
+  D'où des familles générées en compréhension plutôt que 500 lignes recopiées à
+  la main. Une correction de drapeau se fait alors à un seul endroit, et les
+  fautes de frappe silencieuses — celles que les vecteurs de test ne distinguent
+  pas toujours d'un vrai bug — n'ont plus où se loger.
+  """
+
+  alias Atomboy.CPU.Insn
+
+  # L'encodage `r` sur 3 bits, commun à toute la table. 6 désigne (HL).
+  @r {:b, :c, :d, :e, :h, :l, :hl_ind, :a}
+
+  @doc "L'opérande désigné par un champ `r` de 3 bits."
+  @spec operand(0..7) :: Insn.operand()
+  def operand(6), do: :hl_ind
+  def operand(index), do: {:reg, elem(@r, index)}
+
+  @doc """
+  La table de base, sans préfixe.
+  """
+  @spec base() :: [Insn.t()]
+  def base, do: misc() ++ load_block()
+
+  @doc """
+  La table étendue, préfixée par 0xCB. Vide pour l'instant.
+  """
+  @spec extended() :: [Insn.t()]
+  def extended, do: []
+
+  @doc "Toutes les instructions décrites, tous préfixes confondus."
+  @spec all() :: [Insn.t()]
+  def all, do: base() ++ extended()
+
+  # ── x=0 ─────────────────────────────────────────────────────────────────────
+
+  defp misc do
+    [%Insn{opcode: 0x00, mnemonic: :nop, cycles: 4}]
+  end
+
+  # ── x=1 : LD r, r' ──────────────────────────────────────────────────────────
+
+  defp load_block do
+    for dst <- 0..7, src <- 0..7, not (dst == 6 and src == 6) do
+      %Insn{
+        opcode: 0x40 + dst * 8 + src,
+        mnemonic: :ld,
+        operands: [operand(dst), operand(src)],
+        # Un accès mémoire coûte un M-cycle de plus, quel que soit le côté de
+        # l'affectation. Les deux à la fois n'existe pas : `dst = src = 6` aurait
+        # été « LD (HL), (HL) », encodage réquisitionné par HALT.
+        cycles: if(dst == 6 or src == 6, do: 8, else: 4)
+      }
+    end
+  end
+end
