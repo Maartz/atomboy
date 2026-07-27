@@ -78,6 +78,22 @@ defmodule Atomboy.CPU.Gen do
     ret(update(%{dst => read(src)}), var(:mem), cycles)
   end
 
+  # ALU A, r — la sémantique est dans `Atomboy.CPU.ALU`, qui renvoie l'état mis
+  # à jour. Ce module ne décide que de l'aiguillage : quelle primitive, sur quel
+  # opérande.
+  defp body(%Insn{mnemonic: mnemonic, operands: [{:reg, :a}, src], cycles: cycles})
+       when mnemonic in [:add, :adc, :sub, :sbc, :and, :xor, :or, :cp] do
+    call = {{:., [], [Atomboy.CPU.ALU, alu_function(mnemonic)]}, [], [var(:st), read(src)]}
+    ret(call, var(:mem), cycles)
+  end
+
+  # `and`, `or` et `xor` sont des opérateurs d'Elixir : les primitives portent
+  # un autre nom, sans que la table ait à s'écarter du mnémonique du matériel.
+  defp alu_function(:and), do: :bit_and
+  defp alu_function(:xor), do: :bit_xor
+  defp alu_function(:or), do: :bit_or
+  defp alu_function(mnemonic), do: mnemonic
+
   # ── Briques ─────────────────────────────────────────────────────────────────
 
   # L'expression qui lit un opérande source.

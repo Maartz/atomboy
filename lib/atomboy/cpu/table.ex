@@ -37,7 +37,7 @@ defmodule Atomboy.CPU.Table do
   La table de base, sans préfixe.
   """
   @spec base() :: [Insn.t()]
-  def base, do: misc() ++ load_block()
+  def base, do: misc() ++ load_block() ++ alu_block()
 
   @doc """
   La table étendue, préfixée par 0xCB. Vide pour l'instant.
@@ -67,6 +67,27 @@ defmodule Atomboy.CPU.Table do
         # l'affectation. Les deux à la fois n'existe pas : `dst = src = 6` aurait
         # été « LD (HL), (HL) », encodage réquisitionné par HALT.
         cycles: if(dst == 6 or src == 6, do: 8, else: 4)
+      }
+    end
+  end
+
+  # ── x=2 : ALU A, r ──────────────────────────────────────────────────────────
+
+  # Les huit opérations, dans l'ordre du champ `y`. Cet ordre n'est pas un choix
+  # de ce projet : c'est l'encodage du silicium.
+  @alu {:add, :adc, :sub, :sbc, :and, :xor, :or, :cp}
+
+  defp alu_block do
+    for y <- 0..7, z <- 0..7 do
+      %Insn{
+        opcode: 0x80 + y * 8 + z,
+        mnemonic: elem(@alu, y),
+        # A figure explicitement comme premier opérande des huit, y compris de
+        # celles que l'assembleur écrit sans le mentionner (`SUB B`, `AND B`).
+        # A est bien lu et — sauf pour CP — écrit ; l'omettre rendrait la table
+        # irrégulière là où le processeur ne l'est pas.
+        operands: [{:reg, :a}, operand(z)],
+        cycles: if(z == 6, do: 8, else: 4)
       }
     end
   end
