@@ -76,33 +76,25 @@ defmodule Mix.Tasks.Atomboy.Esp32 do
   defp pack do
     build = unix_build!()
     output = Path.join(Mix.Project.build_path(), "atomboy-esp32.avm")
-    File.rm(output)
-
-    # AtomVM démarre sur le start/0 du premier module de l'archive : l'entrée
-    # embarquée d'abord, puis le reste de l'app, puis les bibliothèques.
-    entry = Path.join(Mix.Project.compile_path(), "Elixir.Atomboy.AtomVM.Main.beam")
 
     inputs =
-      [entry] ++
-        (app_beams() -- [entry]) ++
+      app_beams() ++
         [
           Path.join(build, "libs/atomvmlib.avm"),
           Path.join(build, "libs/exavmlib/lib/exavmlib.avm")
         ]
 
-    case System.cmd(Path.join(build, "tools/packbeam/PackBEAM"), [output | inputs],
-           stderr_to_stdout: true
-         ) do
-      {_out, 0} -> output
-      {out, code} -> Mix.raise("PackBEAM a échoué (code #{code}) :\n#{out}")
-    end
+    Mix.Atomboy.Packbeam.create(build, output, inputs, Atomboy.AtomVM.Main)
+    output
   end
 
   defp app_beams do
     Mix.Project.compile_path()
     |> Path.join("*.beam")
     |> Path.wildcard()
-    |> Enum.reject(&String.starts_with?(Path.basename(&1), "Elixir.Mix.Tasks."))
+    # Tout ce qui vit sous Mix.* est de l'outillage de build : dépend de Mix,
+    # absent d'AtomVM, rien à faire sur la carte.
+    |> Enum.reject(&String.starts_with?(Path.basename(&1), "Elixir.Mix."))
   end
 
   # ── Flash ───────────────────────────────────────────────────────────────────

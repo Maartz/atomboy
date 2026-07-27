@@ -28,20 +28,31 @@ defmodule Atomboy.AtomVM.Main do
   alias Atomboy.CPU.State
   alias Atomboy.Memory.Flat
 
+  # :atomvm n'existe que sous AtomVM ; sur OTP ce module ne tourne jamais.
+  @compile {:no_warn_undefined, :atomvm}
+
   # LD B,C ; LD (HL),B ; LD A,(HL) ; NOP — le même programme que le smoke test
   # du garde-fou generic_unix.
   @program %{0x0000 => 0x41, 0x0001 => 0x70, 0x0002 => 0x7E, 0x0003 => 0x00}
 
-  # Assez long pour lisser le bruit, assez court pour un résultat en secondes
-  # même à 20 000 instr/s.
-  @bench_steps 100_000
+  # Le bench est borné en temps, pas en pas : 5 s de mesure quelle que soit la
+  # vitesse de la cible. La version bornée en pas a coûté 158 s sur ESP32 à
+  # 631 instr/s — un chiffre qu'on ne connaissait justement pas avant de
+  # mesurer, ce qui est toute l'ironie d'un bench à durée dépendante du
+  # résultat.
+  @budget_ms 5_000
+  @chunk 1_000
+  @max_steps 10_000_000
 
   def start do
     :erlang.display({:atomboy, :smoke})
     smoke()
 
-    :erlang.display({:atomboy, :bench, @bench_steps})
+    :erlang.display({:atomboy, :bench})
     bench()
+
+    :erlang.display({:atomboy, :probe})
+    Atomboy.AtomVM.Probe.bench()
 
     :erlang.display({:atomboy, :done})
 
@@ -84,20 +95,34 @@ defmodule Atomboy.AtomVM.Main do
     mem = Flat.new(@program)
     state = %State{c: 0x42, h: 0xC0, sp: 0xFFFE}
 
-    # Tour de chauffe court : sur generic_unix il stabilise la mesure, sur
-    # ESP32 il vérifie surtout que la boucle tient en mémoire avant de partir
-    # pour cent mille pas.
-    run(state, mem, 1_000, 0)
+    # Tour de chauffe : stabilise la mesure, et vérifie que la boucle tient en
+    # mémoire avant de partir pour cinq secondes.
+    run(state, mem, @chunk, 0)
 
     t0 = :erlang.monotonic_time(:millisecond)
-    run(state, mem, @bench_steps, 0)
-    elapsed = :erlang.monotonic_time(:millisecond) - t0
+    {steps, elapsed} = bench_loop(state, mem, t0, 0)
 
     # Tout en entiers : pas de dépendance au formatage flottant d'AtomVM.
-    per_second = if elapsed > 0, do: div(@bench_steps * 1000, elapsed), else: :too_fast
+    per_second = if elapsed > 0, do: div(steps * 1000, elapsed), else: :too_fast
 
+    :erlang.display({:steps, steps})
     :erlang.display({:elapsed_ms, elapsed})
     :erlang.display({:instructions_per_second, per_second})
+  end
+
+  # Mesure par tranches de @chunk pas, arrêt au budget de temps ou au plafond
+  # de pas — le plafond évite qu'une cible très rapide ne fasse dix milliards
+  # de pas en cinq secondes.
+  defp bench_loop(state, mem, t0, steps) do
+    {state, mem, _cycles} = run(state, mem, @chunk, 0)
+    steps = steps + @chunk
+    elapsed = :erlang.monotonic_time(:millisecond) - t0
+
+    if elapsed >= @budget_ms or steps >= @max_steps do
+      {steps, elapsed}
+    else
+      bench_loop(state, mem, t0, steps)
+    end
   end
 
   defp run(state, mem, 0, cycles), do: {state, mem, cycles}

@@ -80,34 +80,24 @@ defmodule Mix.Tasks.Atomboy.Atomvm do
 
   defp pack(build) do
     output = Path.join(Mix.Project.build_path(), "atomboy.avm")
-    File.rm(output)
 
-    # Le point d'entrée doit venir en premier : AtomVM démarre sur le `start/0`
-    # du premier module de l'archive.
     inputs =
-      [beam(@entry_point)] ++
-        (app_beams() -- [beam(@entry_point)]) ++
+      app_beams() ++
         [
           Path.join(build, "libs/atomvmlib.avm"),
           Path.join(build, "libs/exavmlib/lib/exavmlib.avm")
         ]
 
-    case System.cmd(Path.join(build, "tools/packbeam/PackBEAM"), [output | inputs],
-           stderr_to_stdout: true
-         ) do
-      {_output, 0} -> {:ok, output}
-      {output, code} -> {:error, "PackBEAM a échoué (code #{code}) :\n#{output}"}
-    end
+    Mix.Atomboy.Packbeam.create(build, output, inputs, @entry_point)
+    {:ok, output}
   end
 
   defp app_beams do
     Mix.Project.compile_path()
     |> Path.join("*.beam")
     |> Path.wildcard()
-    |> Enum.reject(&String.starts_with?(Path.basename(&1), "Elixir.Mix.Tasks."))
+    |> Enum.reject(&String.starts_with?(Path.basename(&1), "Elixir.Mix."))
   end
-
-  defp beam(module), do: Path.join(Mix.Project.compile_path(), "#{module}.beam")
 
   defp execute(build, avm) do
     {output, code} =
