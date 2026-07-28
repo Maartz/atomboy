@@ -60,6 +60,31 @@ defmodule Atomboy.CPU.Gen do
     struct_ret(var(:st), var(:mem), cycles)
   end
 
+  # LD r, d8 et LD (HL), d8 — l'immédiat se lit à PC, qui avance d'un cran de
+  # plus. L'immédiat est lié à une variable avant l'appel : la lecture doit
+  # précéder toute écriture mémoire, et un PC déjà avancé ne doit pas resservir
+  # à la lecture.
+  defp struct_body(%Insn{mnemonic: :ld, operands: [dst, {:imm, 8}], cycles: cycles}) do
+    imm = Macro.var(:imm, __MODULE__)
+    read = quote do: unquote(imm) = mem_read_pc(unquote(var(:mem)), unquote(var(:st)))
+    bumped = quote do: Bitwise.band(unquote(field(:pc)) + 1, 0xFFFF)
+
+    tail =
+      case dst do
+        {:reg, name} ->
+          struct_ret(struct_update(%{name => imm, pc: bumped}), var(:mem), cycles)
+
+        :hl_ind ->
+          write = quote do: mem_write(unquote(var(:mem)), unquote(var(:st)), unquote(imm))
+          struct_ret(struct_update(%{pc: bumped}), write, cycles)
+      end
+
+    quote do
+      unquote(read)
+      unquote(tail)
+    end
+  end
+
   # LD (HL), r — la mémoire change, l'état non : `st` repart tel quel.
   defp struct_body(%Insn{mnemonic: :ld, operands: [:hl_ind, src], cycles: cycles}) do
     write = quote do: mem_write(unquote(var(:mem)), unquote(var(:st)), unquote(struct_read(src)))
@@ -132,6 +157,34 @@ defmodule Atomboy.CPU.Gen do
 
   defp loop_body(%Insn{mnemonic: :nop, cycles: cycles}) do
     loop_ret(%{}, var(:ram), cycles)
+  end
+
+  # LD r, d8 / LD (HL), d8 — même logique que côté struct : lire l'immédiat à
+  # PC, puis repartir avec PC avancé d'un cran de plus.
+  defp loop_body(%Insn{mnemonic: :ld, operands: [dst, {:imm, 8}], cycles: cycles}) do
+    imm = Macro.var(:imm, __MODULE__)
+
+    read =
+      quote do:
+              unquote(imm) =
+                mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:pc)))
+
+    bumped = quote do: Bitwise.band(unquote(var(:pc)) + 1, 0xFFFF)
+
+    tail =
+      case dst do
+        {:reg, name} ->
+          loop_ret(%{name => imm, pc: bumped}, var(:ram), cycles)
+
+        :hl_ind ->
+          ram = quote do: ram_write(unquote(var(:ram)), unquote(hl()), unquote(imm))
+          loop_ret(%{pc: bumped}, ram, cycles)
+      end
+
+    quote do
+      unquote(read)
+      unquote(tail)
+    end
   end
 
   defp loop_body(%Insn{mnemonic: :ld, operands: [:hl_ind, src], cycles: cycles}) do

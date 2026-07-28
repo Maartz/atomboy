@@ -37,7 +37,7 @@ defmodule Atomboy.CPU.Table do
   La table de base, sans préfixe.
   """
   @spec base() :: [Insn.t()]
-  def base, do: misc() ++ load_block() ++ alu_block()
+  def base, do: misc() ++ load_imm8_block() ++ load_block() ++ alu_block()
 
   @doc """
   La table étendue, préfixée par 0xCB. Vide pour l'instant.
@@ -53,6 +53,24 @@ defmodule Atomboy.CPU.Table do
 
   defp misc do
     [%Insn{opcode: 0x00, mnemonic: :nop, cycles: 4}]
+  end
+
+  # ── x=0, z=6 : LD r, d8 ─────────────────────────────────────────────────────
+  #
+  # La destination occupe le champ `y`, l'immédiat suit l'opcode. Premier bloc
+  # à opérande multi-octet : PC avance de deux au total.
+
+  defp load_imm8_block do
+    for dst <- 0..7 do
+      %Insn{
+        opcode: dst * 8 + 0x06,
+        mnemonic: :ld,
+        operands: [operand(dst), {:imm, 8}],
+        # Fetch de l'opcode, fetch de l'immédiat — plus l'écriture mémoire pour
+        # LD (HL), d8.
+        cycles: if(dst == 6, do: 12, else: 8)
+      }
+    end
   end
 
   # ── x=1 : LD r, r' ──────────────────────────────────────────────────────────

@@ -34,8 +34,9 @@ defmodule Atomboy.CPU.Insn do
 
     * `{:reg, :b}` — un registre 8 bits
     * `:hl_ind` — l'octet en mémoire à l'adresse HL, l'encodage `r = 6`
+    * `{:imm, 8}` — un octet immédiat, lu à PC ; l'instruction avance PC
   """
-  @type operand :: {:reg, atom()} | :hl_ind
+  @type operand :: {:reg, atom()} | :hl_ind | {:imm, 8}
 
   @type t :: %__MODULE__{
           opcode: 0..0xFF,
@@ -67,5 +68,6 @@ defmodule Atomboy.CPU.Insn do
   end
 
   defp operand(:hl_ind), do: "(HL)"
+  defp operand({:imm, 8}), do: "d8"
   defp operand({:reg, name}), do: name |> Atom.to_string() |> String.upcase()
 end
