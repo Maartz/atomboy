@@ -10,9 +10,24 @@ defmodule Atomboy.APU.Pulse do
             shadow: 0
 end
 
+defmodule Atomboy.APU.Wave do
+  @moduledoc false
+  defstruct enabled: false, timer: 0, pos: 0, length: 0
+end
+
+defmodule Atomboy.APU.Noise do
+  @moduledoc false
+  defstruct enabled: false,
+            timer: 0,
+            length: 0,
+            volume: 0,
+            env_timer: 0,
+            lfsr: 0x7FFF
+end
+
 defmodule Atomboy.APU do
   @moduledoc """
-  Le son de la DMG, canaux pulse — les deux ondes carrées.
+  Le son de la DMG, les quatre canaux : deux pulses, la wave, le bruit.
 
   L'APU réelle avance au cycle ; celle-ci avance à la frame, l'échelle de
   temps de la musique : les jeux posent leurs notes au vblank, une frame de
@@ -34,9 +49,17 @@ defmodule Atomboy.APU do
       NRx1         duty 7-6, longueur 5-0
       NRx2         enveloppe : volume 7-4, sens 3, période 2-0
       NRx3/NRx4    fréquence 11 bits, trigger 7, longueur armée 6
+      NR30 0xFF1A  DAC du canal wave (bit 7)
+      NR32 0xFF1C  volume wave (bits 6-5 : muet, 100 %, 50 %, 25 %)
+      0xFF30-3F    la table d'onde : 32 échantillons de 4 bits
+      NR43 0xFF22  bruit : décalage 7-4, largeur 3, diviseur 2-0
       NR50 0xFF24  volume gauche 6-4, droit 2-0
       NR51 0xFF25  aiguillage canal → gauche/droite
       NR52 0xFF26  bit 7 : l'APU sous tension
+
+  Le canal wave rejoue sa table à (2048-f)×2 cycles le pas — c'est lui qui
+  porte les basses. Le bruit sort d'un LFSR 15 bits (7 en mode étroit),
+  cadencé par diviseur et décalage — percussions et souffles.
 
   Un canal au DAC éteint (bits 7-3 de NRx2 à zéro) est muet, trigger ou pas
   — c'est ainsi que les jeux coupent une voix.
@@ -58,9 +81,17 @@ defmodule Atomboy.APU do
     {0, 1, 1, 1, 1, 1, 1, 0}
   }
 
+  alias Atomboy.APU.Noise
   alias Atomboy.APU.Pulse
+  alias Atomboy.APU.Wave
 
-  defstruct ch1: %Pulse{}, ch2: %Pulse{}, seq_acc: 0, seq_step: 0, sample_acc: 0
+  defstruct ch1: %Pulse{},
+            ch2: %Pulse{},
+            ch3: %Wave{},
+            ch4: %Noise{},
+            seq_acc: 0,
+            seq_step: 0,
+            sample_acc: 0
 
   @type t :: %__MODULE__{}
 
@@ -107,6 +138,9 @@ defmodule Atomboy.APU do
     nr51 = Map.get(ram, 0xFF25, 0xF3)
     env1 = Map.get(ram, 0xFF12, 0)
     env2 = Map.get(ram, 0xFF17, 0)
+    env4 = Map.get(ram, 0xFF21, 0)
+    nr43 = Map.get(ram, 0xFF22, 0)
+    divisor = if (nr43 &&& 0x07) == 0, do: 8, else: (nr43 &&& 0x07) * 16
 
     %{
       nr10: nr10,
@@ -126,48 +160,89 @@ defmodule Atomboy.APU do
       l1: (nr51 &&& 0x10) != 0,
       l2: (nr51 &&& 0x20) != 0,
       r1: (nr51 &&& 0x01) != 0,
-      r2: (nr51 &&& 0x02) != 0
+      r2: (nr51 &&& 0x02) != 0,
+      # Canal wave : DAC, table figée en tuple, période d'un pas, volume.
+      dac3: (Map.get(ram, 0xFF1A, 0) &&& 0x80) != 0,
+      table3: wave_table(ram),
+      p3: (2048 - reg_freq(ram, 0xFF1D, 0xFF1E)) * 2,
+      shift3: elem({4, 0, 1, 2}, bsr(Map.get(ram, 0xFF1C, 0), 5) &&& 0x03),
+      len3: (Map.get(ram, 0xFF1E, 0) &&& 0x40) != 0,
+      l3: (nr51 &&& 0x40) != 0,
+      r3: (nr51 &&& 0x04) != 0,
+      # Canal bruit : enveloppe, période du LFSR, largeur.
+      env4: env4,
+      dac4: dac_on?(env4),
+      p4: bsl(divisor, bsr(nr43, 4) &&& 0x0F),
+      narrow4: (nr43 &&& 0x08) != 0,
+      len4: (Map.get(ram, 0xFF23, 0) &&& 0x40) != 0,
+      l4: (nr51 &&& 0x80) != 0,
+      r4: (nr51 &&& 0x08) != 0
     }
+  end
+
+  # Les 32 échantillons de 4 bits de la table d'onde, quartet haut d'abord.
+  defp wave_table(ram) do
+    for addr <- 0xFF30..0xFF3F, byte = Map.get(ram, addr, 0), nibble <- [bsr(byte, 4), byte &&& 0x0F] do
+      nibble
+    end
+    |> List.to_tuple()
   end
 
   defp generate(ram, apu) do
     {count, carry} = sample_count(apu)
     cfg = config(ram)
 
-    {samples, ch1, ch2, seq_acc, seq_step} =
-      Enum.reduce(1..count, {[], apu.ch1, apu.ch2, apu.seq_acc, apu.seq_step}, fn _,
-                                                                                 {out, ch1, ch2,
-                                                                                  seq_acc,
-                                                                                  seq_step} ->
-        # Le séquenceur : un pas tous les 8192 cycles.
-        {ch1, ch2, seq_acc, seq_step} =
-          if seq_acc + @cycles_per_sample >= @seq_period do
-            step = rem(seq_step + 1, 8)
+    {samples, ch1, ch2, ch3, ch4, seq_acc, seq_step} =
+      Enum.reduce(
+        1..count,
+        {[], apu.ch1, apu.ch2, apu.ch3, apu.ch4, apu.seq_acc, apu.seq_step},
+        fn _, {out, ch1, ch2, ch3, ch4, seq_acc, seq_step} ->
+          # Le séquenceur : un pas tous les 8192 cycles.
+          {ch1, ch2, ch3, ch4, seq_acc, seq_step} =
+            if seq_acc + @cycles_per_sample >= @seq_period do
+              step = rem(seq_step + 1, 8)
 
-            ch1 =
-              ch1
-              |> clock_length(cfg.len1, step)
-              |> clock_sweep(cfg.nr10, step)
-              |> clock_env(cfg.env1, step)
+              ch1 =
+                ch1
+                |> clock_length(cfg.len1, step)
+                |> clock_sweep(cfg.nr10, step)
+                |> clock_env(cfg.env1, step)
 
-            ch2 = ch2 |> clock_length(cfg.len2, step) |> clock_env(cfg.env2, step)
-            {ch1, ch2, seq_acc + @cycles_per_sample - @seq_period, step}
-          else
-            {ch1, ch2, seq_acc + @cycles_per_sample, seq_step}
-          end
+              ch2 = ch2 |> clock_length(cfg.len2, step) |> clock_env(cfg.env2, step)
+              ch3 = clock_length(ch3, cfg.len3, step)
+              ch4 = ch4 |> clock_length(cfg.len4, step) |> clock_env(cfg.env4, step)
+              {ch1, ch2, ch3, ch4, seq_acc + @cycles_per_sample - @seq_period, step}
+            else
+              {ch1, ch2, ch3, ch4, seq_acc + @cycles_per_sample, seq_step}
+            end
 
-        # Canal 1 sous sweep : la fréquence glisse, sa période se recalcule.
-        p1 = if cfg.sweep?, do: (2048 - ch1.shadow) * 4, else: cfg.p1
-        ch1 = advance(ch1, p1)
-        ch2 = advance(ch2, cfg.p2)
+          # Canal 1 sous sweep : la fréquence glisse, sa période se recalcule.
+          p1 = if cfg.sweep?, do: (2048 - ch1.shadow) * 4, else: cfg.p1
+          ch1 = advance(ch1, p1)
+          ch2 = advance(ch2, cfg.p2)
+          ch3 = advance_wave(ch3, cfg.p3)
+          ch4 = advance_noise(ch4, cfg.p4, cfg.narrow4)
 
-        v1 = output(ch1, cfg.duty1, cfg.dac1)
-        v2 = output(ch2, cfg.duty2, cfg.dac2)
+          v1 = output(ch1, cfg.duty1, cfg.dac1)
+          v2 = output(ch2, cfg.duty2, cfg.dac2)
+          v3 = output_wave(ch3, cfg)
+          v4 = output_noise(ch4, cfg.dac4)
 
-        {[mix(v1, v2, cfg) | out], ch1, ch2, seq_acc, seq_step}
-      end)
+          {[mix(v1, v2, v3, v4, cfg) | out], ch1, ch2, ch3, ch4, seq_acc, seq_step}
+        end
+      )
 
-    apu = %{apu | ch1: ch1, ch2: ch2, seq_acc: seq_acc, seq_step: seq_step, sample_acc: carry}
+    apu = %{
+      apu
+      | ch1: ch1,
+        ch2: ch2,
+        ch3: ch3,
+        ch4: ch4,
+        seq_acc: seq_acc,
+        seq_step: seq_step,
+        sample_acc: carry
+    }
+
     {samples |> Enum.reverse() |> IO.iodata_to_binary(), apu}
   end
 
@@ -179,6 +254,37 @@ defmodule Atomboy.APU do
 
   defp trigger(apu, 2, ram) do
     %{apu | ch2: trigger_pulse(apu.ch2, ram, 0xFF16, 0xFF18, 0xFF19, nil)}
+  end
+
+  defp trigger(apu, 3, ram) do
+    length = 256 - Map.get(ram, 0xFF1B, 0)
+
+    ch3 = %Wave{
+      apu.ch3
+      | enabled: (Map.get(ram, 0xFF1A, 0) &&& 0x80) != 0,
+        length: if(apu.ch3.length == 0, do: length, else: apu.ch3.length),
+        pos: 0,
+        timer: 0
+    }
+
+    %{apu | ch3: ch3}
+  end
+
+  defp trigger(apu, 4, ram) do
+    length = 64 - (Map.get(ram, 0xFF20, 0) &&& 0x3F)
+    env = Map.get(ram, 0xFF21, 0)
+
+    ch4 = %Noise{
+      apu.ch4
+      | enabled: dac_on?(env),
+        length: if(apu.ch4.length == 0, do: length, else: apu.ch4.length),
+        volume: bsr(env, 4),
+        env_timer: env &&& 0x07,
+        lfsr: 0x7FFF,
+        timer: 0
+    }
+
+    %{apu | ch4: ch4}
   end
 
   defp trigger(apu, _ch, _ram), do: apu
@@ -292,16 +398,63 @@ defmodule Atomboy.APU do
   defp output(_ch, _duty, false), do: 0
   defp output(ch, duty, true), do: elem(duty, ch.pos) * ch.volume
 
+  # ── Le canal wave ───────────────────────────────────────────────────────────
+
+  # 32 pas par cycle de table, (2048-f)×2 cycles le pas.
+  defp advance_wave(%Wave{enabled: false} = ch, _period), do: ch
+
+  defp advance_wave(ch, period) do
+    timer = ch.timer + @cycles_per_sample
+    steps = div(timer, period)
+    %{ch | timer: rem(timer, period), pos: rem(ch.pos + steps, 32)}
+  end
+
+  defp output_wave(%Wave{enabled: false}, _cfg), do: 0
+  defp output_wave(_ch, %{dac3: false}), do: 0
+  defp output_wave(ch, cfg), do: bsr(elem(cfg.table3, ch.pos), cfg.shift3)
+
+  # ── Le canal bruit ──────────────────────────────────────────────────────────
+
+  # Le LFSR 15 bits : xor des deux bits bas réinjecté en tête — et copié au
+  # bit 6 en mode étroit, le « bip » métallique. Au pire 16 pas par
+  # échantillon (période plancher 8 cycles).
+  defp advance_noise(%Noise{enabled: false} = ch, _period, _narrow?), do: ch
+
+  defp advance_noise(ch, period, narrow?) do
+    timer = ch.timer + @cycles_per_sample
+    steps = div(timer, period)
+    %{ch | timer: rem(timer, period), lfsr: lfsr_steps(ch.lfsr, steps, narrow?)}
+  end
+
+  defp lfsr_steps(lfsr, 0, _narrow?), do: lfsr
+
+  defp lfsr_steps(lfsr, steps, narrow?) do
+    bit = bxor(lfsr &&& 1, bsr(lfsr, 1) &&& 1)
+    lfsr = bsr(lfsr, 1) ||| bsl(bit, 14)
+    lfsr = if narrow?, do: (lfsr &&& bnot(0x40)) ||| bsl(bit, 6), else: lfsr
+    lfsr_steps(lfsr, steps - 1, narrow?)
+  end
+
+  defp output_noise(%Noise{enabled: false}, _dac?), do: 0
+  defp output_noise(_ch, false), do: 0
+  defp output_noise(ch, true), do: bxor(ch.lfsr &&& 1, 1) * ch.volume
+
   defp dac_on?(nrx2), do: (nrx2 &&& 0xF8) != 0
 
   # ── Le mélange ──────────────────────────────────────────────────────────────
 
   # NR51 aiguille chaque canal vers chaque oreille, NR50 dose 0-7 par côté.
-  # Pire cas : 15 de volume × 2 canaux × (7+1) de NR50 × 60 = 14 400,
-  # sous les 32 767 du s16 avec la marge des deux canaux à venir.
-  defp mix(v1, v2, cfg) do
-    left = (if(cfg.l1, do: v1, else: 0) + if(cfg.l2, do: v2, else: 0)) * cfg.lmul
-    right = (if(cfg.r1, do: v1, else: 0) + if(cfg.r2, do: v2, else: 0)) * cfg.rmul
+  # Pire cas : 15 de volume × 4 canaux × (7+1) de NR50 × 60 = 28 800,
+  # sous les 32 767 du s16.
+  defp mix(v1, v2, v3, v4, cfg) do
+    left =
+      (if(cfg.l1, do: v1, else: 0) + if(cfg.l2, do: v2, else: 0) +
+         if(cfg.l3, do: v3, else: 0) + if(cfg.l4, do: v4, else: 0)) * cfg.lmul
+
+    right =
+      (if(cfg.r1, do: v1, else: 0) + if(cfg.r2, do: v2, else: 0) +
+         if(cfg.r3, do: v3, else: 0) + if(cfg.r4, do: v4, else: 0)) * cfg.rmul
+
     <<left::16-little-signed, right::16-little-signed>>
   end
 

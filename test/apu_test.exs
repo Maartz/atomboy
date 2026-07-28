@@ -101,6 +101,78 @@ defmodule Atomboy.APUTest do
     assert bin == :binary.copy(<<0, 0, 0, 0>>, div(byte_size(bin), 4))
   end
 
+  # Une frame de canal 3 (wave) : table carrée E/0 — quartet pair, pour que
+  # le volume 50 % (décalage entier) divise exactement — DAC allumé.
+  defp wave3(regs) do
+    table = for addr <- 0xFF30..0xFF37, into: %{}, do: {addr, 0xEE}
+    table = for addr <- 0xFF38..0xFF3F, into: table, do: {addr, 0x00}
+
+    ram =
+      %{0xFF26 => 0x80, 0xFF24 => 0x77, 0xFF25 => 0xFF, 0xFF1A => 0x80, :apu_triggers => [3]}
+      |> Map.merge(table)
+      |> Map.merge(regs)
+
+    APU.frame(ram, %APU{})
+  end
+
+  test "le canal wave rejoue sa table à la fréquence des registres" do
+    # Un cycle de table = (2048-f)×64 cycles : f = 1792 → 256 Hz.
+    {bin, _ram, _apu} =
+      wave3(%{0xFF1C => 0x20, 0xFF1D => 1792 &&& 0xFF, 0xFF1E => bsr(1792, 8)})
+
+    samples = left_samples(bin)
+    assert Enum.max(samples) > 0
+    # 256 Hz sur une frame : ~4,3 périodes, ~9 fronts.
+    assert edges(samples) in 7..11
+  end
+
+  test "le volume wave à 50 % divise l'amplitude par deux" do
+    regs = %{0xFF1D => 0x00, 0xFF1E => 0x04}
+    {plein, _, _} = wave3(Map.put(regs, 0xFF1C, 0x20))
+    {moitie, _, _} = wave3(Map.put(regs, 0xFF1C, 0x40))
+
+    assert Enum.max(left_samples(moitie)) * 2 == Enum.max(left_samples(plein))
+  end
+
+  test "le DAC wave éteint rend le canal muet" do
+    {bin, _ram, _apu} = wave3(%{0xFF1A => 0x00, 0xFF1C => 0x20, 0xFF1E => 0x04})
+    assert Enum.all?(left_samples(bin), &(&1 == 0))
+  end
+
+  test "le canal bruit crache du pseudo-aléatoire" do
+    ram = %{
+      0xFF26 => 0x80,
+      0xFF24 => 0x77,
+      0xFF25 => 0xFF,
+      0xFF20 => 0x00,
+      0xFF21 => 0xF0,
+      0xFF22 => 0x23,
+      :apu_triggers => [4]
+    }
+
+    {bin, _ram, _apu} = APU.frame(ram, %APU{})
+    samples = left_samples(bin)
+
+    assert Enum.max(samples) > 0
+    # Du bruit : beaucoup de fronts, sans période nette.
+    assert edges(samples) > 50
+  end
+
+  test "l'enveloppe du bruit s'éteint comme celle des pulses" do
+    ram = %{
+      0xFF26 => 0x80,
+      0xFF24 => 0x77,
+      0xFF25 => 0xFF,
+      0xFF21 => 0x11,
+      0xFF22 => 0x23,
+      :apu_triggers => [4]
+    }
+
+    {_bin, ram, apu} = APU.frame(ram, %APU{})
+    {_bin, _ram, apu} = APU.frame(Map.delete(ram, :apu_triggers), apu)
+    assert apu.ch4.volume == 0
+  end
+
   test "CartLoop capture le déclenchement à l'écriture de NRx4" do
     alias Atomboy.CPU.CartLoop
     # LD A, 0x87 ; LDH (0x19), A — déclenche le canal 2.
