@@ -164,20 +164,33 @@ defmodule Atomboy.AtomVM.Main do
   # Le débit de T-cycles qu'une DMG soutient : 4,194304 MHz.
   @dmg_hz 4_194_304
 
+  # Un bloc de 16 octets — 12 instructions variées, 64 T-cycles — répété sur
+  # tout l'espace d'adressage. Le prédécesseur était un défilé de NOP :
+  # l'opcode le mieux placé du dispatch, un bench qui mesurait la complaisance
+  # de son propre programme (×10,6 d'écart constaté selon la position de
+  # l'opcode dominant, avant l'arbre binaire). Ce bloc tire dans toute la
+  # table, préfixe CB compris.
+  @bench_block <<0x3E, 0x55, 0x06, 0x33, 0x80, 0x04, 0xB1, 0x2F, 0xCB, 0x37, 0xA8, 0x15, 0x1F,
+                 0xE6, 0x0F, 0x7D>>
+
+  defp bench_rom, do: :binary.copy(@bench_block, div(0x10000, byte_size(@bench_block)))
+
   # La boucle rapide, appelée comme la boucle de frame l'appellera : un budget
-  # d'une frame par appel, l'état matérialisé entre deux. Le chiffre rendu est
-  # celui qui compte pour le projet — le pourcentage du temps réel.
+  # d'une frame par appel, l'état matérialisé entre deux, et la sémantique
+  # cartouche de CartLoop — fetch ROM sans test de map, le modèle mémoire d'un
+  # vrai jeu. Le chiffre rendu est celui qui compte pour le projet — le
+  # pourcentage du temps réel.
   defp loop_bench do
-    rom = Atomboy.AtomVM.Probe.rom()
+    rom = bench_rom()
     state = %State{c: 0x42, h: 0xC0, sp: 0xFFFE}
 
-    {_state, _ram, _cycles} = Atomboy.CPU.Loop.run(state, rom, %{}, @frame_cycles)
+    {_state, _ram, _cycles} = Atomboy.CPU.CartLoop.run(state, rom, %{}, @frame_cycles)
 
     {frames, elapsed} =
       measure(state, fn state ->
         # La ram repart vide à chaque frame : le bench mesure le CPU, pas la
         # croissance d'une map d'écritures qu'aucun PPU ne consomme encore.
-        {state, _ram, _cycles} = Atomboy.CPU.Loop.run(state, rom, %{}, @frame_cycles)
+        {state, _ram, _cycles} = Atomboy.CPU.CartLoop.run(state, rom, %{}, @frame_cycles)
         {state, 1}
       end)
 
