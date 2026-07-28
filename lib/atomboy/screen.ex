@@ -32,8 +32,22 @@ defmodule Atomboy.Screen do
   @spec run(Path.t(), pos_integer()) :: {PPU.frame(), State.t(), map()}
   def run(rom_path, frames) do
     rom = load(rom_path)
+    state = boot_state()
+    ram = %{rom_banks: div(byte_size(rom), 0x4000)}
 
-    state = %State{
+    Enum.reduce(1..frames, {<<>>, state, ram}, fn frame_index, {_frame, state, ram} ->
+      render? = frame_index == frames
+      frame(state, rom, ram, render?)
+    end)
+  end
+
+  @doc """
+  L'état des registres à la sortie de la ROM de boot DMG — le point de départ
+  de tout jeu.
+  """
+  @spec boot_state() :: State.t()
+  def boot_state do
+    %State{
       a: 0x01,
       f: 0xB0,
       b: 0x00,
@@ -45,16 +59,14 @@ defmodule Atomboy.Screen do
       sp: 0xFFFE,
       pc: 0x0100
     }
-
-    ram = %{rom_banks: div(byte_size(rom), 0x4000)}
-
-    Enum.reduce(1..frames, {<<>>, state, ram}, fn frame_index, {_frame, state, ram} ->
-      render? = frame_index == frames
-      frame(state, rom, ram, render?)
-    end)
   end
 
-  defp frame(state, rom, ram, render?) do
+  @doc """
+  Une frame de machine : 154 scanlines, rendues si `render?`.
+  Renvoie `{pixels, state, ram}` — pixels vide sans rendu.
+  """
+  @spec frame(State.t(), binary(), map(), boolean()) :: {PPU.frame(), State.t(), map()}
+  def frame(state, rom, ram, render?) do
     {pixels, state, ram, _window_line} =
       Enum.reduce(0..(@lines - 1), {<<>>, state, ram, 0}, fn ly,
                                                              {pixels, state, ram, window_line} ->
@@ -112,9 +124,12 @@ defmodule Atomboy.Screen do
     {state, Atomboy.Timer.advance(ram, cycles)}
   end
 
-  # Les petites ROMs sont complétées à 32 Ko ; les grandes gardent leurs
-  # banques telles quelles, le MBC1 de CartLoop fait le reste.
-  defp load(path) do
+  @doc """
+  Charge une ROM : les petites sont complétées à 32 Ko ; les grandes gardent
+  leurs banques telles quelles, le MBC1 de CartLoop fait le reste.
+  """
+  @spec load(Path.t()) :: binary()
+  def load(path) do
     rom = File.read!(path)
 
     if byte_size(rom) < 0x8000 do
@@ -128,6 +143,10 @@ defmodule Atomboy.Screen do
   La frame en texte pour le terminal : deux scanlines par rangée de
   caractères, le demi-bloc `▀` portant la ligne du haut en avant-plan et
   celle du bas en arrière-plan, quatre gris ANSI pour les quatre teintes.
+
+  La séquence de couleur n'est émise qu'au changement de paire — les aplats,
+  majoritaires sur une frame de jeu, coûtent un octet par cellule. C'est ce
+  qui laisse un terminal suivre 60 frames par seconde.
   """
   @spec to_text(PPU.frame()) :: String.t()
   def to_text(frame) do
@@ -139,12 +158,18 @@ defmodule Atomboy.Screen do
         top = :binary.part(frame, row * 2 * width, width)
         bottom = :binary.part(frame, (row * 2 + 1) * width, width)
 
-        cells =
-          for x <- 0..(width - 1) do
+        {cells, _} =
+          Enum.map_reduce(0..(width - 1), nil, fn x, prev ->
             fg = elem(grays, :binary.at(top, x))
             bg = elem(grays, :binary.at(bottom, x))
-            "\e[38;5;#{fg};48;5;#{bg}m▀"
-          end
+            pair = {fg, bg}
+
+            if pair == prev do
+              {"▀", prev}
+            else
+              {"\e[38;5;#{fg};48;5;#{bg}m▀", pair}
+            end
+          end)
 
         [cells, "\e[0m\n"]
       end
