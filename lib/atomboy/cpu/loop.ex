@@ -26,10 +26,9 @@ defmodule Atomboy.CPU.Loop do
   déborder, le débordement est visible dans le compte renvoyé. Le PPU
   consommera ce surplus en le décomptant du budget suivant.
 
-  Interruptions : `ime`, `ie` et `halted` traversent `run/4` inchangés — aucune
-  instruction implémentée ne les touche encore. Le jour où `EI`/`DI`/`HALT`
-  arrivent dans la table, ils rejoindront les arguments de la boucle, dans le
-  générateur.
+  Interruptions : `ime` voyage dans la boucle — RETI le rallume, EI/DI le
+  manipuleront. `ie` et `halted` traversent `run/4` inchangés tant qu'aucune
+  instruction ne les touche.
 
   La justesse de ce module n'est pas testée directement : elle est héritée.
   L'oracle passe les vecteurs SM83 ; le test d'équivalence croisée vérifie que
@@ -58,18 +57,35 @@ defmodule Atomboy.CPU.Loop do
   """
   @spec run(State.t(), rom(), ram(), pos_integer()) :: {State.t(), ram(), non_neg_integer()}
   def run(%State{} = st, rom, ram, budget) when byte_size(rom) == 0x10000 do
-    {{a, f, b, c, d, e, h, l, sp, pc}, ram, cycles} =
-      fetch(rom, ram, budget, 0, st.a, st.f, st.b, st.c, st.d, st.e, st.h, st.l, st.sp, st.pc)
+    {{a, f, b, c, d, e, h, l, sp, pc, ime}, ram, cycles} =
+      fetch(
+        rom,
+        ram,
+        budget,
+        0,
+        st.a,
+        st.f,
+        st.b,
+        st.c,
+        st.d,
+        st.e,
+        st.h,
+        st.l,
+        st.sp,
+        st.pc,
+        st.ime
+      )
 
-    {%{st | a: a, f: f, b: b, c: c, d: d, e: e, h: h, l: l, sp: sp, pc: pc}, ram, cycles}
+    {%{st | a: a, f: f, b: b, c: c, d: d, e: e, h: h, l: l, sp: sp, pc: pc, ime: ime}, ram,
+     cycles}
   end
 
   # ── Fetch ───────────────────────────────────────────────────────────────────
 
   # Budget épuisé : matérialisation, l'unique construction de la boucle.
-  defp fetch(_rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc)
+  defp fetch(_rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime)
        when cycles >= budget do
-    {{a, f, b, c, d, e, h, l, sp, pc}, ram, cycles}
+    {{a, f, b, c, d, e, h, l, sp, pc, ime}, ram, cycles}
   end
 
   # Le fetch passe par la même vue rom+ram que les lectures d'opérandes : la
@@ -78,7 +94,7 @@ defmodule Atomboy.CPU.Loop do
   # les programmes aléatoires s'auto-modifient. Le surcoût est un test de map
   # sur la ram des écritures ; le jour du vrai MMU, le découpage par région
   # (fetch ROM sans map, fetch RAM avec) se fera dans le générateur.
-  defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc) do
+  defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime) do
     exec(
       mem_read(rom, ram, pc),
       rom,
@@ -94,7 +110,8 @@ defmodule Atomboy.CPU.Loop do
       h,
       l,
       sp,
-      pc + 1 &&& 0xFFFF
+      pc + 1 &&& 0xFFFF,
+      ime
     )
   end
 
@@ -110,7 +127,24 @@ defmodule Atomboy.CPU.Loop do
     end
   end
 
-  defp exec(opcode, _rom, _ram, _budget, _cycles, _a, _f, _b, _c, _d, _e, _h, _l, _sp, _pc) do
+  defp exec(
+         opcode,
+         _rom,
+         _ram,
+         _budget,
+         _cycles,
+         _a,
+         _f,
+         _b,
+         _c,
+         _d,
+         _e,
+         _h,
+         _l,
+         _sp,
+         _pc,
+         _ime
+       ) do
     raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
   end
 

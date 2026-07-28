@@ -188,6 +188,102 @@ defmodule Atomboy.CPU.Gen do
     struct_ret(struct_update(%{dst => struct_read(src)}), var(:mem), cycles)
   end
 
+  # JP HL — aucun accès mémoire malgré la notation « JP (HL) » : PC reçoit la
+  # paire. Le saut calculé du futur trampoline de phase 5.
+  defp struct_body(%Insn{mnemonic: :jp, operands: [{:pair, :hl}], cycles: cycles}) do
+    struct_ret(struct_update(%{pc: struct_pair_read({:pair, :hl})}), var(:mem), cycles)
+  end
+
+  # JP a16 et ses formes conditionnelles.
+  defp struct_body(%Insn{mnemonic: :jp, operands: [{:imm, 16}]} = insn) do
+    target = Macro.var(:target, __MODULE__)
+    taken = struct_ret(struct_update(%{pc: target}), var(:mem), insn.cycles)
+
+    body =
+      conditional(insn, field(:f), taken, fn ->
+        skipped = quote do: Bitwise.band(unquote(field(:pc)) + 2, 0xFFFF)
+        struct_ret(struct_update(%{pc: skipped}), var(:mem), insn.cycles_untaken)
+      end)
+
+    quote do
+      unquote(target) = mem_read_pc16(unquote(var(:mem)), unquote(var(:st)))
+      unquote(body)
+    end
+  end
+
+  # CALL a16 — l'adresse de retour (PC après l'opérande) part sur la pile.
+  defp struct_body(%Insn{mnemonic: :call, operands: [{:imm, 16}]} = insn) do
+    target = Macro.var(:target, __MODULE__)
+    new_sp = Macro.var(:new_sp, __MODULE__)
+    return_to = quote do: Bitwise.band(unquote(field(:pc)) + 2, 0xFFFF)
+
+    taken =
+      quote do
+        unquote(new_sp) = Bitwise.band(unquote(field(:sp)) - 2, 0xFFFF)
+
+        unquote(
+          struct_ret(
+            struct_update(%{pc: target, sp: new_sp}),
+            quote(do: mem_write16_at(unquote(var(:mem)), unquote(new_sp), unquote(return_to))),
+            insn.cycles
+          )
+        )
+      end
+
+    body =
+      conditional(insn, field(:f), taken, fn ->
+        struct_ret(struct_update(%{pc: return_to}), var(:mem), insn.cycles_untaken)
+      end)
+
+    quote do
+      unquote(target) = mem_read_pc16(unquote(var(:mem)), unquote(var(:st)))
+      unquote(body)
+    end
+  end
+
+  # RET, RET cc, RETI — la lecture de pile n'a lieu que si le retour se fait,
+  # et RETI rallume IME dans le même souffle.
+  defp struct_body(%Insn{mnemonic: mnemonic, operands: []} = insn)
+       when mnemonic in [:ret, :reti] do
+    value = Macro.var(:value, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(field(:sp)) + 2, 0xFFFF)
+    extra = if mnemonic == :reti, do: %{ime: 1}, else: %{}
+
+    taken =
+      quote do
+        unquote(value) = mem_read16_at(unquote(var(:mem)), unquote(field(:sp)))
+
+        unquote(
+          struct_ret(
+            struct_update(Map.merge(%{pc: value, sp: bumped}, extra)),
+            var(:mem),
+            insn.cycles
+          )
+        )
+      end
+
+    conditional(insn, field(:f), taken, fn ->
+      struct_ret(var(:st), var(:mem), insn.cycles_untaken)
+    end)
+  end
+
+  # RST — un CALL vers une cible fixe encodée dans l'opcode.
+  defp struct_body(%Insn{mnemonic: :rst, operands: [{:rst, target}], cycles: cycles}) do
+    new_sp = Macro.var(:new_sp, __MODULE__)
+
+    quote do
+      unquote(new_sp) = Bitwise.band(unquote(field(:sp)) - 2, 0xFFFF)
+
+      unquote(
+        struct_ret(
+          struct_update(%{pc: target, sp: new_sp}),
+          quote(do: mem_write16_at(unquote(var(:mem)), unquote(new_sp), unquote(field(:pc)))),
+          cycles
+        )
+      )
+    end
+  end
+
   # PUSH rr — SP descend de deux, la paire s'écrit little-endian au nouveau SP.
   defp struct_body(%Insn{mnemonic: :push, operands: [pair], cycles: cycles}) do
     new_sp = Macro.var(:new_sp, __MODULE__)
@@ -534,6 +630,92 @@ defmodule Atomboy.CPU.Gen do
     loop_ret(%{dst => loop_read(src)}, var(:ram), cycles)
   end
 
+  # JP HL.
+  defp loop_body(%Insn{mnemonic: :jp, operands: [{:pair, :hl}], cycles: cycles}) do
+    loop_ret(%{pc: loop_pair_read({:pair, :hl})}, var(:ram), cycles)
+  end
+
+  # JP a16 et ses formes conditionnelles.
+  defp loop_body(%Insn{mnemonic: :jp, operands: [{:imm, 16}]} = insn) do
+    target = Macro.var(:target, __MODULE__)
+    taken = loop_ret(%{pc: target}, var(:ram), insn.cycles)
+
+    body =
+      conditional(insn, var(:f), taken, fn ->
+        skipped = quote do: Bitwise.band(unquote(var(:pc)) + 2, 0xFFFF)
+        loop_ret(%{pc: skipped}, var(:ram), insn.cycles_untaken)
+      end)
+
+    quote do
+      unquote(target) = unquote(loop_read16_pc())
+      unquote(body)
+    end
+  end
+
+  # CALL a16.
+  defp loop_body(%Insn{mnemonic: :call, operands: [{:imm, 16}]} = insn) do
+    target = Macro.var(:target, __MODULE__)
+    new_sp = Macro.var(:new_sp, __MODULE__)
+    return_to = quote do: Bitwise.band(unquote(var(:pc)) + 2, 0xFFFF)
+
+    taken =
+      quote do
+        unquote(new_sp) = Bitwise.band(unquote(var(:sp)) - 2, 0xFFFF)
+
+        unquote(loop_ret(%{pc: target, sp: new_sp}, loop_push16(new_sp, return_to), insn.cycles))
+      end
+
+    body =
+      conditional(insn, var(:f), taken, fn ->
+        loop_ret(%{pc: return_to}, var(:ram), insn.cycles_untaken)
+      end)
+
+    quote do
+      unquote(target) = unquote(loop_read16_pc())
+      unquote(body)
+    end
+  end
+
+  # RET, RET cc, RETI.
+  defp loop_body(%Insn{mnemonic: mnemonic, operands: []} = insn)
+       when mnemonic in [:ret, :reti] do
+    value = Macro.var(:value, __MODULE__)
+    lo = Macro.var(:lo, __MODULE__)
+    hi = Macro.var(:hi, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(var(:sp)) + 2, 0xFFFF)
+    extra = if mnemonic == :reti, do: %{ime: 1}, else: %{}
+
+    taken =
+      quote do
+        unquote(lo) = mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:sp)))
+
+        unquote(hi) =
+          mem_read(
+            unquote(var(:rom)),
+            unquote(var(:ram)),
+            Bitwise.band(unquote(var(:sp)) + 1, 0xFFFF)
+          )
+
+        unquote(value) = Bitwise.bsl(unquote(hi), 8) |> Bitwise.bor(unquote(lo))
+
+        unquote(loop_ret(Map.merge(%{pc: value, sp: bumped}, extra), var(:ram), insn.cycles))
+      end
+
+    conditional(insn, var(:f), taken, fn ->
+      loop_ret(%{}, var(:ram), insn.cycles_untaken)
+    end)
+  end
+
+  # RST.
+  defp loop_body(%Insn{mnemonic: :rst, operands: [{:rst, target}], cycles: cycles}) do
+    new_sp = Macro.var(:new_sp, __MODULE__)
+
+    quote do
+      unquote(new_sp) = Bitwise.band(unquote(var(:sp)) - 2, 0xFFFF)
+      unquote(loop_ret(%{pc: target, sp: new_sp}, loop_push16(new_sp, var(:pc)), cycles))
+    end
+  end
+
   # PUSH rr.
   defp loop_body(%Insn{mnemonic: :push, operands: [pair], cycles: cycles}) do
     new_sp = Macro.var(:new_sp, __MODULE__)
@@ -701,6 +883,32 @@ defmodule Atomboy.CPU.Gen do
 
   defp loop_read({:reg, name}), do: var(name)
 
+  # Le mot little-endian à PC, côté boucle.
+  defp loop_read16_pc do
+    quote do
+      Bitwise.bsl(
+        mem_read(
+          unquote(var(:rom)),
+          unquote(var(:ram)),
+          Bitwise.band(unquote(var(:pc)) + 1, 0xFFFF)
+        ),
+        8
+      )
+      |> Bitwise.bor(mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:pc))))
+    end
+  end
+
+  # L'écriture d'un mot sur la pile, little-endian, côté boucle.
+  defp loop_push16(sp_expr, value_expr) do
+    quote do
+      ram_write(
+        ram_write(unquote(var(:ram)), unquote(sp_expr), Bitwise.band(unquote(value_expr), 0xFF)),
+        Bitwise.band(unquote(sp_expr) + 1, 0xFFFF),
+        Bitwise.bsr(unquote(value_expr), 8)
+      )
+    end
+  end
+
   defp loop_pair_read({:pair, :sp}), do: var(:sp)
 
   defp loop_pair_read({:pair, name}) do
@@ -726,7 +934,7 @@ defmodule Atomboy.CPU.Gen do
   # L'appel terminal vers le fetch suivant : tous les registres repartent en
   # arguments, ceux d'`overrides` remplacés par leur nouvelle valeur.
   defp loop_ret(overrides, ram_expr, cycles) do
-    regs = Enum.map(@state, fn name -> Map.get(overrides, name, var(name)) end)
+    regs = Enum.map(@state ++ [:ime], fn name -> Map.get(overrides, name, var(name)) end)
     counted = quote do: unquote(var(:cycles)) + unquote(cycles)
     args = [var(:rom), ram_expr, var(:budget), counted] ++ regs
 
@@ -739,7 +947,7 @@ defmodule Atomboy.CPU.Gen do
   defp loop_args(body) do
     used = read_vars(body)
 
-    Enum.map([:rom, :ram, :budget, :cycles] ++ @state, fn name ->
+    Enum.map([:rom, :ram, :budget, :cycles] ++ @state ++ [:ime], fn name ->
       if MapSet.member?(used, name), do: var(name), else: var(:"_#{name}")
     end)
   end
@@ -802,6 +1010,22 @@ defmodule Atomboy.CPU.Gen do
   defp condition_expr(:z, f), do: quote(do: Bitwise.band(unquote(f), 0x80) != 0)
   defp condition_expr(:nc, f), do: quote(do: Bitwise.band(unquote(f), 0x10) == 0)
   defp condition_expr(:c, f), do: quote(do: Bitwise.band(unquote(f), 0x10) != 0)
+
+  # Enveloppe un corps dans le test de condition de l'instruction — ou pas,
+  # pour les formes inconditionnelles. `untaken_fun` est paresseux : la branche
+  # non prise n'existe pas pour elles. `f_expr` vient du backend appelant :
+  # `field(:f)` côté struct, `var(:f)` côté boucle.
+  defp conditional(%Insn{condition: nil}, _f_expr, taken, _untaken_fun), do: taken
+
+  defp conditional(%Insn{condition: condition}, f_expr, taken, untaken_fun) do
+    quote do
+      if unquote(condition_expr(condition, f_expr)) do
+        unquote(taken)
+      else
+        unquote(untaken_fun.())
+      end
+    end
+  end
 
   # L'appel ALU d'un mnémonique. `adc` et `sbc` consomment F entrant, les
   # autres non ; `and`/`or`/`xor` portent d'autres noms côté primitives parce

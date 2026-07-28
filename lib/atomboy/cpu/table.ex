@@ -43,6 +43,7 @@ defmodule Atomboy.CPU.Table do
       jr_block() ++
       acc_block() ++
       stack_block() ++
+      jump_block() ++
       pair_block() ++ inc_dec_block() ++ load_imm8_block() ++ load_block() ++ alu_block()
   end
 
@@ -215,6 +216,72 @@ defmodule Atomboy.CPU.Table do
       ]
     end
     |> List.flatten()
+  end
+
+  # ── x=3 : sauts absolus, appels, retours ────────────────────────────────────
+  #
+  # Les quatre conditions partagent l'encodage du champ y avec JR. Les coûts
+  # pris/non pris diffèrent par famille : l'écart est le travail réellement
+  # évité — lecture de l'opérande déjà faite pour JP (16/12), pile intouchée
+  # pour CALL (24/12), lecture de pile évitée pour RET (20/8).
+
+  @conditions [nz: 0, z: 1, nc: 2, c: 3]
+
+  defp jump_block do
+    jp =
+      [
+        %Insn{opcode: 0xC3, mnemonic: :jp, operands: [{:imm, 16}], cycles: 16},
+        # JP HL — souvent écrit « JP (HL) », mais il n'y a aucun accès mémoire :
+        # PC reçoit la paire, c'est tout. Le saut calculé du futur trampoline.
+        %Insn{opcode: 0xE9, mnemonic: :jp, operands: [{:pair, :hl}], cycles: 4}
+      ] ++
+        for {condition, index} <- @conditions do
+          %Insn{
+            opcode: 0xC2 + index * 8,
+            mnemonic: :jp,
+            operands: [{:imm, 16}],
+            condition: condition,
+            cycles: 16,
+            cycles_untaken: 12
+          }
+        end
+
+    call =
+      [%Insn{opcode: 0xCD, mnemonic: :call, operands: [{:imm, 16}], cycles: 24}] ++
+        for {condition, index} <- @conditions do
+          %Insn{
+            opcode: 0xC4 + index * 8,
+            mnemonic: :call,
+            operands: [{:imm, 16}],
+            condition: condition,
+            cycles: 24,
+            cycles_untaken: 12
+          }
+        end
+
+    ret =
+      [
+        %Insn{opcode: 0xC9, mnemonic: :ret, cycles: 16},
+        # RETI : RET + IME. L'autorisation est immédiate, contrairement au délai
+        # d'une instruction de EI.
+        %Insn{opcode: 0xD9, mnemonic: :reti, cycles: 16}
+      ] ++
+        for {condition, index} <- @conditions do
+          %Insn{
+            opcode: 0xC0 + index * 8,
+            mnemonic: :ret,
+            condition: condition,
+            cycles: 20,
+            cycles_untaken: 8
+          }
+        end
+
+    rst =
+      for slot <- 0..7 do
+        %Insn{opcode: 0xC7 + slot * 8, mnemonic: :rst, operands: [{:rst, slot * 8}], cycles: 16}
+      end
+
+    jp ++ call ++ ret ++ rst
   end
 
   # ── x=1 : LD r, r' ──────────────────────────────────────────────────────────
