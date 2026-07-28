@@ -5,8 +5,13 @@ defmodule Mix.Tasks.Atomboy.Play do
   La console dans le terminal : l'émulateur tourne à la cadence de la dalle,
   le clavier tient lieu de croix et de boutons.
 
-      mix atomboy.play "Tetris (World) (Rev 1).gb"
-      mix atomboy.play zelda.gb --hold 15
+      bin/play "Tetris (World) (Rev 1).gb"
+      bin/play zelda.gb --hold 15
+
+  Le lanceur `bin/play` équivaut à `ELIXIR_ERL_OPTIONS="-noinput" mix
+  atomboy.play …` : sans `-noinput`, le lecteur interne du BEAM vole un
+  octet sur trois au clavier et les flèches n'arrivent jamais entières —
+  la tâche refuse alors de démarrer, avec ce mode d'emploi.
 
   ## Touches
 

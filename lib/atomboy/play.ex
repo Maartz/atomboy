@@ -24,6 +24,13 @@ defmodule Atomboy.Play do
   0x03 décodé en « quitter »), et `:file.read` octet par octet livre les
   frappes en temps réel — vérifié écritures simultanées comprises.
 
+  Dernier voleur : même sans aucune demande de lecture, `prim_tty` lit le
+  terminal en permanence et rafle un octet sur trois — les flèches, trois
+  octets, n'arrivent presque jamais entières. Le drapeau `-noinput` l'éteint
+  (mesuré : 0/301 octets reçus sans, 301/301 avec), d'où le lanceur
+  `bin/play` ; sur un tty sans ce drapeau, `run/2` refuse de démarrer avec
+  le mode d'emploi.
+
     * L'écran alternatif (`\\e[?1049h`) : le jeu occupe tout, et le shell
       retrouve son historique intact à la sortie ; les réglages `stty`
       d'origine sont sauvés (`-g`) et restaurés.
@@ -58,36 +65,59 @@ defmodule Atomboy.Play do
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
     tty = pty_path()
-    saved = terminal_setup(tty)
 
-    try do
-      with :ok <- ensure_size(opts, tty) do
-        parent = self()
-        input = tty || "/dev/fd/0"
-        reader = spawn_link(fn -> read_keys(parent, input) end)
+    with :ok <- ensure_sole_reader(tty) do
+      saved = terminal_setup(tty)
 
-        try do
-          loop(%{
-            state: Screen.boot_state(),
-            rom: rom,
-            ram: %{rom_banks: div(byte_size(rom), 0x4000)},
-            hold: %{},
-            pending: "",
-            frame: 0,
-            max_frames: Keyword.get(opts, :frames, :infinity),
-            hold_frames: Keyword.get(opts, :hold, @default_hold),
-            dump: Keyword.get(opts, :dump),
-            last_frame: nil,
-            fps: 0.0,
-            fps_mark: System.monotonic_time(:microsecond)
-          })
-        after
-          Process.unlink(reader)
-          Process.exit(reader, :kill)
-        end
+      try do
+        play(rom, tty, opts)
+      after
+        terminal_restore(tty, saved)
       end
-    after
-      terminal_restore(tty, saved)
+    end
+  end
+
+  # Sans -noinput, prim_tty lit le terminal en permanence et vole un octet
+  # sur trois au jeu — les flèches (3 octets) n'arrivent jamais entières.
+  # Mesuré : 0/301 octets reçus sans -noinput, 301/301 avec. Pas de tty,
+  # pas de voleur : les essais --frames redirigés passent sans le drapeau.
+  defp ensure_sole_reader(tty) do
+    if tty != nil and :init.get_argument(:noinput) == :error do
+      {:error,
+       "Le BEAM lit le terminal en même temps que le jeu (il vole un octet\n" <>
+         "sur trois — les flèches n'arrivent jamais entières). Relancer avec :\n\n" <>
+         "    bin/play <rom.gb>\n\n" <>
+         "ou  ELIXIR_ERL_OPTIONS=\"-noinput\" mix atomboy.play <rom.gb>"}
+    else
+      :ok
+    end
+  end
+
+  defp play(rom, tty, opts) do
+    with :ok <- ensure_size(opts, tty) do
+      parent = self()
+      input = tty || "/dev/fd/0"
+      reader = spawn_link(fn -> read_keys(parent, input) end)
+
+      try do
+        loop(%{
+          state: Screen.boot_state(),
+          rom: rom,
+          ram: %{rom_banks: div(byte_size(rom), 0x4000)},
+          hold: %{},
+          pending: "",
+          frame: 0,
+          max_frames: Keyword.get(opts, :frames, :infinity),
+          hold_frames: Keyword.get(opts, :hold, @default_hold),
+          dump: Keyword.get(opts, :dump),
+          last_frame: nil,
+          fps: 0.0,
+          fps_mark: System.monotonic_time(:microsecond)
+        })
+      after
+        Process.unlink(reader)
+        Process.exit(reader, :kill)
+      end
     end
   end
 
