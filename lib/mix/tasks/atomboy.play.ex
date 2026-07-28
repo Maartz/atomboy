@@ -18,6 +18,13 @@ defmodule Mix.Tasks.Atomboy.Play do
       flèches    la croix        x  A        c  B
       Entrée     Start           ␣  Select   q ou Ctrl-C  quitter
 
+  ## Sauvegardes
+
+  La RAM à pile de la cartouche vit dans un `.sav` à côté de la ROM — la
+  convention des émulateurs, fichiers échangeables dans les deux sens.
+  Rechargée au lancement, écrite à la sortie et toutes les ~10 s dès que
+  le jeu a écrit quelque chose.
+
   ## Options
 
     * `--hold N` — frames de maintien par frappe (défaut 10), pour les

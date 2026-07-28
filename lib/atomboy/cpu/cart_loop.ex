@@ -344,9 +344,11 @@ defmodule Atomboy.CPU.CartLoop do
   # qu'aucune ROM ne dépasse les 512 Ko des cinq bits bas.
   defp ram_write(ram, addr, _value) when addr < 0x8000, do: ram
 
+  # La RAM cartouche — celle que la pile garde en vie. Chaque écriture la
+  # marque sale : Atomboy.Save sait alors qu'un .sav mérite d'être écrit.
   defp ram_write(ram, addr, value) when addr >= 0xA000 and addr < 0xC000 do
     case ram do
-      %{cram_enabled: true} -> Map.put(ram, addr, value)
+      %{cram_enabled: true} -> ram |> Map.put(addr, value) |> Map.put(:cram_dirty, true)
       _ -> ram
     end
   end

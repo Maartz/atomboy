@@ -58,6 +58,7 @@ defmodule Atomboy.Play do
   alias Atomboy.Joypad
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
+  alias Atomboy.Save
   alias Atomboy.Screen
 
   # La période d'une frame DMG : 70 224 T-cycles à 4,194 MHz.
@@ -73,13 +74,14 @@ defmodule Atomboy.Play do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
+    sav = Save.path(rom_path)
     tty = pty_path()
 
     with :ok <- ensure_sole_reader(tty) do
       saved = terminal_setup(tty)
 
       try do
-        play(rom, tty, opts)
+        play(rom, sav, tty, opts)
       after
         terminal_restore(tty, saved)
       end
@@ -102,7 +104,7 @@ defmodule Atomboy.Play do
     end
   end
 
-  defp play(rom, tty, opts) do
+  defp play(rom, sav, tty, opts) do
     with :ok <- ensure_size(opts, tty) do
       parent = self()
       input = tty || "/dev/fd/0"
@@ -116,7 +118,8 @@ defmodule Atomboy.Play do
         loop(%{
           state: Screen.boot_state(),
           rom: rom,
-          ram: %{rom_banks: div(byte_size(rom), 0x4000)},
+          ram: Save.load(%{rom_banks: div(byte_size(rom), 0x4000)}, sav),
+          sav: sav,
           hold: %{},
           down: MapSet.new(),
           kitty: false,
@@ -165,13 +168,13 @@ defmodule Atomboy.Play do
 
   # ── La boucle de frame ──────────────────────────────────────────────────────
 
-  defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: dump(ctx)
+  defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: finish(ctx)
 
   defp loop(ctx) do
     {events, pending} = Input.decode(ctx.pending <> collect_input([]))
 
     if Enum.any?(events, &match?({tag, :quit} when tag != :release, &1)) do
-      dump(ctx)
+      finish(ctx)
     else
       ctx = Enum.reduce(events, ctx, &apply_event/2)
       held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
@@ -192,6 +195,9 @@ defmodule Atomboy.Play do
       if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
 
       hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
+
+      # L'autosauvegarde : la pile de la cartouche n'attend pas la sortie.
+      ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
 
       ctx = %{
         ctx
@@ -252,6 +258,11 @@ defmodule Atomboy.Play do
   # salvateur si un environnement l'a éteint — l'affichage ne dépend ainsi
   # d'aucun réglage de sortie du terminal.
   defp crlf(text), do: :binary.replace(text, "\n", "\r\n", [:global])
+
+  defp finish(ctx) do
+    Save.flush(ctx.ram, ctx.sav)
+    dump(ctx)
+  end
 
   defp dump(%{dump: path, last_frame: pixels}) when is_binary(path) and is_binary(pixels) do
     File.write!(path, Screen.to_pgm(pixels))
