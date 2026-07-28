@@ -7,13 +7,18 @@ Le but n'est pas de faire tourner une ROM par le chemin le plus court, mais que
 statique Game Boy → Core Erlang. Voir [le brief](gameboy-atomvm-brief.md) pour
 le matériel, l'architecture et les phases.
 
-État : **phase 1**, interpréteur sur le Mac. 64 des 501 opcodes.
+État : **phase 1 terminée** — les 501 opcodes décodés dans les deux backends
+(oracle + boucle rapide), ~500 000 vecteurs SingleStepTests verts, et les ROMs
+blargg `cpu_instrs` passent (10/11 — `02-interrupts` attend le contrôleur
+d'interruptions). Mesuré sur ESP32-C6 en natif AOT : 12 % du temps réel, avant
+recompilateur.
 
 ## Démarrer
 
 ```sh
-mix atomboy.corpus   # récupère les vecteurs SingleStepTests (~160 Mo, une fois)
-mix test             # rejoue tous les vecteurs des opcodes implémentés
+mix atomboy.corpus         # vecteurs SM83 (~160 Mo) + ROMs blargg, une fois
+mix test                   # ~500 000 vecteurs + équivalence croisée
+mix test --include blargg  # les ROMs cpu_instrs en plus
 ```
 
 ## Commandes

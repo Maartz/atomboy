@@ -31,6 +31,22 @@ defmodule Mix.Tasks.Atomboy.Corpus do
   @repo "https://github.com/SingleStepTests/sm83.git"
   @dir "test/fixtures/sm83"
 
+  @roms_repo "https://github.com/retrio/gb-test-roms.git"
+  @roms_dir "test/fixtures/gb-test-roms"
+
+  @doc "Où vivent les ROMs de test de blargg."
+  @spec roms_dir() :: Path.t()
+  def roms_dir, do: @roms_dir
+
+  @doc "Les ROMs individuelles de cpu_instrs, présentes sur le disque."
+  @spec cpu_instrs_roms() :: [Path.t()]
+  def cpu_instrs_roms do
+    @roms_dir
+    |> Path.join("cpu_instrs/individual/*.gb")
+    |> Path.wildcard()
+    |> Enum.sort()
+  end
+
   @doc """
   Où vit le corpus.
 
@@ -82,16 +98,20 @@ defmodule Mix.Tasks.Atomboy.Corpus do
 
   @impl true
   def run(_args) do
-    dir = dir()
+    fetch(dir(), @repo, "vecteurs SingleStepTests (~160 Mo)", "v1")
+    fetch(@roms_dir, @roms_repo, "ROMs de test blargg & mooneye", "cpu_instrs")
+    Mix.shell().info("Corpus prêt. `mix test` ; blargg : `mix test --include blargg`.")
+  end
 
-    if available?() do
-      Mix.shell().info("Corpus déjà présent dans #{dir} — rien à faire.")
+  defp fetch(dir, repo, label, proof) do
+    if File.dir?(Path.join(dir, proof)) do
+      Mix.shell().info("#{label} : déjà présent dans #{dir}.")
     else
       File.mkdir_p!(Path.dirname(dir))
-      Mix.shell().info("Clonage de #{@repo} vers #{dir} (~160 Mo)...")
+      Mix.shell().info("Clonage de #{repo} vers #{dir} — #{label}...")
 
-      case System.cmd("git", ["clone", "--depth", "1", @repo, dir], into: IO.stream()) do
-        {_, 0} -> Mix.shell().info("Corpus prêt. Lance `mix test`.")
+      case System.cmd("git", ["clone", "--depth", "1", repo, dir], into: IO.stream()) do
+        {_, 0} -> :ok
         {_, code} -> Mix.raise("git clone a échoué (code #{code})")
       end
     end
