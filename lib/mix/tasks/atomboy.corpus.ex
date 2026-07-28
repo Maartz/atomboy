@@ -100,7 +100,27 @@ defmodule Mix.Tasks.Atomboy.Corpus do
   def run(_args) do
     fetch(dir(), @repo, "vecteurs SingleStepTests (~160 Mo)", "v1")
     fetch(@roms_dir, @roms_repo, "ROMs de test blargg & mooneye", "cpu_instrs")
+
+    fetch_file(
+      "test/fixtures/dmg-acid2.gb",
+      "https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb",
+      "dmg-acid2, le test d'acceptance du PPU"
+    )
+
     Mix.shell().info("Corpus prêt. `mix test` ; blargg : `mix test --include blargg`.")
+  end
+
+  defp fetch_file(path, url, label) do
+    if File.regular?(path) do
+      Mix.shell().info("#{label} : déjà présent.")
+    else
+      Mix.shell().info("Téléchargement de #{label}...")
+
+      case System.cmd("curl", ["-sSL", "--max-time", "60", "-o", path, url]) do
+        {_, 0} -> :ok
+        {_, code} -> Mix.raise("curl a échoué (code #{code})")
+      end
+    end
   end
 
   defp fetch(dir, repo, label, proof) do
