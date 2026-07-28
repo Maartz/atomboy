@@ -29,23 +29,16 @@ defmodule Atomboy.BlarggTest do
   for rom <- Corpus.cpu_instrs_roms() do
     name = Path.basename(rom, ".gb")
 
-    if String.starts_with?(name, "02-") do
-      @tag :skip
-      test "#{name} (attend le contrôleur d'interruptions)" do
-        flunk("ne devrait pas tourner")
-      end
-    else
-      test name do
-        case Atomboy.Blargg.run(unquote(rom)) do
-          {:passed, _report} ->
-            :ok
+    test name do
+      case Atomboy.Blargg.run(unquote(rom)) do
+        {:passed, _report} ->
+          :ok
 
-          {:failed, report} ->
-            flunk("échec :\n#{report}")
+        {:failed, report} ->
+          flunk("échec :\n#{report}")
 
-          {:timeout, report} ->
-            flunk("pas de verdict avant la limite de cycles :\n#{report}")
-        end
+        {:timeout, report} ->
+          flunk("pas de verdict avant la limite de cycles :\n#{report}")
       end
     end
   end

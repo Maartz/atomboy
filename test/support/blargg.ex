@@ -19,11 +19,10 @@ defmodule Atomboy.Blargg do
   autant lui répondre quelque chose de sensé.
   """
 
-  alias Atomboy.CPU.CartLoop
   alias Atomboy.CPU.State
 
-  # Une tranche de 100 frames entre deux inspections du tampon série.
-  @slice 70_224 * 100
+  # Une frame entre deux inspections du tampon série.
+  @frame_cycles 70_224
 
   @type verdict :: {:passed, String.t()} | {:failed, String.t()} | {:timeout, String.t()}
 
@@ -65,14 +64,20 @@ defmodule Atomboy.Blargg do
     {:timeout, serial(ram)}
   end
 
+  # Une frame de 154 scanlines par tour, via la brique commune — LY vit, le
+  # vblank se lève, le timer bat : 02-interrupts mesure tout ça.
   defp execute(state, rom, ram, budget_left) do
-    {state, ram, cycles} = CartLoop.run(state, rom, ram, min(@slice, budget_left))
+    {state, ram} =
+      Enum.reduce(0..153, {state, ram}, fn ly, {state, ram} ->
+        Atomboy.Screen.step_line(state, rom, ram, ly)
+      end)
+
     output = serial(ram)
 
     cond do
       String.contains?(output, "Passed") -> {:passed, output}
       String.contains?(output, "Failed") -> {:failed, output}
-      true -> execute(state, rom, ram, budget_left - cycles)
+      true -> execute(state, rom, ram, budget_left - @frame_cycles)
     end
   end
 

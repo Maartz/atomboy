@@ -263,6 +263,13 @@ defmodule Atomboy.CPU.CartLoop do
     Map.put(ram, :cram_enabled, (value &&& 0x0F) == 0x0A)
   end
 
+  # Écrire DIV — n'importe quelle valeur — le remet à zéro, sous-compteur
+  # compris. C'est le comportement du matériel, et blargg s'en sert pour
+  # synchroniser ses mesures de timer.
+  defp ram_write(ram, 0xFF04, _value) do
+    ram |> Map.put(0xFF04, 0) |> Map.put(:div_acc, 0)
+  end
+
   # 0xFF02, bit 7 : départ d'un transfert série. L'octet chargé dans 0xFF01
   # part dans le tampon :serial, et le transfert se conclut dans l'instant —
   # bit 7 retombé. C'est le canal de sortie des ROMs blargg de la génération

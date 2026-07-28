@@ -54,25 +54,36 @@ defmodule Atomboy.Screen do
 
   defp frame(state, rom, ram, render?) do
     Enum.reduce(0..(@lines - 1), {<<>>, state, ram}, fn ly, {pixels, state, ram} ->
-      ram = Map.put(ram, 0xFF44, ly)
-
-      # L'entrée en vblank lève le bit 0 d'IF — l'interruption que les jeux
-      # attendent pour toucher la VRAM. Le service lui-même vit dans le fetch
-      # de la boucle.
-      ram =
-        if ly == @visible do
-          Map.update(ram, 0xFF0F, 0x01, &bor(&1, 0x01))
-        else
-          ram
-        end
-
-      {state, ram, _cycles} = CartLoop.run(state, rom, ram, @line_cycles)
+      {state, ram} = step_line(state, rom, ram, ly)
 
       pixels =
         if render? and ly < @visible, do: pixels <> PPU.render_line(ram, ly), else: pixels
 
       {pixels, state, ram}
     end)
+  end
+
+  @doc """
+  Une scanline de machine : LY avance, le vblank se lève à la ligne 144, le
+  CPU tourne 456 T-cycles, le timer les rattrape. La brique commune de toute
+  boucle de frame — Screen, le runner blargg, et la phase 3 un jour.
+  """
+  @spec step_line(State.t(), binary(), map(), 0..153) :: {State.t(), map()}
+  def step_line(state, rom, ram, ly) do
+    ram = Map.put(ram, 0xFF44, ly)
+
+    # L'entrée en vblank lève le bit 0 d'IF — l'interruption que les jeux
+    # attendent pour toucher la VRAM. Le service lui-même vit dans le fetch
+    # de la boucle.
+    ram =
+      if ly == @visible do
+        Map.update(ram, 0xFF0F, 0x01, &bor(&1, 0x01))
+      else
+        ram
+      end
+
+    {state, ram, cycles} = CartLoop.run(state, rom, ram, @line_cycles)
+    {state, Atomboy.Timer.advance(ram, cycles)}
   end
 
   defp load(path) do
