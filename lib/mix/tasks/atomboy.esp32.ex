@@ -272,8 +272,18 @@ defmodule Mix.Tasks.Atomboy.Esp32 do
         stderr_to_stdout: true
       )
 
-    if code != 0 do
-      Mix.raise("esptool a échoué sur #{name} (code #{code}) :\n#{out}")
+    cond do
+      code == 0 ->
+        :ok
+
+      String.contains?(out, "Resource busy") ->
+        Mix.raise("""
+        Le port #{port} est occupé — probablement une session screen restée
+        ouverte dessus. Ferme-la (Ctrl-A puis K) et relance.
+        """)
+
+      true ->
+        Mix.raise("esptool a échoué sur #{name} (code #{code}) :\n#{out}")
     end
   end
 

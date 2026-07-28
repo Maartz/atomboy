@@ -102,8 +102,11 @@ defmodule Atomboy.AtomVM.Main do
     # mémoire avant de partir pour cinq secondes.
     run(state, mem, @chunk, 0)
 
-    t0 = :erlang.monotonic_time(:millisecond)
-    {steps, elapsed} = bench_loop(state, mem, t0, 0)
+    {steps, elapsed} =
+      measure({state, mem}, fn {state, mem} ->
+        {state, mem, _cycles} = run(state, mem, @chunk, 0)
+        {{state, mem}, @chunk}
+      end)
 
     # Tout en entiers : pas de dépendance au formatage flottant d'AtomVM.
     per_second = if elapsed > 0, do: div(steps * 1000, elapsed), else: :too_fast
@@ -113,26 +116,42 @@ defmodule Atomboy.AtomVM.Main do
     :erlang.display({:instructions_per_second, per_second})
   end
 
-  # Mesure par tranches de @chunk pas, arrêt au budget de temps ou au plafond
-  # de pas — le plafond évite qu'une cible très rapide ne fasse dix milliards
-  # de pas en cinq secondes.
-  defp bench_loop(state, mem, t0, steps) do
-    {state, mem, _cycles} = run(state, mem, @chunk, 0)
-    steps = steps + @chunk
-    elapsed = :erlang.monotonic_time(:millisecond) - t0
-
-    if elapsed >= @budget_ms or steps >= @max_steps do
-      {steps, elapsed}
-    else
-      bench_loop(state, mem, t0, steps)
-    end
-  end
-
   defp run(state, mem, 0, cycles), do: {state, mem, cycles}
 
   defp run(state, mem, steps, cycles) do
     {state, mem, step_cycles} = Atomboy.CPU.step(state, mem)
     run(state, mem, steps - 1, cycles + step_cycles)
+  end
+
+  @doc false
+  # Mesure par tranches : chaque appel de `slice` rend `{acc, unités}` ; on
+  # additionne le temps **actif** seul, et on rend la main entre deux tranches.
+  #
+  # Le souffle entre tranches n'est pas décoratif : sur ESP32, une boucle BEAM
+  # qui monopolise la tâche AtomVM pendant cinq secondes affame la tâche IDLE
+  # de FreeRTOS, et le task watchdog aboie dans la console toutes les cinq
+  # secondes. Le `receive after` bloque la tâche un instant, IDLE respire, et
+  # le temps dormi n'entre pas dans la mesure. La boucle de frame de la vraie
+  # phase 3 devra faire pareil.
+  def measure(acc, slice, units \\ 0, active_ms \\ 0) do
+    t0 = :erlang.monotonic_time(:millisecond)
+    {acc, slice_units} = slice.(acc)
+    active_ms = active_ms + :erlang.monotonic_time(:millisecond) - t0
+    units = units + slice_units
+
+    if active_ms >= @budget_ms or units >= @max_steps do
+      {units, active_ms}
+    else
+      breathe()
+      measure(acc, slice, units, active_ms)
+    end
+  end
+
+  defp breathe do
+    receive do
+    after
+      2 -> :ok
+    end
   end
 
   # Une frame DMG : 154 scanlines × 456 T-cycles.
@@ -149,8 +168,13 @@ defmodule Atomboy.AtomVM.Main do
 
     {_state, _ram, _cycles} = Atomboy.CPU.Loop.run(state, rom, %{}, @frame_cycles)
 
-    t0 = :erlang.monotonic_time(:millisecond)
-    {frames, elapsed} = loop_frames(state, rom, t0, 0)
+    {frames, elapsed} =
+      measure(state, fn state ->
+        # La ram repart vide à chaque frame : le bench mesure le CPU, pas la
+        # croissance d'une map d'écritures qu'aucun PPU ne consomme encore.
+        {state, _ram, _cycles} = Atomboy.CPU.Loop.run(state, rom, %{}, @frame_cycles)
+        {state, 1}
+      end)
 
     cycles = frames * @frame_cycles
     per_second = if elapsed > 0, do: div(cycles * 1000, elapsed), else: :too_fast
@@ -161,20 +185,6 @@ defmodule Atomboy.AtomVM.Main do
 
     if is_integer(per_second) do
       :erlang.display({:loop_realtime_percent, div(per_second * 100, @dmg_hz)})
-    end
-  end
-
-  defp loop_frames(state, rom, t0, frames) do
-    # La ram repart vide à chaque frame : le bench mesure le CPU, pas la
-    # croissance d'une map d'écritures qu'aucun PPU ne consomme encore.
-    {state, _ram, _cycles} = Atomboy.CPU.Loop.run(state, rom, %{}, @frame_cycles)
-    frames = frames + 1
-    elapsed = :erlang.monotonic_time(:millisecond) - t0
-
-    if elapsed >= @budget_ms or frames >= 100_000 do
-      {frames, elapsed}
-    else
-      loop_frames(state, rom, t0, frames)
     end
   end
 

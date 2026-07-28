@@ -33,7 +33,7 @@ defmodule Atomboy.AtomVM.Probe do
 
   import Bitwise
 
-  @steps 1_000_000
+  @slice 50_000
 
   @doc "Construit la ROM : le programme de Main, puis des NOP jusqu'à 64 Ko."
   @spec rom() :: binary()
@@ -42,7 +42,11 @@ defmodule Atomboy.AtomVM.Probe do
   end
 
   @doc """
-  Mesure `#{@steps}` pas et affiche le débit, comme le bench de Main.
+  Mesure bornée en temps, comme le bench de Main.
+
+  Découpée en tranches de #{@slice} pas via `Atomboy.AtomVM.Main.measure/2`,
+  pour les mêmes raisons de watchdog — chaque tranche repart de l'état
+  initial, ce qui est sans effet sur un programme aussi périodique.
   """
   @spec bench() :: :ok
   def bench do
@@ -51,13 +55,15 @@ defmodule Atomboy.AtomVM.Probe do
     # Chauffe courte, comme le bench de référence.
     loop(rom, %{}, 1_000, 0, 0, 0, 0, 0x42, 0, 0, 0xC0, 0x00, 0xFFFE, 0x0000)
 
-    t0 = :erlang.monotonic_time(:millisecond)
-    loop(rom, %{}, @steps, 0, 0, 0, 0, 0x42, 0, 0, 0xC0, 0x00, 0xFFFE, 0x0000)
-    elapsed = :erlang.monotonic_time(:millisecond) - t0
+    {steps, elapsed} =
+      Atomboy.AtomVM.Main.measure(nil, fn nil ->
+        loop(rom, %{}, @slice, 0, 0, 0, 0, 0x42, 0, 0, 0xC0, 0x00, 0xFFFE, 0x0000)
+        {nil, @slice}
+      end)
 
-    per_second = if elapsed > 0, do: div(@steps * 1000, elapsed), else: :too_fast
+    per_second = if elapsed > 0, do: div(steps * 1000, elapsed), else: :too_fast
 
-    :erlang.display({:probe_steps, @steps})
+    :erlang.display({:probe_steps, steps})
     :erlang.display({:probe_elapsed_ms, elapsed})
     :erlang.display({:probe_instructions_per_second, per_second})
     :ok
