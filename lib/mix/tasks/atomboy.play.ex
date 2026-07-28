@@ -33,7 +33,17 @@ defmodule Mix.Tasks.Atomboy.Play do
     * `--frames N` — s'arrêter après N frames (essais sans clavier).
     * `--son` / `--no-son` — forcer ou couper le son (défaut : actif en
       interactif si ffplay est installé — `brew install ffmpeg`).
+    * `--palette dmg|gris` — le vert de la dalle d'origine (défaut) ou les
+      gris neutres.
     * `--dump f.pgm` — écrire la dernière frame en image à la sortie.
+
+  ## En jeu
+
+    * `s` fige la machine entière dans un `.state` à côté de la ROM,
+      `r` la ranime — sauver avant un boss, réessayer à l'infini.
+    * `Tab` bascule l'avance rapide (rendu 1/4, son coupé) — les intros
+      passent en secondes.
+    * `p` met en pause.
 
   L'affichage demande 160 colonnes sur 73 lignes — réduire la police
   (Cmd -) suffit généralement.
@@ -45,8 +55,22 @@ defmodule Mix.Tasks.Atomboy.Play do
   def run(args) do
     {opts, argv} =
       OptionParser.parse!(args,
-        strict: [hold: :integer, frames: :integer, dump: :string, son: :boolean]
+        strict: [
+          hold: :integer,
+          frames: :integer,
+          dump: :string,
+          son: :boolean,
+          palette: :string
+        ]
       )
+
+    opts =
+      case Keyword.get(opts, :palette) do
+        nil -> opts
+        "dmg" -> Keyword.put(opts, :palette, :dmg)
+        "gris" -> Keyword.put(opts, :palette, :gris)
+        autre -> Mix.raise("palette inconnue : #{autre} (dmg ou gris)")
+      end
 
     rom =
       case argv do

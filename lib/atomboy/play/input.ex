@@ -34,12 +34,28 @@ defmodule Atomboy.Play.Input do
       c                B
       Entrée           Start
       Espace           Select
+      s / r            sauver / reprendre l'état
+      Tab              turbo (avance rapide)
+      p                pause
       q, Échap (kitty) ou Ctrl-C    quitter
   """
 
   import Bitwise
 
-  @type key :: :up | :down | :left | :right | :a | :b | :start | :select | :quit
+  @type key ::
+          :up
+          | :down
+          | :left
+          | :right
+          | :a
+          | :b
+          | :start
+          | :select
+          | :quit
+          | :save_state
+          | :load_state
+          | :turbo
+          | :pause
   @type event ::
           {:key, key()}
           | {:press, key()}
@@ -50,7 +66,18 @@ defmodule Atomboy.Play.Input do
   @arrows %{?A => :up, ?B => :down, ?C => :right, ?D => :left}
 
   # Codes CSI-u : le point de code de la touche, minuscule.
-  @codes %{?x => :a, ?c => :b, 13 => :start, ?\s => :select, ?q => :quit, 27 => :quit}
+  @codes %{
+    ?x => :a,
+    ?c => :b,
+    13 => :start,
+    ?\s => :select,
+    ?q => :quit,
+    27 => :quit,
+    ?s => :save_state,
+    ?r => :load_state,
+    9 => :turbo,
+    ?p => :pause
+  }
 
   @doc """
   Décode le tampon en événements. Renvoie `{événements, reste}` — le reste
@@ -90,6 +117,17 @@ defmodule Atomboy.Play.Input do
 
   defp decode(<<c, rest::binary>>, events) when c in [?q, ?Q, 0x03],
     do: decode(rest, [{:key, :quit} | events])
+
+  defp decode(<<c, rest::binary>>, events) when c in [?s, ?S],
+    do: decode(rest, [{:key, :save_state} | events])
+
+  defp decode(<<c, rest::binary>>, events) when c in [?r, ?R],
+    do: decode(rest, [{:key, :load_state} | events])
+
+  defp decode(<<?\t, rest::binary>>, events), do: decode(rest, [{:key, :turbo} | events])
+
+  defp decode(<<c, rest::binary>>, events) when c in [?p, ?P],
+    do: decode(rest, [{:key, :pause} | events])
 
   # Tout le reste du clavier : silence.
   defp decode(<<_, rest::binary>>, events), do: decode(rest, events)

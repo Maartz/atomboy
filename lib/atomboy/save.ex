@@ -69,4 +69,32 @@ defmodule Atomboy.Save do
   defp key(i), do: @sram_base + rem(i, @sram_size) + div(i, @sram_size) * 0x10000
 
   defp banks(ram), do: if(Map.get(ram, :mbc) == :mbc3, do: 4, else: 1)
+
+  # ── Les instantanés de machine ──────────────────────────────────────────────
+
+  @doc "Le chemin de l'instantané d'une ROM : même nom, extension .state."
+  @spec state_path(Path.t()) :: Path.t()
+  def state_path(rom_path), do: Path.rootname(rom_path) <> ".state"
+
+  @doc """
+  Fige la machine entière — CPU, mémoire, son — dans un fichier. Tout est
+  immuable : trois valeurs suffisent, term_to_binary fait le reste.
+  """
+  @spec write_state(Path.t(), {struct(), map(), struct()}) :: :ok
+  def write_state(path, {state, ram, apu}) do
+    File.write!(path, :erlang.term_to_binary({:atomboy_state, 1, state, ram, apu}, [:compressed]))
+  end
+
+  @doc "Ranime un instantané. `:error` sans fichier ou d'un autre format."
+  @spec read_state(Path.t()) :: {:ok, {struct(), map(), struct()}} | :error
+  def read_state(path) do
+    with {:ok, data} <- File.read(path),
+         {:atomboy_state, 1, state, ram, apu} <- :erlang.binary_to_term(data) do
+      {:ok, {state, ram, apu}}
+    else
+      _ -> :error
+    end
+  rescue
+    ArgumentError -> :error
+  end
 end

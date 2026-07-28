@@ -130,6 +130,11 @@ defmodule Atomboy.Play do
           max_frames: Keyword.get(opts, :frames, :infinity),
           hold_frames: Keyword.get(opts, :hold, @default_hold),
           dump: Keyword.get(opts, :dump),
+          state_path: Path.rootname(sav) <> ".state",
+          palette: Keyword.get(opts, :palette, :dmg),
+          turbo: false,
+          paused: false,
+          note: nil,
           last_frame: nil,
           fps: 0.0,
           fps_mark: System.monotonic_time(:microsecond),
@@ -176,45 +181,88 @@ defmodule Atomboy.Play do
     if Enum.any?(events, &match?({tag, :quit} when tag != :release, &1)) do
       finish(ctx)
     else
-      ctx = Enum.reduce(events, ctx, &apply_event/2)
-      held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
-      ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
+      ctx = Enum.reduce(events, %{ctx | pending: pending}, &apply_event/2)
 
-      {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, true)
-      {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
-      IO.write(["\e[H", crlf(Screen.to_text(pixels)), status(ctx, ram, held)])
+      if ctx.paused do
+        # En pause, la machine dort — l'écran reste, le clavier veille.
+        if ctx.last_frame do
+          IO.write([
+            "\e[H",
+            crlf(Screen.to_text(ctx.last_frame, ctx.palette)),
+            status(ctx, ctx.ram, [])
+          ])
+        end
 
-      # La cadence par échéancier absolu : chaque excès de sommeil se reprend
-      # à la frame suivante, le débit long terme est exactement 59,7275 Hz —
-      # la condition pour que la production d'échantillons suive ffplay, qui
-      # consomme au vrai 32 768 Hz. Une cadence relative dérive de ~0,7 % et
-      # affame le tampon audio en une demi-minute. Après un blocage franc
-      # (> 100 ms), l'échéancier se recale : pas de sprint de rattrapage.
-      now = System.monotonic_time(:microsecond)
-      deadline = max(ctx.deadline, now - 100_000)
-      if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
-
-      hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
-
-      # L'autosauvegarde : la pile de la cartouche n'attend pas la sortie.
-      ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
-
-      ctx = %{
-        ctx
-        | state: state,
-          ram: ram,
-          hold: hold,
-          apu: apu,
-          audio: audio,
-          pending: pending,
-          frame: ctx.frame + 1,
-          deadline: deadline + @frame_us,
-          last_frame: pixels
-      }
-
-      loop(measure_fps(ctx))
+        Process.sleep(50)
+        loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
+      else
+        step(ctx)
+      end
     end
   end
+
+  defp step(ctx) do
+    held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
+    ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
+
+    # En turbo, une frame sur quatre s'affiche — le rendu est le coût.
+    render? = not ctx.turbo or rem(ctx.frame, 4) == 0
+    {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, render?)
+
+    {ram, apu, audio} =
+      if ctx.turbo do
+        # Le son ne suit pas l'avance rapide : le tampon d'ffplay déborderait.
+        {Map.delete(ram, :apu_triggers), ctx.apu, ctx.audio}
+      else
+        sound(ram, ctx.apu, ctx.audio)
+      end
+
+    if render? do
+      IO.write(["\e[H", crlf(Screen.to_text(pixels, ctx.palette)), status(ctx, ram, held)])
+    end
+
+    # La cadence par échéancier absolu : chaque excès de sommeil se reprend
+    # à la frame suivante, le débit long terme est exactement 59,7275 Hz —
+    # la condition pour que la production d'échantillons suive ffplay, qui
+    # consomme au vrai 32 768 Hz. Une cadence relative dérive de ~0,7 % et
+    # affame le tampon audio en une demi-minute. Après un blocage franc
+    # (> 100 ms), l'échéancier se recale : pas de sprint de rattrapage.
+    # Le turbo suspend l'échéancier — l'émulation file aussi vite que le BEAM.
+    deadline =
+      if ctx.turbo do
+        ctx.deadline
+      else
+        now = System.monotonic_time(:microsecond)
+        deadline = max(ctx.deadline, now - 100_000)
+        if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+        deadline + @frame_us
+      end
+
+    hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
+
+    # L'autosauvegarde : la pile de la cartouche n'attend pas la sortie.
+    ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
+
+    ctx = %{
+      ctx
+      | state: state,
+        ram: ram,
+        hold: hold,
+        apu: apu,
+        audio: audio,
+        frame: ctx.frame + 1,
+        deadline: deadline,
+        note: fade(ctx.note),
+        last_frame: if(render?, do: pixels, else: ctx.last_frame)
+    }
+
+    loop(measure_fps(ctx))
+  end
+
+  # Le message éphémère de la ligne de statut s'éteint de lui-même.
+  defp fade({_text, 0}), do: nil
+  defp fade({text, left}), do: {text, left - 1}
+  defp fade(nil), do: nil
 
   # La frame de son suit la frame d'image ; un lecteur disparu coupe le son
   # sans arrêter la partie. Sans lecteur, les déclenchements capturés se
@@ -235,6 +283,34 @@ defmodule Atomboy.Play do
   # La réponse à la requête kitty : le terminal parle le protocole. L'état
   # réel n'est fiable qu'avec les relâchements (bit 2 des flags).
   defp apply_event({:kitty, flags}, ctx), do: %{ctx | kitty: Bitwise.band(flags, 2) != 0}
+
+  # Les actions — au front montant seulement : presse ou frappe, jamais la
+  # répétition (un p tenu ne doit pas faire clignoter la pause).
+  defp apply_event({tag, :save_state}, ctx) when tag in [:key, :press] do
+    Save.write_state(ctx.state_path, {ctx.state, ctx.ram, ctx.apu})
+    %{ctx | note: {"état sauvé", 120}}
+  end
+
+  defp apply_event({tag, :load_state}, ctx) when tag in [:key, :press] do
+    case Save.read_state(ctx.state_path) do
+      {:ok, {state, ram, apu}} ->
+        %{ctx | state: state, ram: ram, apu: apu, note: {"état repris", 120}}
+
+      :error ->
+        %{ctx | note: {"aucun état à reprendre", 120}}
+    end
+  end
+
+  defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press] do
+    %{ctx | turbo: not ctx.turbo, deadline: System.monotonic_time(:microsecond) + @frame_us}
+  end
+
+  defp apply_event({tag, :pause}, ctx) when tag in [:key, :press],
+    do: %{ctx | paused: not ctx.paused}
+
+  defp apply_event({_tag, key}, ctx)
+       when key in [:save_state, :load_state, :turbo, :pause],
+       do: ctx
 
   defp apply_event({:release, key}, %{kitty: true} = ctx),
     do: %{ctx | down: MapSet.delete(ctx.down, key), hold: Map.delete(ctx.hold, key)}
@@ -293,10 +369,19 @@ defmodule Atomboy.Play do
     bank = div(Map.get(ram, :rom_bank_base, 0x4000), 0x4000)
     keys = if held == [], do: "", else: " · " <> Enum.map_join(held, " ", &Atom.to_string/1)
 
+    note =
+      case ctx.note do
+        {text, _left} -> " · #{text}"
+        nil -> ""
+      end
+
     [
-      "\e[0m flèches ✚ · x A · c B · ⏎ Start · ␣ Select · q quitte    ",
+      "\e[0m ✚ flèches · x A · c B · ⏎ Start · ␣ Select · s/r état · ⇥ turbo · p pause · q quitte   ",
       :io_lib.format(~c"~5.1f fps · banque ~2..0B", [ctx.fps, bank]),
       if(ctx.audio, do: " · ♪", else: ""),
+      if(ctx.turbo, do: " · »»", else: ""),
+      if(ctx.paused, do: " · ⏸ pause", else: ""),
+      note,
       keys,
       "\e[K"
     ]

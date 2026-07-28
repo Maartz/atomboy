@@ -159,10 +159,10 @@ defmodule Atomboy.Screen do
   majoritaires sur une frame de jeu, coûtent un octet par cellule. C'est ce
   qui laisse un terminal suivre 60 frames par seconde.
   """
-  @spec to_text(PPU.frame()) :: String.t()
-  def to_text(frame) do
+  @spec to_text(PPU.frame(), :gris | :dmg) :: String.t()
+  def to_text(frame, palette \\ :gris) do
     {width, height} = PPU.dimensions()
-    grays = {255, 250, 243, 236}
+    colors = colors(palette)
 
     rows =
       for row <- 0..(div(height, 2) - 1) do
@@ -171,14 +171,14 @@ defmodule Atomboy.Screen do
 
         {cells, _} =
           Enum.map_reduce(0..(width - 1), nil, fn x, prev ->
-            fg = elem(grays, :binary.at(top, x))
-            bg = elem(grays, :binary.at(bottom, x))
+            fg = elem(colors, :binary.at(top, x))
+            bg = elem(colors, :binary.at(bottom, x))
             pair = {fg, bg}
 
             if pair == prev do
               {"▀", prev}
             else
-              {"\e[38;5;#{fg};48;5;#{bg}m▀", pair}
+              {"\e[38;#{fg};48;#{bg}m▀", pair}
             end
           end)
 
@@ -186,6 +186,14 @@ defmodule Atomboy.Screen do
       end
 
     IO.iodata_to_binary(rows)
+  end
+
+  # Les teintes précompilées en paramètres SGR : 256 couleurs pour les gris,
+  # truecolor pour le vert de la dalle DMG d'origine.
+  defp colors(:gris), do: {"5;255", "5;250", "5;243", "5;236"}
+
+  defp colors(:dmg) do
+    {"2;155;188;15", "2;139;172;15", "2;48;98;48", "2;15;56;15"}
   end
 
   @doc """

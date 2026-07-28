@@ -49,6 +49,24 @@ defmodule Atomboy.SaveTest do
     refute Map.has_key?(ram, 0xC000)
   end
 
+  test "un instantané fige et ranime la machine entière", %{tmp_dir: dir} do
+    path = Path.join(dir, "boss.state")
+    state = %State{pc: 0x1234, a: 0x42}
+    ram = %{0xC000 => 7, :rom_banks => 2}
+    apu = %Atomboy.APU{seq_step: 3}
+
+    Save.write_state(path, {state, ram, apu})
+    assert {:ok, {^state, ^ram, ^apu}} = Save.read_state(path)
+  end
+
+  test "un instantané absent ou corrompu rend :error", %{tmp_dir: dir} do
+    assert Save.read_state(Path.join(dir, "absent.state")) == :error
+
+    corrompu = Path.join(dir, "corrompu.state")
+    File.write!(corrompu, "pas un terme erlang")
+    assert Save.read_state(corrompu) == :error
+  end
+
   test "le jeu qui écrit sa SRAM marque la map à sauver" do
     # LD A,0x0A ; LD (0x0000),A — déverrouille la RAM cartouche.
     # LD A,0x42 ; LD (0xA000),A — écrit un octet de sauvegarde.

@@ -57,6 +57,15 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("\e[?1u") == {[{:kitty, 1}], ""}
   end
 
+  test "les touches d'action se décodent" do
+    assert Input.decode("s") == {[{:key, :save_state}], ""}
+    assert Input.decode("r") == {[{:key, :load_state}], ""}
+    assert Input.decode("\t") == {[{:key, :turbo}], ""}
+    assert Input.decode("p") == {[{:key, :pause}], ""}
+    assert Input.decode("\e[115;1u") == {[{:press, :save_state}], ""}
+    assert Input.decode("\e[9;1u") == {[{:press, :turbo}], ""}
+  end
+
   test "les séquences inconnues s'ignorent" do
     assert Input.decode("\e[5~zk9") == {[], ""}
     assert Input.decode("\e[121;1u") == {[], ""}
