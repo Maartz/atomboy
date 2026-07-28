@@ -39,7 +39,6 @@ defmodule Atomboy.CPU.Loop do
   import Bitwise
 
   alias Atomboy.CPU.Gen
-  alias Atomboy.CPU.Insn
   alias Atomboy.CPU.State
   alias Atomboy.CPU.Table
 
@@ -138,95 +137,18 @@ defmodule Atomboy.CPU.Loop do
     )
   end
 
-  # ── Les clauses ─────────────────────────────────────────────────────────────
+  # ── Le dispatch ─────────────────────────────────────────────────────────────
   #
-  # Rien à lire ici — même table que l'oracle, autre émetteur.
+  # Un arbre à deux étages émis par Gen — voir son commentaire sur le
+  # select_val linéaire du JIT. 0xCB fetch le second octet et redispatche vers
+  # exec_cb, même arbre sur la table étendue.
 
-  for %Insn{prefix: nil} = insn <- Table.base() do
-    {args, body} = Gen.loop_clause(insn)
-
-    defp exec(unquote(insn.opcode), unquote_splicing(args)) do
-      unquote(body)
-    end
+  defp exec(unquote_splicing(Gen.head_args(:loop))) do
+    unquote(Gen.loop_dispatch(Table.base(), [Gen.loop_cb_entry()], Gen.unimplemented(nil)))
   end
 
-  # Le préfixe CB : second fetch, seconde table de dispatch, mêmes appels
-  # terminaux vers le fetch principal en sortie de clause.
-  defp exec(0xCB, rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, pending) do
-    exec_cb(
-      mem_read(rom, ram, pc),
-      rom,
-      ram,
-      budget,
-      cycles,
-      a,
-      f,
-      b,
-      c,
-      d,
-      e,
-      h,
-      l,
-      sp,
-      pc + 1 &&& 0xFFFF,
-      ime,
-      halted,
-      pending
-    )
-  end
-
-  for %Insn{prefix: :cb} = insn <- Table.extended() do
-    {args, body} = Gen.loop_clause(insn)
-
-    defp exec_cb(unquote(insn.opcode), unquote_splicing(args)) do
-      unquote(body)
-    end
-  end
-
-  defp exec(
-         opcode,
-         _rom,
-         _ram,
-         _budget,
-         _cycles,
-         _a,
-         _f,
-         _b,
-         _c,
-         _d,
-         _e,
-         _h,
-         _l,
-         _sp,
-         _pc,
-         _ime,
-         _halted,
-         _ime_pending
-       ) do
-    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
-  end
-
-  defp exec_cb(
-         opcode,
-         _rom,
-         _ram,
-         _budget,
-         _cycles,
-         _a,
-         _f,
-         _b,
-         _c,
-         _d,
-         _e,
-         _h,
-         _l,
-         _sp,
-         _pc,
-         _ime,
-         _halted,
-         _ime_pending
-       ) do
-    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb
+  defp exec_cb(unquote_splicing(Gen.head_args(:loop))) do
+    unquote(Gen.loop_dispatch(Table.extended(), [], Gen.unimplemented(:cb)))
   end
 
   # ── Mémoire ─────────────────────────────────────────────────────────────────

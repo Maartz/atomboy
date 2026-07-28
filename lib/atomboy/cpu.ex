@@ -76,53 +76,25 @@ defmodule Atomboy.CPU do
     exec(opcode, %{st | pc: pc + 1 &&& 0xFFFF}, mem)
   end
 
-  # ── Les clauses ─────────────────────────────────────────────────────────────
+  # ── Le dispatch ─────────────────────────────────────────────────────────────
   #
   # Rien à lire ici : la description des instructions est dans
-  # `Atomboy.CPU.Table`, leur traduction en code dans `Atomboy.CPU.Gen`. Ce bloc
-  # ne fait que poser les clauses produites.
+  # `Atomboy.CPU.Table`, leur traduction en code dans `Atomboy.CPU.Gen`. Le
+  # dispatch est un arbre à deux étages, pas des clauses plates — voir le
+  # commentaire de Gen sur le select_val linéaire du JIT d'AtomVM. 0xCB y est
+  # une entrée comme une autre, qui fetch le second octet et redispatche.
+
+  for %Insn{prefix: nil} = insn <- Table.base(), do: @implemented({nil, insn.opcode})
+  @implemented {nil, 0xCB}
+  for %Insn{prefix: :cb} = insn <- Table.extended(), do: @implemented({:cb, insn.opcode})
 
   @doc false
-  def exec(opcode, state, mem)
-
-  for %Insn{prefix: nil} = insn <- Table.base() do
-    @implemented {nil, insn.opcode}
-    {args, body} = Gen.clause(insn)
-
-    def exec(unquote(insn.opcode), unquote_splicing(args)) do
-      unquote(body)
-    end
+  def exec(unquote_splicing(Gen.head_args(:struct))) do
+    unquote(Gen.struct_dispatch(Table.base(), [Gen.struct_cb_entry()], Gen.unimplemented(nil)))
   end
 
-  # ── La table étendue ────────────────────────────────────────────────────────
-  #
-  # 0xCB est un préfixe : le vrai opcode est l'octet suivant, décodé par une
-  # seconde table de clauses. Les cycles des clauses CB incluent le fetch du
-  # préfixe — rien à additionner ici.
-
-  @implemented {nil, 0xCB}
-  def exec(0xCB, %State{pc: pc} = st, mem) do
-    cb_opcode = @mem.read8(mem, pc)
-    exec_cb(cb_opcode, %{st | pc: pc + 1 &&& 0xFFFF}, mem)
-  end
-
-  # ── Filet ───────────────────────────────────────────────────────────────────
-
-  def exec(opcode, _state, _mem) do
-    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
-  end
-
-  for %Insn{prefix: :cb} = insn <- Table.extended() do
-    @implemented {:cb, insn.opcode}
-    {args, body} = Gen.clause(insn)
-
-    defp exec_cb(unquote(insn.opcode), unquote_splicing(args)) do
-      unquote(body)
-    end
-  end
-
-  defp exec_cb(opcode, _state, _mem) do
-    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb
+  defp exec_cb(unquote_splicing(Gen.head_args(:struct))) do
+    unquote(Gen.struct_dispatch(Table.extended(), [], Gen.unimplemented(:cb)))
   end
 
   @doc """

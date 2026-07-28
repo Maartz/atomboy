@@ -1300,6 +1300,117 @@ defmodule Atomboy.CPU.Gen do
     vars
   end
 
+  # ══ Dispatch arborescent ═════════════════════════════════════════════════════
+  #
+  # Le JIT d'AtomVM compile un `select_val` en balayage linéaire — un appel de
+  # fonction C de comparaison par entrée. Sur 245 clauses plates, le coût du
+  # dispatch est proportionnel à la position de l'opcode : mesuré ×10,6 entre
+  # un programme de NOP (première entrée) et un programme d'OR A (~180e).
+  #
+  # D'où l'arbre à deux étages : `case opcode >>> 4` puis `case opcode &&& 15`.
+  # Deux selects de 16 entrées au plus — pire cas ~32 comparaisons au lieu de
+  # 245, moyenne ~17 au lieu de ~120. Le jour où le JIT saura émettre une table
+  # de saut, il suffira de revenir aux clauses plates ici.
+
+  @doc """
+  Le corps d'un `exec` de boucle rapide : l'arbre de dispatch complet sur les
+  instructions données, plus les entrées supplémentaires (le préfixe CB), avec
+  `fallback` comme branche par défaut.
+  """
+  @spec loop_dispatch([Insn.t()], [{0..0xFF, Macro.t()}], Macro.t()) :: Macro.t()
+  def loop_dispatch(insns, extra_entries, fallback) do
+    entries = Enum.map(insns, fn insn -> {insn.opcode, loop_body(insn)} end) ++ extra_entries
+    dispatch_tree(entries, fallback)
+  end
+
+  @doc "Le pendant backend struct de `loop_dispatch/3`."
+  @spec struct_dispatch([Insn.t()], [{0..0xFF, Macro.t()}], Macro.t()) :: Macro.t()
+  def struct_dispatch(insns, extra_entries, fallback) do
+    entries = Enum.map(insns, fn insn -> {insn.opcode, struct_body(insn)} end) ++ extra_entries
+    dispatch_tree(entries, fallback)
+  end
+
+  @doc "L'entrée 0xCB d'une boucle rapide : second fetch, dispatch vers exec_cb."
+  @spec loop_cb_entry() :: {0xCB, Macro.t()}
+  def loop_cb_entry do
+    first = quote do: mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:pc)))
+    bumped = quote do: Bitwise.band(unquote(var(:pc)) + 1, 0xFFFF)
+
+    rest =
+      [var(:rom), var(:ram), var(:budget), var(:cycles)] ++
+        Enum.map([:a, :f, :b, :c, :d, :e, :h, :l, :sp], &var/1) ++
+        [bumped | Enum.map(@loop_extra, &var/1)]
+
+    {0xCB, quote(do: exec_cb(unquote_splicing([first | rest])))}
+  end
+
+  @doc "L'entrée 0xCB du backend struct."
+  @spec struct_cb_entry() :: {0xCB, Macro.t()}
+  def struct_cb_entry do
+    body =
+      quote do
+        exec_cb(
+          mem_read_pc(unquote(var(:mem)), unquote(var(:st))),
+          %{unquote(var(:st)) | pc: Bitwise.band(unquote(field(:pc)) + 1, 0xFFFF)},
+          unquote(var(:mem))
+        )
+      end
+
+    {0xCB, body}
+  end
+
+  @doc "La branche par défaut : opcode hors table."
+  @spec unimplemented(nil | :cb) :: Macro.t()
+  def unimplemented(prefix) do
+    quote do
+      raise(Atomboy.CPU.Unimplemented, opcode: unquote(var(:opcode)), prefix: unquote(prefix))
+    end
+  end
+
+  @doc "Les arguments de tête d'un `exec` — opcode inclus, contexte nil partout."
+  @spec head_args(:loop | :struct) :: [Macro.t()]
+  def head_args(:loop) do
+    Enum.map([:opcode, :rom, :ram, :budget, :cycles] ++ @state ++ @loop_extra, &var/1)
+  end
+
+  def head_args(:struct), do: [var(:opcode), var(:st), var(:mem)]
+
+  # Recherche binaire en `if <` purs — profondeur log2(n), comparaisons
+  # entières que le JIT compile en tests inline. La première version en `case`
+  # imbriqués (16×16) compilait juste sur BEAM mais était mal traduite par le
+  # JIT natif : un opcode implémenté tombait dans le fallback. Les selects sont
+  # donc bannis du dispatch, pas seulement raccourcis.
+  defp dispatch_tree(entries, fallback) do
+    entries
+    |> Enum.sort_by(fn {opcode, _body} -> opcode end)
+    |> search_tree(fallback)
+  end
+
+  # La feuille garde son test d'égalité : les trous de la table — les onze
+  # encodages invalides — doivent tomber dans le fallback.
+  defp search_tree([{opcode, body}], fallback) do
+    quote do
+      if unquote(var(:opcode)) === unquote(opcode) do
+        unquote(body)
+      else
+        unquote(fallback)
+      end
+    end
+  end
+
+  defp search_tree(entries, fallback) do
+    {left, right} = Enum.split(entries, div(length(entries), 2))
+    [{pivot, _body} | _rest] = right
+
+    quote do
+      if unquote(var(:opcode)) < unquote(pivot) do
+        unquote(search_tree(left, fallback))
+      else
+        unquote(search_tree(right, fallback))
+      end
+    end
+  end
+
   # ══ Commun ═══════════════════════════════════════════════════════════════════
 
   # Les moitiés d'une paire 16 bits. SP n'y figure pas : il vit déjà en un
