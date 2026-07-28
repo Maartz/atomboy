@@ -44,6 +44,7 @@ defmodule Atomboy.CPU.Table do
       acc_block() ++
       stack_block() ++
       jump_block() ++
+      alu_imm_block() ++
       pair_block() ++ inc_dec_block() ++ load_imm8_block() ++ load_block() ++ alu_block()
   end
 
@@ -68,7 +69,24 @@ defmodule Atomboy.CPU.Table do
       # phase. À revisiter quand STOP fera vraiment quelque chose.
       %Insn{opcode: 0x10, mnemonic: :stop, cycles: 12},
       # LD (a16), SP — la seule écriture 16 bits directe du jeu d'instructions.
-      %Insn{opcode: 0x08, mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: 20}
+      %Insn{opcode: 0x08, mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: 20},
+      # HALT : 12 T dans le modèle du corpus, comme STOP.
+      %Insn{opcode: 0x76, mnemonic: :halt, cycles: 12},
+      %Insn{opcode: 0xF3, mnemonic: :di, cycles: 4},
+      # EI : l'autorisation est différée d'une instruction — le corpus le
+      # vérifie (ime inchangé sur le pas de l'EI). Voir ime_pending.
+      %Insn{opcode: 0xFB, mnemonic: :ei, cycles: 4},
+      %Insn{opcode: 0xF9, mnemonic: :ld, operands: [{:pair, :sp}, {:pair, :hl}], cycles: 8},
+      %Insn{opcode: 0xE8, mnemonic: :add_sp, operands: [{:pair, :sp}, {:imm, 8}], cycles: 16},
+      %Insn{opcode: 0xF8, mnemonic: :add_sp, operands: [{:pair, :hl}, {:imm, 8}], cycles: 12},
+      # La page haute 0xFF00 — les registres d'E/S. LDH via un octet immédiat,
+      # ou via C.
+      %Insn{opcode: 0xE0, mnemonic: :ldh, operands: [:a8_ind, {:reg, :a}], cycles: 12},
+      %Insn{opcode: 0xF0, mnemonic: :ldh, operands: [{:reg, :a}, :a8_ind], cycles: 12},
+      %Insn{opcode: 0xE2, mnemonic: :ldh, operands: [:c_ind, {:reg, :a}], cycles: 8},
+      %Insn{opcode: 0xF2, mnemonic: :ldh, operands: [{:reg, :a}, :c_ind], cycles: 8},
+      %Insn{opcode: 0xEA, mnemonic: :ld, operands: [:a16_ind, {:reg, :a}], cycles: 16},
+      %Insn{opcode: 0xFA, mnemonic: :ld, operands: [{:reg, :a}, :a16_ind], cycles: 16}
     ]
   end
 
@@ -305,6 +323,17 @@ defmodule Atomboy.CPU.Table do
   # Les huit opérations, dans l'ordre du champ `y`. Cet ordre n'est pas un choix
   # de ce projet : c'est l'encodage du silicium.
   @alu {:add, :adc, :sub, :sbc, :and, :xor, :or, :cp}
+
+  defp alu_imm_block do
+    for y <- 0..7 do
+      %Insn{
+        opcode: 0xC6 + y * 8,
+        mnemonic: elem(@alu, y),
+        operands: [{:reg, :a}, {:imm, 8}],
+        cycles: 8
+      }
+    end
+  end
 
   defp alu_block do
     for y <- 0..7, z <- 0..7 do

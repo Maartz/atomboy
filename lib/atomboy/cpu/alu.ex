@@ -166,6 +166,22 @@ defmodule Atomboy.CPU.ALU do
     {sum &&& 0xFFFF, (f &&& @z) ||| half ||| carry}
   end
 
+  @doc """
+  ADD SP, r8 et LD HL, SP+r8 — l'addition d'offset signé à SP.
+
+  Les drapeaux les plus contre-intuitifs du processeur : opération 16 bits,
+  drapeaux calculés **sur l'octet bas comme une addition 8 bits non signée** —
+  H au bit 3, C au bit 7 — et Z toujours effacé, même quand le résultat est
+  nul. L'offset est signé pour le résultat, non signé pour les drapeaux.
+  """
+  @spec add_sp(0..0xFFFF, byte8()) :: {0..0xFFFF, byte8()}
+  def add_sp(sp, offset) do
+    half = if (sp &&& 0x0F) + (offset &&& 0x0F) > 0x0F, do: @h, else: 0
+    carry = if (sp &&& 0xFF) + offset > 0xFF, do: @c, else: 0
+    signed = offset - bsl(bsr(offset, 7), 8)
+    {sp + signed &&& 0xFFFF, half ||| carry}
+  end
+
   # ── Opérations sur l'accumulateur seul (colonne z=7 de la table) ────────────
   #
   # Toutes de signature `(a, f) → {a, f}`, même celles qui n'utilisent pas l'un

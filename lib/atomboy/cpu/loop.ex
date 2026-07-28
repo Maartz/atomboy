@@ -57,7 +57,7 @@ defmodule Atomboy.CPU.Loop do
   """
   @spec run(State.t(), rom(), ram(), pos_integer()) :: {State.t(), ram(), non_neg_integer()}
   def run(%State{} = st, rom, ram, budget) when byte_size(rom) == 0x10000 do
-    {{a, f, b, c, d, e, h, l, sp, pc, ime}, ram, cycles} =
+    {{a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending}, ram, cycles} =
       fetch(
         rom,
         ram,
@@ -73,19 +73,40 @@ defmodule Atomboy.CPU.Loop do
         st.l,
         st.sp,
         st.pc,
-        st.ime
+        st.ime,
+        st.halted,
+        st.ime_pending
       )
 
-    {%{st | a: a, f: f, b: b, c: c, d: d, e: e, h: h, l: l, sp: sp, pc: pc, ime: ime}, ram,
-     cycles}
+    {%{
+       st
+       | a: a,
+         f: f,
+         b: b,
+         c: c,
+         d: d,
+         e: e,
+         h: h,
+         l: l,
+         sp: sp,
+         pc: pc,
+         ime: ime,
+         halted: halted,
+         ime_pending: ime_pending
+     }, ram, cycles}
   end
 
   # ── Fetch ───────────────────────────────────────────────────────────────────
 
   # Budget épuisé : matérialisation, l'unique construction de la boucle.
-  defp fetch(_rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime)
+  defp fetch(_rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending)
        when cycles >= budget do
-    {{a, f, b, c, d, e, h, l, sp, pc, ime}, ram, cycles}
+    {{a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending}, ram, cycles}
+  end
+
+  # La promotion d'un EI armé — même point que dans l'oracle : l'entrée du pas.
+  defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, _ime, halted, 1) do
+    fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, 1, halted, 0)
   end
 
   # Le fetch passe par la même vue rom+ram que les lectures d'opérandes : la
@@ -94,7 +115,7 @@ defmodule Atomboy.CPU.Loop do
   # les programmes aléatoires s'auto-modifient. Le surcoût est un test de map
   # sur la ram des écritures ; le jour du vrai MMU, le découpage par région
   # (fetch ROM sans map, fetch RAM avec) se fera dans le générateur.
-  defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime) do
+  defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending) do
     exec(
       mem_read(rom, ram, pc),
       rom,
@@ -111,7 +132,9 @@ defmodule Atomboy.CPU.Loop do
       l,
       sp,
       pc + 1 &&& 0xFFFF,
-      ime
+      ime,
+      halted,
+      ime_pending
     )
   end
 
@@ -143,7 +166,9 @@ defmodule Atomboy.CPU.Loop do
          _l,
          _sp,
          _pc,
-         _ime
+         _ime,
+         _halted,
+         _ime_pending
        ) do
     raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
   end

@@ -64,6 +64,12 @@ defmodule Atomboy.CPU do
   @spec step(State.t(), Atomboy.Memory.t()) ::
           {State.t(), Atomboy.Memory.t(), pos_integer()}
   def step(%State{pc: pc} = st, mem) do
+    # L'armement d'un EI antérieur se promeut à l'entrée du pas suivant — même
+    # point que le fetch de la boucle rapide, pour que les deux backends
+    # restent indiscernables. La nuance matérielle (promotion après ce pas,
+    # pas avant) ne devient observable qu'avec le contrôleur d'interruptions.
+    st = if st.ime_pending == 1, do: %{st | ime: 1, ime_pending: 0}, else: st
+
     opcode = @mem.read8(mem, pc)
     # PC est avancé avant l'exécution : les clauses générées n'ont donc à s'en
     # occuper que si elles sautent, ce qui est le cas minoritaire.

@@ -43,6 +43,7 @@ defmodule Atomboy.CPU.State do
           sp: 0..0xFFFF,
           pc: 0..0xFFFF,
           ime: 0..1,
+          ime_pending: 0..1,
           ie: 0..0xFF,
           halted: boolean()
         }
@@ -58,6 +59,7 @@ defmodule Atomboy.CPU.State do
             sp: 0x0000,
             pc: 0x0000,
             ime: 0,
+            ime_pending: 0,
             ie: 0x00,
             halted: false
 

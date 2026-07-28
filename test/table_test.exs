@@ -38,10 +38,11 @@ defmodule Atomboy.CPU.TableTest do
     assert Enum.all?(Table.all(), &(&1.opcode in 0..0xFF))
   end
 
-  test "0x76 n'est pas décrit — l'encodage appartient à HALT" do
+  test "0x76 est HALT, pas LD (HL), (HL)" do
     # « LD (HL), (HL) » tomberait naturellement ici si la compréhension du bloc
-    # LD oubliait son exclusion.
-    refute Enum.any?(Table.base(), &(&1.opcode == 0x76))
+    # LD oubliait son exclusion — le doublon serait attrapé par le test
+    # d'unicité, mais celui-ci nomme la cause.
+    assert [%Insn{mnemonic: :halt}] = Enum.filter(Table.base(), &(&1.opcode == 0x76))
   end
 
   test "chaque instruction a un nom lisible" do

@@ -41,6 +41,8 @@ defmodule Atomboy.CPU.Insn do
       `:hl_dec` post-incrémentent ou décrémentent HL après l'accès
     * `:a16_ind` — la mémoire à l'adresse donnée par un mot immédiat
     * `{:rst, 0x28}` — la cible fixe d'un RST, encodée dans l'opcode
+    * `:a8_ind` — la page haute : 0xFF00 + un octet immédiat
+    * `:c_ind` — la page haute via C : 0xFF00 + C
   """
   @type operand ::
           {:reg, atom()}
@@ -51,6 +53,8 @@ defmodule Atomboy.CPU.Insn do
           | {:ind, :bc | :de | :hl_inc | :hl_dec}
           | :a16_ind
           | {:rst, 0..0x38}
+          | :a8_ind
+          | :c_ind
 
   @typedoc """
   Une condition de branchement, ou `nil` pour les instructions inconditionnelles.
@@ -106,6 +110,8 @@ defmodule Atomboy.CPU.Insn do
 
   defp operand(:hl_ind), do: "(HL)"
   defp operand(:a16_ind), do: "(a16)"
+  defp operand(:a8_ind), do: "(a8)"
+  defp operand(:c_ind), do: "(C)"
   defp operand({:imm, 8}), do: "d8"
   defp operand({:imm, 16}), do: "d16"
   defp operand({:ind, :hl_inc}), do: "(HL+)"
