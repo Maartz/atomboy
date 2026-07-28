@@ -129,7 +129,8 @@ defmodule Atomboy.Play do
           dump: Keyword.get(opts, :dump),
           last_frame: nil,
           fps: 0.0,
-          fps_mark: System.monotonic_time(:microsecond)
+          fps_mark: System.monotonic_time(:microsecond),
+          deadline: System.monotonic_time(:microsecond) + @frame_us
         })
       after
         Process.unlink(reader)
@@ -167,7 +168,6 @@ defmodule Atomboy.Play do
   defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: dump(ctx)
 
   defp loop(ctx) do
-    started = System.monotonic_time(:microsecond)
     {events, pending} = Input.decode(ctx.pending <> collect_input([]))
 
     if Enum.any?(events, &match?({tag, :quit} when tag != :release, &1)) do
@@ -181,9 +181,15 @@ defmodule Atomboy.Play do
       {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
       IO.write(["\e[H", crlf(Screen.to_text(pixels)), status(ctx, ram, held)])
 
+      # La cadence par échéancier absolu : chaque excès de sommeil se reprend
+      # à la frame suivante, le débit long terme est exactement 59,7275 Hz —
+      # la condition pour que la production d'échantillons suive ffplay, qui
+      # consomme au vrai 32 768 Hz. Une cadence relative dérive de ~0,7 % et
+      # affame le tampon audio en une demi-minute. Après un blocage franc
+      # (> 100 ms), l'échéancier se recale : pas de sprint de rattrapage.
       now = System.monotonic_time(:microsecond)
-      spare = @frame_us - (now - started)
-      if spare > 999, do: Process.sleep(div(spare, 1000))
+      deadline = max(ctx.deadline, now - 100_000)
+      if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
 
       hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
 
@@ -196,6 +202,7 @@ defmodule Atomboy.Play do
           audio: audio,
           pending: pending,
           frame: ctx.frame + 1,
+          deadline: deadline + @frame_us,
           last_frame: pixels
       }
 
