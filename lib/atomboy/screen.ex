@@ -101,6 +101,29 @@ defmodule Atomboy.Screen do
   """
   @spec step_line(State.t(), binary(), map(), 0..153) :: {State.t(), map()}
   def step_line(state, rom, ram, ly) do
+    ram = ppu_line(ram, ly, band(Map.get(ram, 0xFF40, 0x91), 0x80) != 0)
+    {state, ram, cycles} = CartLoop.run(state, rom, ram, @line_cycles)
+    {state, Atomboy.Timer.advance(ram, cycles)}
+  end
+
+  # Écran éteint : le PPU ne balaye plus. LY reste à zéro, aucun vblank, aucune
+  # coïncidence — le matériel arrête le générateur, pas seulement l'affichage.
+  #
+  # C'est un piège à conséquences lointaines : les jeux éteignent l'écran pour
+  # recharger la VRAM (Pokémon le fait à chaque changement de carte, escaliers
+  # compris) et continuent d'appeler leur moteur sonore depuis la boucle
+  # principale, interruptions ouvertes. Un vblank fantôme rappelle alors ce
+  # moteur par-dessus lui-même : son compteur de canaux, partagé, repart de
+  # zéro, la boucle extérieure ne s'arrête plus à huit, son pointeur de
+  # structure marche jusque dans la pile, et le CPU finit par exécuter du
+  # texte de dialogue — l'opcode illégal E3, à des secondes de sa cause.
+  defp ppu_line(ram, _ly, false) do
+    ram
+    |> Map.put(0xFF44, 0)
+    |> Map.put(0xFF41, band(Map.get(ram, 0xFF41, 0), 0xF8))
+  end
+
+  defp ppu_line(ram, ly, true) do
     ram = Map.put(ram, 0xFF44, ly)
 
     # L'entrée en vblank lève le bit 0 d'IF — l'interruption que les jeux
@@ -118,21 +141,17 @@ defmodule Atomboy.Screen do
     # dmg-acid2 s'endormait dessus.
     stat = Map.get(ram, 0xFF41, 0)
 
-    ram =
-      if ly == Map.get(ram, 0xFF45, 0) do
-        ram = Map.put(ram, 0xFF41, bor(stat, 0x04))
+    if ly == Map.get(ram, 0xFF45, 0) do
+      ram = Map.put(ram, 0xFF41, bor(stat, 0x04))
 
-        if band(stat, 0x40) != 0 do
-          Map.update(ram, 0xFF0F, 0x02, &bor(&1, 0x02))
-        else
-          ram
-        end
+      if band(stat, 0x40) != 0 do
+        Map.update(ram, 0xFF0F, 0x02, &bor(&1, 0x02))
       else
-        Map.put(ram, 0xFF41, band(stat, 0xFB))
+        ram
       end
-
-    {state, ram, cycles} = CartLoop.run(state, rom, ram, @line_cycles)
-    {state, Atomboy.Timer.advance(ram, cycles)}
+    else
+      Map.put(ram, 0xFF41, band(stat, 0xFB))
+    end
   end
 
   @doc """
