@@ -37,7 +37,10 @@ defmodule Atomboy.CPU.Table do
   La table de base, sans préfixe.
   """
   @spec base() :: [Insn.t()]
-  def base, do: misc() ++ load_imm8_block() ++ load_block() ++ alu_block()
+  def base do
+    misc() ++
+      pair_block() ++ inc_dec_block() ++ load_imm8_block() ++ load_block() ++ alu_block()
+  end
 
   @doc """
   La table étendue, préfixée par 0xCB. Vide pour l'instant.
@@ -53,6 +56,51 @@ defmodule Atomboy.CPU.Table do
 
   defp misc do
     [%Insn{opcode: 0x00, mnemonic: :nop, cycles: 4}]
+  end
+
+  # ── x=0 : les paires 16 bits ────────────────────────────────────────────────
+  #
+  # Le champ `p` (bits 5-4) désigne la paire : BC, DE, HL, SP. Quatre familles
+  # sur les colonnes basses : LD rr, d16 (z=1, q=0), ADD HL, rr (z=1, q=1),
+  # INC rr (z=3, q=0), DEC rr (z=3, q=1).
+
+  @pairs {:bc, :de, :hl, :sp}
+
+  defp pair(index), do: {:pair, elem(@pairs, index)}
+
+  defp pair_block do
+    for p <- 0..3 do
+      [
+        %Insn{opcode: p * 16 + 0x01, mnemonic: :ld, operands: [pair(p), {:imm, 16}], cycles: 12},
+        %Insn{
+          opcode: p * 16 + 0x09,
+          mnemonic: :add,
+          operands: [{:pair, :hl}, pair(p)],
+          cycles: 8
+        },
+        # INC/DEC 16 bits : aucun drapeau touché — contrairement à leurs
+        # homonymes 8 bits, et c'est le matériel qui veut ça.
+        %Insn{opcode: p * 16 + 0x03, mnemonic: :inc, operands: [pair(p)], cycles: 8},
+        %Insn{opcode: p * 16 + 0x0B, mnemonic: :dec, operands: [pair(p)], cycles: 8}
+      ]
+    end
+    |> List.flatten()
+  end
+
+  # ── x=0, z=4/z=5 : INC r / DEC r ────────────────────────────────────────────
+  #
+  # La cible occupe le champ `y`. La forme (HL) est un lu-modifié-écrit :
+  # 12 T-cycles (fetch, lecture, écriture) contre 4 pour un registre.
+
+  defp inc_dec_block do
+    for {mnemonic, z} <- [inc: 4, dec: 5], target <- 0..7 do
+      %Insn{
+        opcode: target * 8 + z,
+        mnemonic: mnemonic,
+        operands: [operand(target)],
+        cycles: if(target == 6, do: 12, else: 4)
+      }
+    end
   end
 
   # ── x=0, z=6 : LD r, d8 ─────────────────────────────────────────────────────

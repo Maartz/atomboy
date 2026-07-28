@@ -128,6 +128,44 @@ defmodule Atomboy.CPU.ALU do
     {result, zero(result)}
   end
 
+  @doc """
+  INC v — incrément. Pose Z et H, efface N, **préserve C** depuis `f`.
+
+  C'est le second piège classique après la demi-retenue : poser les quatre
+  drapeaux par réflexe. Sur le matériel, INC et DEC laissent la retenue
+  strictement intacte — le motif `OR A / INC / JR C` des jeux en dépend. D'où
+  la signature : `f` entre, pour que le bit C en ressorte.
+  """
+  @spec inc(byte8(), byte8()) :: result()
+  def inc(value, f) do
+    result = value + 1 &&& 0xFF
+    half = if (value &&& 0x0F) == 0x0F, do: @h, else: 0
+    {result, zero(result) ||| half ||| (f &&& @c)}
+  end
+
+  @doc "DEC v — décrément. Pose Z, N et H (emprunt), **préserve C**."
+  @spec dec(byte8(), byte8()) :: result()
+  def dec(value, f) do
+    result = value - 1 &&& 0xFF
+    half = if (value &&& 0x0F) == 0x00, do: @h, else: 0
+    {result, zero(result) ||| @n ||| half ||| (f &&& @c)}
+  end
+
+  @doc """
+  ADD HL, rr — addition 16 bits.
+
+  Le miroir inversé d'INC : ici c'est **Z qui est préservé** et C qui bouge.
+  H se calcule au bit 11 (retenue entre les deux quartets hauts du mot), C au
+  bit 15. N est effacé.
+  """
+  @spec add16(0..0xFFFF, 0..0xFFFF, byte8()) :: {0..0xFFFF, byte8()}
+  def add16(hl, value, f) do
+    sum = hl + value
+    half = if (hl &&& 0x0FFF) + (value &&& 0x0FFF) > 0x0FFF, do: @h, else: 0
+    carry = if sum > 0xFFFF, do: @c, else: 0
+    {sum &&& 0xFFFF, (f &&& @z) ||| half ||| carry}
+  end
+
   # ── Drapeaux ────────────────────────────────────────────────────────────────
 
   # La retenue entrante, ramenée à 0 ou 1.

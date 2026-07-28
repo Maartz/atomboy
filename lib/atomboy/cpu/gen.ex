@@ -96,6 +96,87 @@ defmodule Atomboy.CPU.Gen do
     struct_ret(struct_update(%{dst => struct_read(src)}), var(:mem), cycles)
   end
 
+  # LD rr, d16 — le mot immédiat, little-endian, PC avance de deux.
+  defp struct_body(%Insn{mnemonic: :ld, operands: [{:pair, _} = dst, {:imm, 16}], cycles: cycles}) do
+    imm = Macro.var(:imm, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(field(:pc)) + 2, 0xFFFF)
+    overrides = Map.merge(struct_pair_overrides(dst, imm), %{pc: bumped})
+
+    quote do
+      unquote(imm) = mem_read_pc16(unquote(var(:mem)), unquote(var(:st)))
+      unquote(struct_ret(struct_update(overrides), var(:mem), cycles))
+    end
+  end
+
+  # ADD HL, rr — l'unique addition 16 bits ; Z préservé, voir ALU.add16/3.
+  defp struct_body(%Insn{mnemonic: :add, operands: [{:pair, :hl}, src], cycles: cycles}) do
+    result = Macro.var(:result, __MODULE__)
+    f = Macro.var(:new_f, __MODULE__)
+
+    call =
+      quote do:
+              Atomboy.CPU.ALU.add16(
+                unquote(struct_pair_read({:pair, :hl})),
+                unquote(struct_pair_read(src)),
+                unquote(field(:f))
+              )
+
+    overrides = Map.merge(struct_pair_overrides({:pair, :hl}, result), %{f: f})
+
+    quote do
+      {unquote(result), unquote(f)} = unquote(call)
+      unquote(struct_ret(struct_update(overrides), var(:mem), cycles))
+    end
+  end
+
+  # INC rr / DEC rr — arithmétique 16 bits pure, aucun drapeau.
+  defp struct_body(%Insn{mnemonic: mnemonic, operands: [{:pair, _} = target], cycles: cycles})
+       when mnemonic in [:inc, :dec] do
+    result = Macro.var(:result, __MODULE__)
+    delta = if mnemonic == :inc, do: 1, else: -1
+
+    quote do
+      unquote(result) =
+        Bitwise.band(unquote(struct_pair_read(target)) + unquote(delta), 0xFFFF)
+
+      unquote(struct_ret(struct_update(struct_pair_overrides(target, result)), var(:mem), cycles))
+    end
+  end
+
+  # INC r / DEC r — C préservé, ce que les primitives assurent en recevant F.
+  defp struct_body(%Insn{mnemonic: mnemonic, operands: [{:reg, name}], cycles: cycles})
+       when mnemonic in [:inc, :dec] do
+    result = Macro.var(:result, __MODULE__)
+    f = Macro.var(:new_f, __MODULE__)
+    call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [field(name), field(:f)]}
+
+    quote do
+      {unquote(result), unquote(f)} = unquote(call)
+      unquote(struct_ret(struct_update(%{name => result, f: f}), var(:mem), cycles))
+    end
+  end
+
+  # INC (HL) / DEC (HL) — lu-modifié-écrit : la valeur passe par la mémoire
+  # dans les deux sens, seul F change dans l'état.
+  defp struct_body(%Insn{mnemonic: mnemonic, operands: [:hl_ind], cycles: cycles})
+       when mnemonic in [:inc, :dec] do
+    result = Macro.var(:result, __MODULE__)
+    f = Macro.var(:new_f, __MODULE__)
+    call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [struct_read(:hl_ind), field(:f)]}
+
+    quote do
+      {unquote(result), unquote(f)} = unquote(call)
+
+      unquote(
+        struct_ret(
+          struct_update(%{f: f}),
+          quote(do: mem_write(unquote(var(:mem)), unquote(var(:st)), unquote(result))),
+          cycles
+        )
+      )
+    end
+  end
+
   # ALU — l'arithmétique vit dans Atomboy.CPU.ALU, au niveau valeurs. Ici on ne
   # fait qu'envelopper le résultat dans la mise à jour de structure.
   defp struct_body(%Insn{mnemonic: :cp, operands: [{:reg, :a}, src], cycles: cycles}) do
@@ -125,6 +206,26 @@ defmodule Atomboy.CPU.Gen do
   end
 
   defp struct_read({:reg, name}), do: field(name)
+
+  defp struct_pair_read({:pair, :sp}), do: field(:sp)
+
+  defp struct_pair_read({:pair, name}) do
+    {hi, lo} = pair_regs(name)
+    quote do: Bitwise.bsl(unquote(field(hi)), 8) |> Bitwise.bor(unquote(field(lo)))
+  end
+
+  # Les surcharges d'état qui écrivent `value` — une expression déjà liée à
+  # une variable, jamais réévaluée — dans une paire.
+  defp struct_pair_overrides({:pair, :sp}, value), do: %{sp: value}
+
+  defp struct_pair_overrides({:pair, name}, value) do
+    {hi, lo} = pair_regs(name)
+
+    %{
+      hi => quote(do: Bitwise.bsr(unquote(value), 8)),
+      lo => quote(do: Bitwise.band(unquote(value), 0xFF))
+    }
+  end
 
   # `st.<name>`
   defp field(name), do: {{:., [], [var(:st), name]}, [no_parens: true], []}
@@ -196,6 +297,85 @@ defmodule Atomboy.CPU.Gen do
     loop_ret(%{dst => loop_read(src)}, var(:ram), cycles)
   end
 
+  # LD rr, d16 — deux lectures à PC, little-endian.
+  defp loop_body(%Insn{mnemonic: :ld, operands: [{:pair, _} = dst, {:imm, 16}], cycles: cycles}) do
+    imm = Macro.var(:imm, __MODULE__)
+    lo = Macro.var(:lo, __MODULE__)
+    hi = Macro.var(:hi, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(var(:pc)) + 2, 0xFFFF)
+    overrides = Map.merge(loop_pair_overrides(dst, imm), %{pc: bumped})
+
+    quote do
+      unquote(lo) = mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:pc)))
+
+      unquote(hi) =
+        mem_read(
+          unquote(var(:rom)),
+          unquote(var(:ram)),
+          Bitwise.band(unquote(var(:pc)) + 1, 0xFFFF)
+        )
+
+      unquote(imm) = Bitwise.bsl(unquote(hi), 8) |> Bitwise.bor(unquote(lo))
+      unquote(loop_ret(overrides, var(:ram), cycles))
+    end
+  end
+
+  # ADD HL, rr.
+  defp loop_body(%Insn{mnemonic: :add, operands: [{:pair, :hl}, src], cycles: cycles}) do
+    result = Macro.var(:result, __MODULE__)
+    f = Macro.var(:new_f, __MODULE__)
+
+    call =
+      quote do:
+              Atomboy.CPU.ALU.add16(
+                unquote(loop_pair_read({:pair, :hl})),
+                unquote(loop_pair_read(src)),
+                unquote(var(:f))
+              )
+
+    overrides = Map.merge(loop_pair_overrides({:pair, :hl}, result), %{f: f})
+
+    quote do
+      {unquote(result), unquote(f)} = unquote(call)
+      unquote(loop_ret(overrides, var(:ram), cycles))
+    end
+  end
+
+  # INC rr / DEC rr — aucun drapeau.
+  defp loop_body(%Insn{mnemonic: mnemonic, operands: [{:pair, _} = target], cycles: cycles})
+       when mnemonic in [:inc, :dec] do
+    result = Macro.var(:result, __MODULE__)
+    delta = if mnemonic == :inc, do: 1, else: -1
+
+    quote do
+      unquote(result) = Bitwise.band(unquote(loop_pair_read(target)) + unquote(delta), 0xFFFF)
+      unquote(loop_ret(loop_pair_overrides(target, result), var(:ram), cycles))
+    end
+  end
+
+  # INC r / DEC r et leurs formes (HL).
+  defp loop_body(%Insn{mnemonic: mnemonic, operands: [target], cycles: cycles})
+       when mnemonic in [:inc, :dec] do
+    result = Macro.var(:result, __MODULE__)
+    f = Macro.var(:new_f, __MODULE__)
+    call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [loop_read(target), var(:f)]}
+
+    tail =
+      case target do
+        {:reg, name} ->
+          loop_ret(%{name => result, f: f}, var(:ram), cycles)
+
+        :hl_ind ->
+          ram = quote do: ram_write(unquote(var(:ram)), unquote(hl()), unquote(result))
+          loop_ret(%{f: f}, ram, cycles)
+      end
+
+    quote do
+      {unquote(result), unquote(f)} = unquote(call)
+      unquote(tail)
+    end
+  end
+
   defp loop_body(%Insn{mnemonic: :cp, operands: [{:reg, :a}, src], cycles: cycles}) do
     f = Macro.var(:new_f, __MODULE__)
 
@@ -223,6 +403,24 @@ defmodule Atomboy.CPU.Gen do
   end
 
   defp loop_read({:reg, name}), do: var(name)
+
+  defp loop_pair_read({:pair, :sp}), do: var(:sp)
+
+  defp loop_pair_read({:pair, name}) do
+    {hi, lo} = pair_regs(name)
+    quote do: Bitwise.bsl(unquote(var(hi)), 8) |> Bitwise.bor(unquote(var(lo)))
+  end
+
+  defp loop_pair_overrides({:pair, :sp}, value), do: %{sp: value}
+
+  defp loop_pair_overrides({:pair, name}, value) do
+    {hi, lo} = pair_regs(name)
+
+    %{
+      hi => quote(do: Bitwise.bsr(unquote(value), 8)),
+      lo => quote(do: Bitwise.band(unquote(value), 0xFF))
+    }
+  end
 
   defp hl do
     quote do: Bitwise.bsl(unquote(var(:h)), 8) |> Bitwise.bor(unquote(var(:l)))
@@ -265,6 +463,12 @@ defmodule Atomboy.CPU.Gen do
   end
 
   # ══ Commun ═══════════════════════════════════════════════════════════════════
+
+  # Les moitiés d'une paire 16 bits. SP n'y figure pas : il vit déjà en un
+  # seul champ.
+  defp pair_regs(:bc), do: {:b, :c}
+  defp pair_regs(:de), do: {:d, :e}
+  defp pair_regs(:hl), do: {:h, :l}
 
   # L'appel ALU d'un mnémonique. `adc` et `sbc` consomment F entrant, les
   # autres non ; `and`/`or`/`xor` portent d'autres noms côté primitives parce
