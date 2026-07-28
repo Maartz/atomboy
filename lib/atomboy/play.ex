@@ -208,7 +208,17 @@ defmodule Atomboy.Play do
 
     # En turbo, une frame sur quatre s'affiche — le rendu est le coût.
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
-    {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, render?)
+
+    # Un opcode inconnu tue la partie, pas la progression : la pile de la
+    # cartouche est écrite avant de laisser filer le rapport de crash.
+    {pixels, state, ram} =
+      try do
+        Screen.frame(ctx.state, ctx.rom, ram, render?)
+      rescue
+        e in Atomboy.CPU.Unimplemented ->
+          Save.flush(ram, ctx.sav)
+          reraise e, __STACKTRACE__
+      end
 
     # Pendant le turbo le port audio est fermé : sound/3 jette les
     # déclenchements sans rien pousser.

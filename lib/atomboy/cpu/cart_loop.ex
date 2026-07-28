@@ -425,7 +425,16 @@ defmodule Atomboy.CPU.CartLoop do
   end
 
   defp rtc_now do
-    now = System.os_time(:second)
+    # ATOMBOY_RTC_OFFSET (secondes) décale l'horloge servie — l'outil des
+    # chasses aux bugs dépendants de l'heure, et du voyage dans le temps
+    # pour les baies.
+    offset =
+      case System.get_env("ATOMBOY_RTC_OFFSET") do
+        nil -> 0
+        v -> String.to_integer(v)
+      end
+
+    now = System.os_time(:second) + offset
     days = div(now, 86_400)
 
     %{
