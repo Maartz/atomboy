@@ -110,6 +110,7 @@ defmodule Atomboy.CPU do
   @compile {:inline,
             mem_read: 2,
             mem_read_at: 2,
+            mem_read16_at: 2,
             mem_read_pc: 2,
             mem_read_pc16: 2,
             mem_write: 3,
@@ -118,8 +119,9 @@ defmodule Atomboy.CPU do
 
   defp mem_read(mem, %State{h: h, l: l}), do: @mem.read8(mem, bsl(h, 8) ||| l)
 
-  # Accès à adresse calculée — les indirects (BC), (DE), (HL±), (a16).
+  # Accès à adresse calculée — les indirects (BC), (DE), (HL±), (a16), la pile.
   defp mem_read_at(mem, addr), do: @mem.read8(mem, addr)
+  defp mem_read16_at(mem, addr), do: @mem.read16(mem, addr)
   defp mem_write_at(mem, addr, value), do: @mem.write8(mem, addr, value)
   defp mem_write16_at(mem, addr, value), do: @mem.write16(mem, addr, value)
 

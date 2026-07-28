@@ -42,6 +42,7 @@ defmodule Atomboy.CPU.Table do
       indirect_block() ++
       jr_block() ++
       acc_block() ++
+      stack_block() ++
       pair_block() ++ inc_dec_block() ++ load_imm8_block() ++ load_block() ++ alu_block()
   end
 
@@ -194,6 +195,26 @@ defmodule Atomboy.CPU.Table do
         cycles: if(dst == 6, do: 12, else: 8)
       }
     end
+  end
+
+  # ── x=3 : la pile ───────────────────────────────────────────────────────────
+  #
+  # Les paires de pile remplacent SP par AF — pousser SP sur lui-même n'aurait
+  # aucun sens. PUSH coûte un M-cycle de plus que POP : le matériel décrémente
+  # SP avant d'écrire, et cette décrémentation a son propre cycle.
+
+  @stack_pairs {:bc, :de, :hl, :af}
+
+  defp stack_block do
+    for p <- 0..3 do
+      pair = {:pair, elem(@stack_pairs, p)}
+
+      [
+        %Insn{opcode: 0xC1 + p * 16, mnemonic: :pop, operands: [pair], cycles: 12},
+        %Insn{opcode: 0xC5 + p * 16, mnemonic: :push, operands: [pair], cycles: 16}
+      ]
+    end
+    |> List.flatten()
   end
 
   # ── x=1 : LD r, r' ──────────────────────────────────────────────────────────

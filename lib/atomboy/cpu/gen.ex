@@ -188,6 +188,36 @@ defmodule Atomboy.CPU.Gen do
     struct_ret(struct_update(%{dst => struct_read(src)}), var(:mem), cycles)
   end
 
+  # PUSH rr — SP descend de deux, la paire s'écrit little-endian au nouveau SP.
+  defp struct_body(%Insn{mnemonic: :push, operands: [pair], cycles: cycles}) do
+    new_sp = Macro.var(:new_sp, __MODULE__)
+
+    write =
+      quote do:
+              mem_write16_at(unquote(var(:mem)), unquote(new_sp), unquote(struct_pair_read(pair)))
+
+    quote do
+      unquote(new_sp) = Bitwise.band(unquote(field(:sp)) - 2, 0xFFFF)
+      unquote(struct_ret(struct_update(%{sp: new_sp}), write, cycles))
+    end
+  end
+
+  # POP rr — lecture au SP courant, SP remonte de deux. Voir pop_overrides/3
+  # pour le masque de POP AF.
+  defp struct_body(%Insn{mnemonic: :pop, operands: [pair], cycles: cycles}) do
+    value = Macro.var(:value, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(field(:sp)) + 2, 0xFFFF)
+
+    overrides =
+      pop_overrides(pair, value, &struct_pair_overrides/2)
+      |> Map.put(:sp, bumped)
+
+    quote do
+      unquote(value) = mem_read16_at(unquote(var(:mem)), unquote(field(:sp)))
+      unquote(struct_ret(struct_update(overrides), var(:mem), cycles))
+    end
+  end
+
   # Les opérations sur l'accumulateur (z=7) — signature uniforme (a, f) → {a, f}
   # côté ALU, donc une seule clause pour les huit.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [], cycles: cycles})
@@ -504,6 +534,53 @@ defmodule Atomboy.CPU.Gen do
     loop_ret(%{dst => loop_read(src)}, var(:ram), cycles)
   end
 
+  # PUSH rr.
+  defp loop_body(%Insn{mnemonic: :push, operands: [pair], cycles: cycles}) do
+    new_sp = Macro.var(:new_sp, __MODULE__)
+    value = Macro.var(:value, __MODULE__)
+
+    ram =
+      quote do
+        ram_write(
+          ram_write(unquote(var(:ram)), unquote(new_sp), Bitwise.band(unquote(value), 0xFF)),
+          Bitwise.band(unquote(new_sp) + 1, 0xFFFF),
+          Bitwise.bsr(unquote(value), 8)
+        )
+      end
+
+    quote do
+      unquote(value) = unquote(loop_pair_read(pair))
+      unquote(new_sp) = Bitwise.band(unquote(var(:sp)) - 2, 0xFFFF)
+      unquote(loop_ret(%{sp: new_sp}, ram, cycles))
+    end
+  end
+
+  # POP rr.
+  defp loop_body(%Insn{mnemonic: :pop, operands: [pair], cycles: cycles}) do
+    value = Macro.var(:value, __MODULE__)
+    lo = Macro.var(:lo, __MODULE__)
+    hi = Macro.var(:hi, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(var(:sp)) + 2, 0xFFFF)
+
+    overrides =
+      pop_overrides(pair, value, &loop_pair_overrides/2)
+      |> Map.put(:sp, bumped)
+
+    quote do
+      unquote(lo) = mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:sp)))
+
+      unquote(hi) =
+        mem_read(
+          unquote(var(:rom)),
+          unquote(var(:ram)),
+          Bitwise.band(unquote(var(:sp)) + 1, 0xFFFF)
+        )
+
+      unquote(value) = Bitwise.bsl(unquote(hi), 8) |> Bitwise.bor(unquote(lo))
+      unquote(loop_ret(overrides, var(:ram), cycles))
+    end
+  end
+
   # Les opérations sur l'accumulateur (z=7).
   defp loop_body(%Insn{mnemonic: mnemonic, operands: [], cycles: cycles})
        when mnemonic in [:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf] do
@@ -685,10 +762,23 @@ defmodule Atomboy.CPU.Gen do
   # ══ Commun ═══════════════════════════════════════════════════════════════════
 
   # Les moitiés d'une paire 16 bits. SP n'y figure pas : il vit déjà en un
-  # seul champ.
+  # seul champ. AF n'existe que pour la pile.
   defp pair_regs(:bc), do: {:b, :c}
   defp pair_regs(:de), do: {:d, :e}
   defp pair_regs(:hl), do: {:h, :l}
+  defp pair_regs(:af), do: {:a, :f}
+
+  # Les surcharges d'un POP. Identiques aux surcharges de paire ordinaires,
+  # sauf pour AF : **les quatre bits bas de F n'existent pas physiquement** —
+  # quel que soit l'octet dépopé, ils lisent zéro. Oublier ce masque laisse
+  # entrer des bits fantômes dans F, que tous les calculs de drapeaux suivants
+  # traînent ensuite.
+  defp pop_overrides({:pair, :af}, value, overrides_fun) do
+    overrides_fun.({:pair, :af}, value)
+    |> Map.put(:f, quote(do: Bitwise.band(unquote(value), 0xF0)))
+  end
+
+  defp pop_overrides(pair, value, overrides_fun), do: overrides_fun.(pair, value)
 
   # La paire qui porte l'adresse d'un opérande indirect.
   defp ind_pair(:bc), do: {:pair, :bc}
