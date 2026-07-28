@@ -147,10 +147,15 @@ defmodule Atomboy.AtomVM.Main do
     end
   end
 
+  # 20 ms et pas moins : sur ESP32, AtomVM convertit ce délai en ticks
+  # FreeRTOS par division entière (`timeout_ms / portTICK_PERIOD_MS`, tick de
+  # 10 ms avec CONFIG_FREERTOS_HZ=100). Un délai inférieur au tick vaut zéro —
+  # la tâche ne bloque pas du tout, IDLE reste affamée et le watchdog aboie
+  # exactement comme sans souffle. Vécu, pas déduit.
   defp breathe do
     receive do
     after
-      2 -> :ok
+      20 -> :ok
     end
   end
 
