@@ -273,6 +273,19 @@ defmodule Atomboy.CPU.CartLoop do
     Map.put(ram, :cram_enabled, (value &&& 0x0F) == 0x0A)
   end
 
+  # 0xFF46 : l'OAM DMA — la page source, copiée d'un bloc vers l'OAM. C'est
+  # ainsi que les jeux réels placent leurs sprites : un tampon en WRAM,
+  # recopié à chaque vblank. Sans cette interception, l'OAM reste vide et
+  # tous les personnages sont invisibles. Source en ROM non gérée — les jeux
+  # transfèrent depuis la WRAM, le tampon doit être modifiable.
+  defp ram_write(ram, 0xFF46, value) when value >= 0x80 do
+    base = bsl(value, 8)
+
+    Enum.reduce(0..0x9F, Map.put(ram, 0xFF46, value), fn offset, acc ->
+      Map.put(acc, 0xFE00 + offset, Map.get(ram, base + offset, 0))
+    end)
+  end
+
   # Écrire DIV — n'importe quelle valeur — le remet à zéro, sous-compteur
   # compris. C'est le comportement du matériel, et blargg s'en sert pour
   # synchroniser ses mesures de timer.
