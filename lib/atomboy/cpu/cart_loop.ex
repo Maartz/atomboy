@@ -251,8 +251,14 @@ defmodule Atomboy.CPU.CartLoop do
   # sortie série et le protocole mémoire reste muet.
   defp mem_read(_rom, ram, addr) when addr >= 0xA000 and addr < 0xC000 do
     case ram do
-      %{:cram_enabled => true, ^addr => value} -> value
-      _ -> 0xFF
+      %{cram_enabled: true} ->
+        case Map.get(ram, :cram_bank, 0) do
+          {:rtc, reg} -> rtc_read(ram, reg)
+          bank -> Map.get(ram, addr + bank * 0x10000, 0xFF)
+        end
+
+      _ ->
+        0xFF
     end
   end
 
@@ -331,27 +337,80 @@ defmodule Atomboy.CPU.CartLoop do
     |> Map.update(:apu_triggers, [channel], &[channel | &1])
   end
 
-  # 0x2000-0x3FFF : la sélection de banque ROM du MBC1 — cinq bits, zéro vaut
-  # un, masqués par le nombre de banques réelles. La base précalculée évite
-  # toute arithmétique au fetch.
+  # 0x2000-0x3FFF : la sélection de banque ROM — cinq bits sur MBC1 (les
+  # 512 Ko de Link's Awakening), sept sur MBC3 (les 2 Mo de Pokémon). Zéro
+  # vaut un, masqués par le nombre de banques réelles. La base précalculée
+  # évite toute arithmétique au fetch.
   defp ram_write(ram, addr, value) when addr < 0x4000 do
     banks = Map.get(ram, :rom_banks, 2)
-    bank = max(value &&& 0x1F, 1) &&& banks - 1
+    mask = if Map.get(ram, :mbc) == :mbc3, do: 0x7F, else: 0x1F
+    bank = max(value &&& mask, 1) &&& banks - 1
     Map.put(ram, :rom_bank_base, max(bank, 1) * 0x4000)
   end
 
-  # Le reste de la région ROM parle au MBC — bits hauts et mode, ignorés tant
-  # qu'aucune ROM ne dépasse les 512 Ko des cinq bits bas.
-  defp ram_write(ram, addr, _value) when addr < 0x8000, do: ram
+  # 0x4000-0x5FFF : sur MBC3, la banque de RAM cartouche (0-3) ou un
+  # registre RTC (0x08-0x0C). Sur MBC1, bits hauts et mode — ignorés tant
+  # qu'aucune ROM MBC1 ne dépasse les 512 Ko des cinq bits bas.
+  defp ram_write(ram, addr, value) when addr < 0x6000 do
+    if Map.get(ram, :mbc) == :mbc3 do
+      cond do
+        value <= 0x03 -> Map.put(ram, :cram_bank, value)
+        value in 0x08..0x0C -> Map.put(ram, :cram_bank, {:rtc, value})
+        true -> ram
+      end
+    else
+      ram
+    end
+  end
 
-  # La RAM cartouche — celle que la pile garde en vie. Chaque écriture la
-  # marque sale : Atomboy.Save sait alors qu'un .sav mérite d'être écrit.
+  # 0x6000-0x7FFF : sur MBC3, écrire 0x01 fige l'horloge dans les registres
+  # latchés — les jeux écrivent 0 puis 1 et lisent une photo cohérente.
+  defp ram_write(ram, addr, value) when addr < 0x8000 do
+    if Map.get(ram, :mbc) == :mbc3 and value == 0x01 do
+      Map.put(ram, :rtc_latch, rtc_now())
+    else
+      ram
+    end
+  end
+
+  # La RAM cartouche — celle que la pile garde en vie, par banque (clé
+  # addr + banque × 0x10000 : la banque 0 garde ses clés nues, les .sav et
+  # les jeux MBC1 ne voient rien changer). Chaque écriture la marque sale :
+  # Atomboy.Save sait alors qu'un .sav mérite d'être écrit. Les registres
+  # RTC ignorent l'écriture — l'horloge suit le temps réel du Mac.
   defp ram_write(ram, addr, value) when addr >= 0xA000 and addr < 0xC000 do
     case ram do
-      %{cram_enabled: true} -> ram |> Map.put(addr, value) |> Map.put(:cram_dirty, true)
-      _ -> ram
+      %{cram_enabled: true} ->
+        case Map.get(ram, :cram_bank, 0) do
+          {:rtc, _reg} -> ram
+          bank -> ram |> Map.put(addr + bank * 0x10000, value) |> Map.put(:cram_dirty, true)
+        end
+
+      _ ->
+        ram
     end
   end
 
   defp ram_write(ram, addr, value), do: Map.put(ram, addr, value)
+
+  # ── L'horloge temps réel du MBC3 ────────────────────────────────────────────
+
+  # Secondes, minutes, heures, jours (9 bits) — servis depuis l'heure du
+  # Mac : le cycle jour/nuit de Pokémon suit ta fenêtre.
+  defp rtc_read(ram, reg) do
+    ram |> Map.get(:rtc_latch, rtc_now()) |> Map.get(reg, 0)
+  end
+
+  defp rtc_now do
+    now = System.os_time(:second)
+    days = div(now, 86_400)
+
+    %{
+      0x08 => rem(now, 60),
+      0x09 => rem(div(now, 60), 60),
+      0x0A => rem(div(now, 3600), 24),
+      0x0B => rem(days, 256),
+      0x0C => rem(days, 512) |> bsr(8) |> band(1)
+    }
+  end
 end

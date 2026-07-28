@@ -62,6 +62,30 @@ defmodule Atomboy.SaveTest do
     assert ram[0xA000] == 0x42
   end
 
+  test "MBC3 : la sauvegarde fait 32 Ko, quatre banques qui se suivent" do
+    ram = %{
+      :mbc => :mbc3,
+      :cram_dirty => true,
+      0xA000 => 0x11,
+      0xA000 + 0x10000 => 0x22,
+      0xA000 + 0x30000 => 0x44
+    }
+
+    dir = System.tmp_dir!()
+    sav = Path.join(dir, "argent-#{System.unique_integer([:positive])}.sav")
+    Save.flush(ram, sav)
+
+    data = File.read!(sav)
+    assert byte_size(data) == 0x8000
+    assert :binary.at(data, 0) == 0x11
+    assert :binary.at(data, 0x2000) == 0x22
+    assert :binary.at(data, 0x6000) == 0x44
+
+    recharge = Save.load(%{mbc: :mbc3}, sav)
+    assert recharge[0xA000 + 0x10000] == 0x22
+    File.rm(sav)
+  end
+
   test "la SRAM verrouillée ignore l'écriture, sans marque" do
     # LD A,0x42 ; LD (0xA000),A — sans déverrouillage préalable.
     rom = <<0x3E, 0x42, 0xEA, 0x00, 0xA0>> <> :binary.copy(<<0>>, 0x8000 - 5)

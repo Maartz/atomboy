@@ -14,8 +14,10 @@ defmodule Atomboy.Save do
   n'écrit le fichier que si la marque est là, puis l'efface — l'autosauve
   périodique et la sortie l'appellent sans jamais écrire pour rien.
 
-  8 Ko, une banque : celle de Link's Awakening et de la génération MBC1.
-  Les cartouches à banques de RAM multiples attendront un jeu qui en use.
+  8 Ko sur MBC1 (Link's Awakening), 32 Ko en quatre banques sur MBC3
+  (Pokémon) — les banques se suivent dans le fichier, comme partout, et
+  dans la map chaque banque vit à `addr + banque × 0x10000` (la banque 0
+  garde ses clés nues).
   """
 
   @sram_base 0xA000
@@ -30,11 +32,13 @@ defmodule Atomboy.Save do
   def load(ram, sav_path) do
     case File.read(sav_path) do
       {:ok, data} ->
+        limit = banks(ram) * @sram_size
+
         data
-        |> binary_part(0, min(byte_size(data), @sram_size))
+        |> binary_part(0, min(byte_size(data), limit))
         |> :binary.bin_to_list()
-        |> Enum.with_index(@sram_base)
-        |> Enum.reduce(ram, fn {byte, addr}, ram -> Map.put(ram, addr, byte) end)
+        |> Enum.with_index()
+        |> Enum.reduce(ram, fn {byte, i}, ram -> Map.put(ram, key(i), byte) end)
 
       _ ->
         ram
@@ -56,8 +60,13 @@ defmodule Atomboy.Save do
   end
 
   defp snapshot(ram) do
-    for addr <- @sram_base..(@sram_base + @sram_size - 1), into: <<>> do
-      <<Map.get(ram, addr, 0)>>
+    for i <- 0..(banks(ram) * @sram_size - 1), into: <<>> do
+      <<Map.get(ram, key(i), 0)>>
     end
   end
+
+  # L'octet i du fichier vit en banque div(i, 8 Ko) — clés nues en banque 0.
+  defp key(i), do: @sram_base + rem(i, @sram_size) + div(i, @sram_size) * 0x10000
+
+  defp banks(ram), do: if(Map.get(ram, :mbc) == :mbc3, do: 4, else: 1)
 end

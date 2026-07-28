@@ -118,7 +118,7 @@ defmodule Atomboy.Play do
         loop(%{
           state: Screen.boot_state(),
           rom: rom,
-          ram: Save.load(%{rom_banks: div(byte_size(rom), 0x4000)}, sav),
+          ram: Save.load(Screen.boot_ram(rom), sav),
           sav: sav,
           hold: %{},
           down: MapSet.new(),

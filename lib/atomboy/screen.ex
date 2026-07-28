@@ -33,7 +33,7 @@ defmodule Atomboy.Screen do
   def run(rom_path, frames) do
     rom = load(rom_path)
     state = boot_state()
-    ram = %{rom_banks: div(byte_size(rom), 0x4000)}
+    ram = boot_ram(rom)
 
     Enum.reduce(1..frames, {<<>>, state, ram}, fn frame_index, {_frame, state, ram} ->
       render? = frame_index == frames
@@ -59,6 +59,17 @@ defmodule Atomboy.Screen do
       sp: 0xFFFE,
       pc: 0x0100
     }
+  end
+
+  @doc """
+  La map mémoire de départ : nombre de banques et famille de MBC, lus dans
+  l'en-tête cartouche (0x147). MBC3 pour les types 0x0F-0x13 — Pokémon et
+  sa génération 2 Mo — MBC1 pour le reste.
+  """
+  @spec boot_ram(binary()) :: map()
+  def boot_ram(rom) do
+    mbc = if :binary.at(rom, 0x147) in 0x0F..0x13, do: :mbc3, else: :mbc1
+    %{rom_banks: div(byte_size(rom), 0x4000), mbc: mbc}
   end
 
   @doc """
