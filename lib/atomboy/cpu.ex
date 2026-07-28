@@ -107,9 +107,21 @@ defmodule Atomboy.CPU do
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
-  @compile {:inline, mem_read: 2, mem_read_pc: 2, mem_read_pc16: 2, mem_write: 3}
+  @compile {:inline,
+            mem_read: 2,
+            mem_read_at: 2,
+            mem_read_pc: 2,
+            mem_read_pc16: 2,
+            mem_write: 3,
+            mem_write_at: 3,
+            mem_write16_at: 3}
 
   defp mem_read(mem, %State{h: h, l: l}), do: @mem.read8(mem, bsl(h, 8) ||| l)
+
+  # Accès à adresse calculée — les indirects (BC), (DE), (HL±), (a16).
+  defp mem_read_at(mem, addr), do: @mem.read8(mem, addr)
+  defp mem_write_at(mem, addr, value), do: @mem.write8(mem, addr, value)
+  defp mem_write16_at(mem, addr, value), do: @mem.write16(mem, addr, value)
 
   # L'octet à PC — les opérandes immédiats. `step/2` a déjà avancé PC au-delà
   # de l'opcode, donc PC pointe précisément sur l'immédiat.

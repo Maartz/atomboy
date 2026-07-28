@@ -37,19 +37,44 @@ defmodule Atomboy.CPU.Insn do
     * `{:imm, 8}` — un octet immédiat, lu à PC ; l'instruction avance PC
     * `{:imm, 16}` — un mot immédiat little-endian, PC avance de deux
     * `{:pair, :bc}` — une paire 16 bits (`:bc`, `:de`, `:hl`, `:sp`)
+    * `{:ind, :bc}` — l'octet en mémoire à l'adresse d'une paire ; `:hl_inc` et
+      `:hl_dec` post-incrémentent ou décrémentent HL après l'accès
+    * `:a16_ind` — la mémoire à l'adresse donnée par un mot immédiat
   """
-  @type operand :: {:reg, atom()} | :hl_ind | {:imm, 8} | {:imm, 16} | {:pair, atom()}
+  @type operand ::
+          {:reg, atom()}
+          | :hl_ind
+          | {:imm, 8}
+          | {:imm, 16}
+          | {:pair, atom()}
+          | {:ind, :bc | :de | :hl_inc | :hl_dec}
+          | :a16_ind
+
+  @typedoc """
+  Une condition de branchement, ou `nil` pour les instructions inconditionnelles.
+  """
+  @type condition :: nil | :nz | :z | :nc | :c
 
   @type t :: %__MODULE__{
           opcode: 0..0xFF,
           prefix: nil | :cb,
           mnemonic: atom(),
           operands: [operand()],
-          cycles: pos_integer()
+          condition: condition(),
+          cycles: pos_integer(),
+          cycles_untaken: nil | pos_integer()
         }
 
   @enforce_keys [:opcode, :mnemonic, :cycles]
-  defstruct [:opcode, :mnemonic, :cycles, operands: [], prefix: nil]
+  defstruct [
+    :opcode,
+    :mnemonic,
+    :cycles,
+    operands: [],
+    prefix: nil,
+    condition: nil,
+    cycles_untaken: nil
+  ]
 
   @doc """
   Le nom lisible de l'instruction, en syntaxe assembleur.
@@ -61,17 +86,26 @@ defmodule Atomboy.CPU.Insn do
   rien, `LD B, (HL)` désigne l'instruction.
   """
   @spec label(t()) :: String.t()
-  def label(%__MODULE__{mnemonic: mnemonic, operands: []}) do
-    mnemonic |> Atom.to_string() |> String.upcase()
+  def label(%__MODULE__{mnemonic: mnemonic, condition: condition, operands: operands}) do
+    parts = condition_label(condition) ++ Enum.map(operands, &operand/1)
+    name = mnemonic |> Atom.to_string() |> String.upcase()
+
+    case parts do
+      [] -> name
+      parts -> name <> " " <> Enum.join(parts, ", ")
+    end
   end
 
-  def label(%__MODULE__{mnemonic: mnemonic, operands: operands}) do
-    String.upcase(Atom.to_string(mnemonic)) <> " " <> Enum.map_join(operands, ", ", &operand/1)
-  end
+  defp condition_label(nil), do: []
+  defp condition_label(condition), do: [condition |> Atom.to_string() |> String.upcase()]
 
   defp operand(:hl_ind), do: "(HL)"
+  defp operand(:a16_ind), do: "(a16)"
   defp operand({:imm, 8}), do: "d8"
   defp operand({:imm, 16}), do: "d16"
+  defp operand({:ind, :hl_inc}), do: "(HL+)"
+  defp operand({:ind, :hl_dec}), do: "(HL-)"
+  defp operand({:ind, name}), do: "(" <> String.upcase(Atom.to_string(name)) <> ")"
   defp operand({:pair, name}), do: name |> Atom.to_string() |> String.upcase()
   defp operand({:reg, name}), do: name |> Atom.to_string() |> String.upcase()
 end

@@ -39,6 +39,8 @@ defmodule Atomboy.CPU.Table do
   @spec base() :: [Insn.t()]
   def base do
     misc() ++
+      indirect_block() ++
+      jr_block() ++
       acc_block() ++
       pair_block() ++ inc_dec_block() ++ load_imm8_block() ++ load_block() ++ alu_block()
   end
@@ -56,7 +58,66 @@ defmodule Atomboy.CPU.Table do
   # ── x=0 ─────────────────────────────────────────────────────────────────────
 
   defp misc do
-    [%Insn{opcode: 0x00, mnemonic: :nop, cycles: 4}]
+    [
+      %Insn{opcode: 0x00, mnemonic: :nop, cycles: 4},
+      # STOP — l'arrêt effectif attend le contrôleur d'horloge. Le matériel
+      # l'encode sur deux octets, mais le corpus SingleStepTests le modélise en
+      # un seul, à 12 T-cycles : on suit le corpus, qui est l'oracle de cette
+      # phase. À revisiter quand STOP fera vraiment quelque chose.
+      %Insn{opcode: 0x10, mnemonic: :stop, cycles: 12},
+      # LD (a16), SP — la seule écriture 16 bits directe du jeu d'instructions.
+      %Insn{opcode: 0x08, mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: 20}
+    ]
+  end
+
+  # ── x=0, z=2 : LD indirects entre A et les paires ───────────────────────────
+  #
+  # q=0 écrit A en mémoire, q=1 le lit. Les formes HL+ et HL- post-ajustent HL
+  # après l'accès — les deux encodages que la paire AF aurait occupés.
+
+  @indirects [{0x02, :bc}, {0x12, :de}, {0x22, :hl_inc}, {0x32, :hl_dec}]
+
+  defp indirect_block do
+    stores =
+      for {opcode, target} <- @indirects do
+        %Insn{opcode: opcode, mnemonic: :ld, operands: [{:ind, target}, {:reg, :a}], cycles: 8}
+      end
+
+    loads =
+      for {opcode, target} <- @indirects do
+        %Insn{
+          opcode: opcode + 8,
+          mnemonic: :ld,
+          operands: [{:reg, :a}, {:ind, target}],
+          cycles: 8
+        }
+      end
+
+    stores ++ loads
+  end
+
+  # ── x=0, z=0 : JR ───────────────────────────────────────────────────────────
+  #
+  # Saut relatif, offset signé d'un octet. Les formes conditionnelles coûtent
+  # 12 T-cycles prises, 8 non prises — le premier endroit où la table décrit un
+  # comportement dépendant de l'exécution.
+
+  defp jr_block do
+    unconditional = %Insn{opcode: 0x18, mnemonic: :jr, operands: [{:imm, 8}], cycles: 12}
+
+    conditionals =
+      for {condition, index} <- [nz: 0, z: 1, nc: 2, c: 3] do
+        %Insn{
+          opcode: 0x20 + index * 8,
+          mnemonic: :jr,
+          operands: [{:imm, 8}],
+          condition: condition,
+          cycles: 12,
+          cycles_untaken: 8
+        }
+      end
+
+    [unconditional | conditionals]
   end
 
   # ── x=0, z=7 : opérations sur l'accumulateur ────────────────────────────────

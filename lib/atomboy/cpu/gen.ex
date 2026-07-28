@@ -85,6 +85,98 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
+  # STOP — un octet et rien d'autre dans le modèle du corpus ; voir la table.
+  defp struct_body(%Insn{mnemonic: :stop, cycles: cycles}) do
+    struct_ret(var(:st), var(:mem), cycles)
+  end
+
+  # JR — offset signé d'un octet, relatif au PC qui suit l'opérande. Le calcul
+  # du signe est sans branche : retrancher 256 quand le bit 7 est levé.
+  defp struct_body(%Insn{mnemonic: :jr, operands: [{:imm, 8}]} = insn) do
+    offset = Macro.var(:offset, __MODULE__)
+
+    target =
+      quote do:
+              Bitwise.band(
+                unquote(field(:pc)) + 1 + unquote(offset) -
+                  Bitwise.bsl(Bitwise.bsr(unquote(offset), 7), 8),
+                0xFFFF
+              )
+
+    taken = struct_ret(struct_update(%{pc: target}), var(:mem), insn.cycles)
+
+    body =
+      case insn.condition do
+        nil ->
+          taken
+
+        condition ->
+          skipped = quote do: Bitwise.band(unquote(field(:pc)) + 1, 0xFFFF)
+          untaken = struct_ret(struct_update(%{pc: skipped}), var(:mem), insn.cycles_untaken)
+
+          quote do
+            if unquote(condition_expr(condition, field(:f))) do
+              unquote(taken)
+            else
+              unquote(untaken)
+            end
+          end
+      end
+
+    quote do
+      unquote(offset) = mem_read_pc(unquote(var(:mem)), unquote(var(:st)))
+      unquote(body)
+    end
+  end
+
+  # LD (a16), SP — l'unique écriture 16 bits directe.
+  defp struct_body(%Insn{mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: cycles}) do
+    addr = Macro.var(:addr, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(field(:pc)) + 2, 0xFFFF)
+
+    write =
+      quote do: mem_write16_at(unquote(var(:mem)), unquote(addr), unquote(field(:sp)))
+
+    quote do
+      unquote(addr) = mem_read_pc16(unquote(var(:mem)), unquote(var(:st)))
+      unquote(struct_ret(struct_update(%{pc: bumped}), write, cycles))
+    end
+  end
+
+  # LD (BC/DE/HL±), A — écriture de A à l'adresse d'une paire, avec
+  # post-ajustement de HL pour les deux dernières formes.
+  defp struct_body(%Insn{mnemonic: :ld, operands: [{:ind, target}, {:reg, :a}], cycles: cycles}) do
+    addr = Macro.var(:addr, __MODULE__)
+    write = quote do: mem_write_at(unquote(var(:mem)), unquote(addr), unquote(field(:a)))
+
+    quote do
+      unquote(addr) = unquote(struct_pair_read(ind_pair(target)))
+
+      unquote(
+        struct_ret(
+          struct_update(ind_overrides(target, addr, &struct_pair_overrides/2)),
+          write,
+          cycles
+        )
+      )
+    end
+  end
+
+  # LD A, (BC/DE/HL±).
+  defp struct_body(%Insn{mnemonic: :ld, operands: [{:reg, :a}, {:ind, target}], cycles: cycles}) do
+    addr = Macro.var(:addr, __MODULE__)
+    value = Macro.var(:value, __MODULE__)
+
+    overrides =
+      Map.put(ind_overrides(target, addr, &struct_pair_overrides/2), :a, value)
+
+    quote do
+      unquote(addr) = unquote(struct_pair_read(ind_pair(target)))
+      unquote(value) = mem_read_at(unquote(var(:mem)), unquote(addr))
+      unquote(struct_ret(struct_update(overrides), var(:mem), cycles))
+    end
+  end
+
   # LD (HL), r — la mémoire change, l'état non : `st` repart tel quel.
   defp struct_body(%Insn{mnemonic: :ld, operands: [:hl_ind, src], cycles: cycles}) do
     write = quote do: mem_write(unquote(var(:mem)), unquote(var(:st)), unquote(struct_read(src)))
@@ -245,7 +337,10 @@ defmodule Atomboy.CPU.Gen do
   defp field(name), do: {{:., [], [var(:st), name]}, [no_parens: true], []}
 
   # `%{st | champ: valeur, ...}` — une seule mise à jour, tous champs groupés.
-  defp struct_update(fields) when map_size(fields) > 0 do
+  # Sans surcharge, `st` repart tel quel : aucune allocation.
+  defp struct_update(fields) when map_size(fields) == 0, do: var(:st)
+
+  defp struct_update(fields) do
     {:%{}, [], [{:|, [], [var(:st), Enum.to_list(fields)]}]}
   end
 
@@ -272,6 +367,104 @@ defmodule Atomboy.CPU.Gen do
 
   defp loop_body(%Insn{mnemonic: :nop, cycles: cycles}) do
     loop_ret(%{}, var(:ram), cycles)
+  end
+
+  # STOP — voir le backend struct.
+  defp loop_body(%Insn{mnemonic: :stop, cycles: cycles}) do
+    loop_ret(%{}, var(:ram), cycles)
+  end
+
+  # JR — voir le commentaire du backend struct pour le calcul du signe.
+  defp loop_body(%Insn{mnemonic: :jr, operands: [{:imm, 8}]} = insn) do
+    offset = Macro.var(:offset, __MODULE__)
+
+    target =
+      quote do:
+              Bitwise.band(
+                unquote(var(:pc)) + 1 + unquote(offset) -
+                  Bitwise.bsl(Bitwise.bsr(unquote(offset), 7), 8),
+                0xFFFF
+              )
+
+    taken = loop_ret(%{pc: target}, var(:ram), insn.cycles)
+
+    body =
+      case insn.condition do
+        nil ->
+          taken
+
+        condition ->
+          skipped = quote do: Bitwise.band(unquote(var(:pc)) + 1, 0xFFFF)
+          untaken = loop_ret(%{pc: skipped}, var(:ram), insn.cycles_untaken)
+
+          quote do
+            if unquote(condition_expr(condition, var(:f))) do
+              unquote(taken)
+            else
+              unquote(untaken)
+            end
+          end
+      end
+
+    quote do
+      unquote(offset) = mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:pc)))
+      unquote(body)
+    end
+  end
+
+  # LD (a16), SP — deux écritures chaînées, little-endian.
+  defp loop_body(%Insn{mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: cycles}) do
+    addr = Macro.var(:addr, __MODULE__)
+    lo = Macro.var(:lo, __MODULE__)
+    hi = Macro.var(:hi, __MODULE__)
+    bumped = quote do: Bitwise.band(unquote(var(:pc)) + 2, 0xFFFF)
+
+    ram =
+      quote do
+        ram_write(
+          ram_write(unquote(var(:ram)), unquote(addr), Bitwise.band(unquote(var(:sp)), 0xFF)),
+          Bitwise.band(unquote(addr) + 1, 0xFFFF),
+          Bitwise.bsr(unquote(var(:sp)), 8)
+        )
+      end
+
+    quote do
+      unquote(lo) = mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:pc)))
+
+      unquote(hi) =
+        mem_read(
+          unquote(var(:rom)),
+          unquote(var(:ram)),
+          Bitwise.band(unquote(var(:pc)) + 1, 0xFFFF)
+        )
+
+      unquote(addr) = Bitwise.bsl(unquote(hi), 8) |> Bitwise.bor(unquote(lo))
+      unquote(loop_ret(%{pc: bumped}, ram, cycles))
+    end
+  end
+
+  # LD (BC/DE/HL±), A.
+  defp loop_body(%Insn{mnemonic: :ld, operands: [{:ind, target}, {:reg, :a}], cycles: cycles}) do
+    addr = Macro.var(:addr, __MODULE__)
+    ram = quote do: ram_write(unquote(var(:ram)), unquote(addr), unquote(var(:a)))
+
+    quote do
+      unquote(addr) = unquote(loop_pair_read(ind_pair(target)))
+      unquote(loop_ret(ind_overrides(target, addr, &loop_pair_overrides/2), ram, cycles))
+    end
+  end
+
+  # LD A, (BC/DE/HL±).
+  defp loop_body(%Insn{mnemonic: :ld, operands: [{:reg, :a}, {:ind, target}], cycles: cycles}) do
+    addr = Macro.var(:addr, __MODULE__)
+    value = Macro.var(:value, __MODULE__)
+    overrides = Map.put(ind_overrides(target, addr, &loop_pair_overrides/2), :a, value)
+
+    quote do
+      unquote(addr) = unquote(loop_pair_read(ind_pair(target)))
+      unquote(value) = mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(addr))
+      unquote(loop_ret(overrides, var(:ram), cycles))
+    end
   end
 
   # LD r, d8 / LD (HL), d8 — même logique que côté struct : lire l'immédiat à
@@ -496,6 +689,29 @@ defmodule Atomboy.CPU.Gen do
   defp pair_regs(:bc), do: {:b, :c}
   defp pair_regs(:de), do: {:d, :e}
   defp pair_regs(:hl), do: {:h, :l}
+
+  # La paire qui porte l'adresse d'un opérande indirect.
+  defp ind_pair(:bc), do: {:pair, :bc}
+  defp ind_pair(:de), do: {:pair, :de}
+  defp ind_pair(_hl), do: {:pair, :hl}
+
+  # Les surcharges d'état du post-ajustement de HL — vides pour BC et DE.
+  # `overrides_fun` est la fabrique de surcharges du backend appelant.
+  defp ind_overrides(:hl_inc, addr, overrides_fun) do
+    overrides_fun.({:pair, :hl}, quote(do: Bitwise.band(unquote(addr) + 1, 0xFFFF)))
+  end
+
+  defp ind_overrides(:hl_dec, addr, overrides_fun) do
+    overrides_fun.({:pair, :hl}, quote(do: Bitwise.band(unquote(addr) - 1, 0xFFFF)))
+  end
+
+  defp ind_overrides(_other, _addr, _overrides_fun), do: %{}
+
+  # Le test d'une condition de branchement sur une expression de F.
+  defp condition_expr(:nz, f), do: quote(do: Bitwise.band(unquote(f), 0x80) == 0)
+  defp condition_expr(:z, f), do: quote(do: Bitwise.band(unquote(f), 0x80) != 0)
+  defp condition_expr(:nc, f), do: quote(do: Bitwise.band(unquote(f), 0x10) == 0)
+  defp condition_expr(:c, f), do: quote(do: Bitwise.band(unquote(f), 0x10) != 0)
 
   # L'appel ALU d'un mnémonique. `adc` et `sbc` consomment F entrant, les
   # autres non ; `and`/`or`/`xor` portent d'autres noms côté primitives parce
