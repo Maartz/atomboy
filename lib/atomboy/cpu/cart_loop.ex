@@ -317,6 +317,20 @@ defmodule Atomboy.CPU.CartLoop do
     |> Map.put(0xFF02, value &&& 0x7F)
   end
 
+  # NRx4, bit 7 : le déclenchement d'un canal son. L'événement doit être
+  # capturé à l'écriture — recharge de longueur, d'enveloppe, de sweep —
+  # l'APU le consomme à la frame suivante. La valeur reste lisible telle
+  # quelle, comme sur le matériel (le bit 7 n'y est jamais relisible, mais
+  # aucun jeu ne le relit).
+  defp ram_write(ram, addr, value)
+       when addr in [0xFF14, 0xFF19, 0xFF1E, 0xFF23] and (value &&& 0x80) != 0 do
+    channel = div(addr - 0xFF14, 5) + 1
+
+    ram
+    |> Map.put(addr, value)
+    |> Map.update(:apu_triggers, [channel], &[channel | &1])
+  end
+
   # 0x2000-0x3FFF : la sélection de banque ROM du MBC1 — cinq bits, zéro vaut
   # un, masqués par le nombre de banques réelles. La base précalculée évite
   # toute arithmétique au fetch.
