@@ -124,6 +124,7 @@ defmodule Atomboy.Play do
           down: MapSet.new(),
           kitty: false,
           audio: audio,
+          son?: audio != nil,
           apu: %APU{},
           pending: "",
           frame: 0,
@@ -209,13 +210,9 @@ defmodule Atomboy.Play do
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
     {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, render?)
 
-    {ram, apu, audio} =
-      if ctx.turbo do
-        # Le son ne suit pas l'avance rapide : le tampon d'ffplay déborderait.
-        {Map.delete(ram, :apu_triggers), ctx.apu, ctx.audio}
-      else
-        sound(ram, ctx.apu, ctx.audio)
-      end
+    # Pendant le turbo le port audio est fermé : sound/3 jette les
+    # déclenchements sans rien pousser.
+    {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     if render? do
       IO.write(["\e[H", crlf(Screen.to_text(pixels, ctx.palette)), status(ctx, ram, held)])
@@ -301,8 +298,21 @@ defmodule Atomboy.Play do
     end
   end
 
+  # Le turbo affame tout lecteur audio (production stoppée, consommation
+  # continue) : on ferme ffplay à l'entrée, on en rouvre un neuf à la
+  # sortie — tampon vierge, pas de famine héritée.
   defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press] do
-    %{ctx | turbo: not ctx.turbo, deadline: System.monotonic_time(:microsecond) + @frame_us}
+    turbo = not ctx.turbo
+
+    audio =
+      if turbo do
+        Audio.close(ctx.audio)
+        nil
+      else
+        if ctx.son?, do: Audio.open()
+      end
+
+    %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
   end
 
   defp apply_event({tag, :pause}, ctx) when tag in [:key, :press],

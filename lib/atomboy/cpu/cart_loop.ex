@@ -214,21 +214,31 @@ defmodule Atomboy.CPU.CartLoop do
       Gen.loop_dispatch(
         Table.base(),
         [Gen.loop_cb_entry()],
-        Gen.unimplemented(:unimplemented_base)
+        Gen.unimplemented_at(:unimplemented_base)
       )
     )
   end
 
   defp exec_cb(unquote_splicing(Gen.head_args(:loop))) do
-    unquote(Gen.loop_dispatch(Table.extended(), [], Gen.unimplemented(:unimplemented_cb)))
+    unquote(Gen.loop_dispatch(Table.extended(), [], Gen.unimplemented_at(:unimplemented_cb)))
   end
 
-  defp unimplemented_base(opcode) do
-    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
+  # PC a déjà dépassé l'opcode d'un cran ; la banque vient de la map — le
+  # rapport de crash montre l'adresse réelle et la banque ROM en jeu.
+  defp unimplemented_base(opcode, pc, ram) do
+    raise Atomboy.CPU.Unimplemented,
+      opcode: opcode,
+      prefix: nil,
+      pc: pc - 1 &&& 0xFFFF,
+      bank: div(Map.get(ram, :rom_bank_base, 0x4000), 0x4000)
   end
 
-  defp unimplemented_cb(opcode) do
-    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb
+  defp unimplemented_cb(opcode, pc, ram) do
+    raise Atomboy.CPU.Unimplemented,
+      opcode: opcode,
+      prefix: :cb,
+      pc: pc - 2 &&& 0xFFFF,
+      bank: div(Map.get(ram, :rom_bank_base, 0x4000), 0x4000)
   end
 
   # ── Mémoire — la seule différence avec Loop ─────────────────────────────────

@@ -224,13 +224,22 @@ defmodule Atomboy.CPU.Unimplemented do
   situations différentes et le harnais de test doit pouvoir les séparer.
   """
 
-  defexception [:opcode, :prefix]
+  defexception [:opcode, :prefix, :pc, :bank]
 
   @impl true
-  def message(%{opcode: opcode, prefix: prefix}) do
+  def message(%{opcode: opcode, prefix: prefix} = e) do
     label = if prefix == :cb, do: "CB #{hex(opcode)}", else: hex(opcode)
-    "opcode #{label} non implémenté"
+
+    where =
+      case {e.pc, e.bank} do
+        {nil, _} -> ""
+        {pc, nil} -> " à PC 0x#{hex4(pc)}"
+        {pc, bank} -> " à PC 0x#{hex4(pc)}, banque ROM #{bank}"
+      end
+
+    "opcode #{label} non implémenté#{where}"
   end
 
   defp hex(opcode), do: opcode |> Integer.to_string(16) |> String.pad_leading(2, "0")
+  defp hex4(v), do: v |> Integer.to_string(16) |> String.pad_leading(4, "0")
 end

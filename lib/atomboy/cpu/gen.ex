@@ -1371,6 +1371,15 @@ defmodule Atomboy.CPU.Gen do
     quote do: unquote(helper)(unquote(var(:opcode)))
   end
 
+  @doc """
+  Le repli situé des boucles : l'opcode, mais aussi PC et la map mémoire —
+  de quoi raconter *où* le processeur s'est perdu, pas seulement sur quoi.
+  """
+  @spec unimplemented_at(atom()) :: Macro.t()
+  def unimplemented_at(helper) when is_atom(helper) do
+    quote do: unquote(helper)(unquote(var(:opcode)), unquote(var(:pc)), unquote(var(:ram)))
+  end
+
   @doc "Les arguments de tête d'un `exec` — opcode inclus, contexte nil partout."
   @spec head_args(:loop | :struct) :: [Macro.t()]
   def head_args(:loop) do
