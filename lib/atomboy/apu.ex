@@ -98,8 +98,41 @@ defmodule Atomboy.APU do
     {div(total, @cycles_per_sample), rem(total, @cycles_per_sample)}
   end
 
+  # Les registres sont figés à l'échelle de la frame : tout se lit une fois
+  # ici, la boucle interne (548 tours) ne touche plus jamais la map — c'est
+  # la condition pour tenir dans le budget des 16,7 ms.
+  defp config(ram) do
+    nr10 = Map.get(ram, 0xFF10, 0)
+    nr50 = Map.get(ram, 0xFF24, 0x77)
+    nr51 = Map.get(ram, 0xFF25, 0xF3)
+    env1 = Map.get(ram, 0xFF12, 0)
+    env2 = Map.get(ram, 0xFF17, 0)
+
+    %{
+      nr10: nr10,
+      sweep?: (nr10 &&& 0x77) != 0,
+      duty1: elem(@duty, bsr(Map.get(ram, 0xFF11, 0), 6)),
+      duty2: elem(@duty, bsr(Map.get(ram, 0xFF16, 0), 6)),
+      env1: env1,
+      env2: env2,
+      dac1: dac_on?(env1),
+      dac2: dac_on?(env2),
+      p1: (2048 - reg_freq(ram, 0xFF13, 0xFF14)) * 4,
+      p2: (2048 - reg_freq(ram, 0xFF18, 0xFF19)) * 4,
+      len1: (Map.get(ram, 0xFF14, 0) &&& 0x40) != 0,
+      len2: (Map.get(ram, 0xFF19, 0) &&& 0x40) != 0,
+      lmul: ((bsr(nr50, 4) &&& 0x07) + 1) * 60,
+      rmul: ((nr50 &&& 0x07) + 1) * 60,
+      l1: (nr51 &&& 0x10) != 0,
+      l2: (nr51 &&& 0x20) != 0,
+      r1: (nr51 &&& 0x01) != 0,
+      r2: (nr51 &&& 0x02) != 0
+    }
+  end
+
   defp generate(ram, apu) do
     {count, carry} = sample_count(apu)
+    cfg = config(ram)
 
     {samples, ch1, ch2, seq_acc, seq_step} =
       Enum.reduce(1..count, {[], apu.ch1, apu.ch2, apu.seq_acc, apu.seq_step}, fn _,
@@ -110,20 +143,28 @@ defmodule Atomboy.APU do
         {ch1, ch2, seq_acc, seq_step} =
           if seq_acc + @cycles_per_sample >= @seq_period do
             step = rem(seq_step + 1, 8)
-            ch1 = ch1 |> clock_length(ram, 0xFF14, step) |> clock_sweep(ram, step) |> clock_env(ram, 0xFF12, step)
-            ch2 = ch2 |> clock_length(ram, 0xFF19, step) |> clock_env(ram, 0xFF17, step)
+
+            ch1 =
+              ch1
+              |> clock_length(cfg.len1, step)
+              |> clock_sweep(cfg.nr10, step)
+              |> clock_env(cfg.env1, step)
+
+            ch2 = ch2 |> clock_length(cfg.len2, step) |> clock_env(cfg.env2, step)
             {ch1, ch2, seq_acc + @cycles_per_sample - @seq_period, step}
           else
             {ch1, ch2, seq_acc + @cycles_per_sample, seq_step}
           end
 
-        ch1 = advance(ch1, freq(ch1, ram, 0xFF13, 0xFF14, true))
-        ch2 = advance(ch2, freq(ch2, ram, 0xFF18, 0xFF19, false))
+        # Canal 1 sous sweep : la fréquence glisse, sa période se recalcule.
+        p1 = if cfg.sweep?, do: (2048 - ch1.shadow) * 4, else: cfg.p1
+        ch1 = advance(ch1, p1)
+        ch2 = advance(ch2, cfg.p2)
 
-        v1 = output(ch1, ram, 0xFF11, 0xFF12)
-        v2 = output(ch2, ram, 0xFF16, 0xFF17)
+        v1 = output(ch1, cfg.duty1, cfg.dac1)
+        v2 = output(ch2, cfg.duty2, cfg.dac2)
 
-        {[mix(v1, v2, ram) | out], ch1, ch2, seq_acc, seq_step}
+        {[mix(v1, v2, cfg) | out], ch1, ch2, seq_acc, seq_step}
       end)
 
     apu = %{apu | ch1: ch1, ch2: ch2, seq_acc: seq_acc, seq_step: seq_step, sample_acc: carry}
@@ -168,8 +209,8 @@ defmodule Atomboy.APU do
   # ── Le séquenceur de frame ──────────────────────────────────────────────────
 
   # Longueur : pas 0, 2, 4, 6 — 256 Hz.
-  defp clock_length(ch, ram, nrx4, step) when rem(step, 2) == 0 do
-    if (Map.get(ram, nrx4, 0) &&& 0x40) != 0 and ch.length > 0 do
+  defp clock_length(ch, len_on?, step) when rem(step, 2) == 0 do
+    if len_on? and ch.length > 0 do
       length = ch.length - 1
       %{ch | length: length, enabled: ch.enabled and length > 0}
     else
@@ -177,11 +218,10 @@ defmodule Atomboy.APU do
     end
   end
 
-  defp clock_length(ch, _ram, _nrx4, _step), do: ch
+  defp clock_length(ch, _len_on?, _step), do: ch
 
   # Enveloppe : pas 7 — 64 Hz.
-  defp clock_env(ch, ram, nrx2, 7) do
-    nrx2v = Map.get(ram, nrx2, 0)
+  defp clock_env(ch, nrx2v, 7) do
     period = nrx2v &&& 0x07
 
     if period == 0 do
@@ -202,11 +242,10 @@ defmodule Atomboy.APU do
     end
   end
 
-  defp clock_env(ch, _ram, _nrx2, _step), do: ch
+  defp clock_env(ch, _nrx2v, _step), do: ch
 
   # Sweep (canal 1) : pas 2 et 6 — 128 Hz.
-  defp clock_sweep(ch, ram, step) when step in [2, 6] do
-    nr10 = Map.get(ram, 0xFF10, 0)
+  defp clock_sweep(ch, nr10, step) when step in [2, 6] do
     shift = nr10 &&& 0x07
     period = bsr(nr10, 4) &&& 0x07
 
@@ -230,46 +269,28 @@ defmodule Atomboy.APU do
     end
   end
 
-  defp clock_sweep(ch, _ram, _step), do: ch
+  defp clock_sweep(ch, _nr10, _step), do: ch
 
   defp sweep_period(nr10), do: max(bsr(nr10, 4) &&& 0x07, 1)
 
   # ── L'onde ──────────────────────────────────────────────────────────────────
 
-  # La fréquence : celle des registres, sauf canal 1 sous sweep actif — le
-  # shadow, que le matériel fait glisser sans réécrire les registres.
-  defp freq(ch, ram, nrx3, nrx4, sweep?) do
-    if sweep? and (Map.get(ram, 0xFF10, 0) &&& 0x77) != 0 do
-      ch.shadow
-    else
-      reg_freq(ram, nrx3, nrx4)
-    end
-  end
-
   defp reg_freq(ram, nrx3, nrx4) do
     Map.get(ram, nrx3, 0) ||| bsl(Map.get(ram, nrx4, 0) &&& 0x07, 8)
   end
 
-  # Avancer l'onde de 128 cycles : le pas de duty tourne à (2048-f)×4 cycles.
-  defp advance(%Pulse{enabled: false} = ch, _freq), do: ch
+  # Avancer l'onde de 128 cycles : le pas de duty tourne à `period` cycles.
+  defp advance(%Pulse{enabled: false} = ch, _period), do: ch
 
-  defp advance(ch, freq) do
-    period = (2048 - freq) * 4
+  defp advance(ch, period) do
     timer = ch.timer + @cycles_per_sample
     steps = div(timer, period)
     %{ch | timer: rem(timer, period), pos: rem(ch.pos + steps, 8)}
   end
 
-  defp output(%Pulse{enabled: false}, _ram, _nrx1, _nrx2), do: 0
-
-  defp output(ch, ram, nrx1, nrx2) do
-    if dac_on?(Map.get(ram, nrx2, 0)) do
-      duty = bsr(Map.get(ram, nrx1, 0), 6)
-      elem(elem(@duty, duty), ch.pos) * ch.volume
-    else
-      0
-    end
-  end
+  defp output(%Pulse{enabled: false}, _duty, _dac?), do: 0
+  defp output(_ch, _duty, false), do: 0
+  defp output(ch, duty, true), do: elem(duty, ch.pos) * ch.volume
 
   defp dac_on?(nrx2), do: (nrx2 &&& 0xF8) != 0
 
@@ -278,16 +299,9 @@ defmodule Atomboy.APU do
   # NR51 aiguille chaque canal vers chaque oreille, NR50 dose 0-7 par côté.
   # Pire cas : 15 de volume × 2 canaux × (7+1) de NR50 × 60 = 14 400,
   # sous les 32 767 du s16 avec la marge des deux canaux à venir.
-  defp mix(v1, v2, ram) do
-    nr50 = Map.get(ram, 0xFF24, 0x77)
-    nr51 = Map.get(ram, 0xFF25, 0xF3)
-
-    left = if((nr51 &&& 0x10) != 0, do: v1, else: 0) + if (nr51 &&& 0x20) != 0, do: v2, else: 0
-    right = if((nr51 &&& 0x01) != 0, do: v1, else: 0) + if (nr51 &&& 0x02) != 0, do: v2, else: 0
-
-    left = left * ((bsr(nr50, 4) &&& 0x07) + 1) * 60
-    right = right * ((nr50 &&& 0x07) + 1) * 60
-
+  defp mix(v1, v2, cfg) do
+    left = (if(cfg.l1, do: v1, else: 0) + if(cfg.l2, do: v2, else: 0)) * cfg.lmul
+    right = (if(cfg.r1, do: v1, else: 0) + if(cfg.r2, do: v2, else: 0)) * cfg.rmul
     <<left::16-little-signed, right::16-little-signed>>
   end
 

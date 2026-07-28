@@ -20,10 +20,13 @@ defmodule Mix.Tasks.Atomboy.Play do
 
   ## Options
 
-    * `--hold N` — frames de maintien par frappe (défaut 10). Un terminal ne
-      signalant pas les relâchements, chaque frappe presse la touche N frames,
-      la répétition automatique du clavier prolonge un maintien réel.
+    * `--hold N` — frames de maintien par frappe (défaut 10), pour les
+      terminaux sans protocole clavier kitty ; avec lui (Ghostty…), l'état
+      des touches est réel et ce réglage ne sert plus.
     * `--frames N` — s'arrêter après N frames (essais sans clavier).
+    * `--son` / `--no-son` — forcer ou couper le son (défaut : actif en
+      interactif si ffplay est installé — `brew install ffmpeg`).
+    * `--dump f.pgm` — écrire la dernière frame en image à la sortie.
 
   L'affichage demande 160 colonnes sur 73 lignes — réduire la police
   (Cmd -) suffit généralement.
@@ -34,7 +37,9 @@ defmodule Mix.Tasks.Atomboy.Play do
   @impl Mix.Task
   def run(args) do
     {opts, argv} =
-      OptionParser.parse!(args, strict: [hold: :integer, frames: :integer, dump: :string])
+      OptionParser.parse!(args,
+        strict: [hold: :integer, frames: :integer, dump: :string, son: :boolean]
+      )
 
     rom =
       case argv do

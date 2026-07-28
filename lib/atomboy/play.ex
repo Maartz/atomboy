@@ -54,7 +54,9 @@ defmodule Atomboy.Play do
   accords ne durent que leur fenêtre de maintien. Réglable par `hold:`.
   """
 
+  alias Atomboy.APU
   alias Atomboy.Joypad
+  alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
   alias Atomboy.Screen
 
@@ -106,6 +108,10 @@ defmodule Atomboy.Play do
       input = tty || "/dev/fd/0"
       reader = spawn_link(fn -> read_keys(parent, input) end)
 
+      # Le son suit le clavier : présent en interactif, coupé dans les
+      # essais redirigés — sauf demande explicite (son: true/false).
+      audio = if Keyword.get(opts, :son, tty != nil), do: Audio.open()
+
       try do
         loop(%{
           state: Screen.boot_state(),
@@ -114,6 +120,8 @@ defmodule Atomboy.Play do
           hold: %{},
           down: MapSet.new(),
           kitty: false,
+          audio: audio,
+          apu: %APU{},
           pending: "",
           frame: 0,
           max_frames: Keyword.get(opts, :frames, :infinity),
@@ -126,6 +134,7 @@ defmodule Atomboy.Play do
       after
         Process.unlink(reader)
         Process.exit(reader, :kill)
+        Audio.close(audio)
       end
     end
   end
@@ -169,6 +178,7 @@ defmodule Atomboy.Play do
       ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
 
       {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, true)
+      {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
       IO.write(["\e[H", crlf(Screen.to_text(pixels)), status(ctx, ram, held)])
 
       now = System.monotonic_time(:microsecond)
@@ -182,12 +192,28 @@ defmodule Atomboy.Play do
         | state: state,
           ram: ram,
           hold: hold,
+          apu: apu,
+          audio: audio,
           pending: pending,
           frame: ctx.frame + 1,
           last_frame: pixels
       }
 
       loop(measure_fps(ctx))
+    end
+  end
+
+  # La frame de son suit la frame d'image ; un lecteur disparu coupe le son
+  # sans arrêter la partie. Sans lecteur, les déclenchements capturés se
+  # jettent — la liste ne doit pas enfler pour rien.
+  defp sound(ram, apu, nil), do: {Map.delete(ram, :apu_triggers), apu, nil}
+
+  defp sound(ram, apu, audio) do
+    {pcm, ram, apu} = APU.frame(ram, apu)
+
+    case Audio.push(audio, pcm) do
+      :ok -> {ram, apu, audio}
+      :dead -> {ram, apu, nil}
     end
   end
 
@@ -229,6 +255,10 @@ defmodule Atomboy.Play do
   defp collect_input(acc) do
     receive do
       {:input, data} -> collect_input([acc | data])
+      # Les messages du port audio (sortie, code de fin) : sans intérêt,
+      # mais à drainer — une boîte aux lettres qui enfle ralentit tout.
+      {port, {:data, _}} when is_port(port) -> collect_input(acc)
+      {port, {:exit_status, _}} when is_port(port) -> collect_input(acc)
     after
       0 -> IO.iodata_to_binary(acc)
     end
@@ -248,6 +278,7 @@ defmodule Atomboy.Play do
     [
       "\e[0m flèches ✚ · x A · c B · ⏎ Start · ␣ Select · q quitte    ",
       :io_lib.format(~c"~5.1f fps · banque ~2..0B", [ctx.fps, bank]),
+      if(ctx.audio, do: " · ♪", else: ""),
       keys,
       "\e[K"
     ]
