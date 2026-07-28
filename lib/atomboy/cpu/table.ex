@@ -39,6 +39,7 @@ defmodule Atomboy.CPU.Table do
   @spec base() :: [Insn.t()]
   def base do
     misc() ++
+      acc_block() ++
       pair_block() ++ inc_dec_block() ++ load_imm8_block() ++ load_block() ++ alu_block()
   end
 
@@ -56,6 +57,19 @@ defmodule Atomboy.CPU.Table do
 
   defp misc do
     [%Insn{opcode: 0x00, mnemonic: :nop, cycles: 4}]
+  end
+
+  # ── x=0, z=7 : opérations sur l'accumulateur ────────────────────────────────
+  #
+  # Huit instructions sans opérande explicite — A et F sont implicites. L'ordre
+  # du champ `y` est celui du silicium.
+
+  @acc_ops {:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf}
+
+  defp acc_block do
+    for y <- 0..7 do
+      %Insn{opcode: y * 8 + 0x07, mnemonic: elem(@acc_ops, y), cycles: 4}
+    end
   end
 
   # ── x=0 : les paires 16 bits ────────────────────────────────────────────────

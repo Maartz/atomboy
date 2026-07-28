@@ -166,6 +166,88 @@ defmodule Atomboy.CPU.ALU do
     {sum &&& 0xFFFF, (f &&& @z) ||| half ||| carry}
   end
 
+  # ── Opérations sur l'accumulateur seul (colonne z=7 de la table) ────────────
+  #
+  # Toutes de signature `(a, f) → {a, f}`, même celles qui n'utilisent pas l'un
+  # des deux : l'uniformité permet au générateur de les traiter en une seule
+  # clause.
+
+  @doc """
+  RLCA — rotation circulaire gauche de A. C reçoit l'ancien bit 7.
+
+  Z est **toujours effacé**, même si le résultat est nul — contrairement au
+  `RLC A` de la table CB, qui pose Z normalement. Deux instructions, deux
+  encodages, deux sémantiques de Z : classique source de confusion.
+  """
+  @spec rlca(byte8(), byte8()) :: result()
+  def rlca(a, _f) do
+    bit7 = bsr(a, 7)
+    {(bsl(a, 1) ||| bit7) &&& 0xFF, bit7 * @c}
+  end
+
+  @doc "RRCA — rotation circulaire droite. C reçoit l'ancien bit 0, Z effacé."
+  @spec rrca(byte8(), byte8()) :: result()
+  def rrca(a, _f) do
+    bit0 = a &&& 1
+    {bsr(a, 1) ||| bsl(bit0, 7), bit0 * @c}
+  end
+
+  @doc "RLA — rotation gauche à travers C : C entre par le bit 0, sort du bit 7."
+  @spec rla(byte8(), byte8()) :: result()
+  def rla(a, f) do
+    {(bsl(a, 1) ||| carry_in(f)) &&& 0xFF, bsr(a, 7) * @c}
+  end
+
+  @doc "RRA — rotation droite à travers C."
+  @spec rra(byte8(), byte8()) :: result()
+  def rra(a, f) do
+    {bsr(a, 1) ||| bsl(carry_in(f), 7), (a &&& 1) * @c}
+  end
+
+  @doc """
+  DAA — ajustement décimal après une opération BCD.
+
+  L'instruction la plus tordue du processeur, et la raison d'être des drapeaux
+  N et H posés soigneusement partout ailleurs : DAA est leur *seul* lecteur.
+  Après une addition (N=0), on ré-ajoute 0x06 et/ou 0x60 selon H, C et la
+  valeur ; après une soustraction (N=1), on retranche selon H et C seuls — la
+  valeur de A n'entre pas en compte, c'est ainsi. C n'est **jamais effacé** par
+  DAA, seulement posé.
+  """
+  @spec daa(byte8(), byte8()) :: result()
+  def daa(a, f) do
+    n = (f &&& @n) != 0
+    h = (f &&& @h) != 0
+    c = (f &&& @c) != 0
+
+    {a, c} =
+      if n do
+        low = if h, do: 0x06, else: 0
+        high = if c, do: 0x60, else: 0
+        {a - low - high &&& 0xFF, c}
+      else
+        low = if h or (a &&& 0x0F) > 0x09, do: 0x06, else: 0
+        high = if c or a > 0x99, do: 0x60, else: 0
+        {a + low + high &&& 0xFF, c or high > 0}
+      end
+
+    {a, zero(a) ||| if(n, do: @n, else: 0) ||| if(c, do: @c, else: 0)}
+  end
+
+  @doc "CPL — complément de A. Pose N et H, préserve Z et C."
+  @spec cpl(byte8(), byte8()) :: result()
+  def cpl(a, f) do
+    {bxor(a, 0xFF), (f &&& (@z ||| @c)) ||| @n ||| @h}
+  end
+
+  @doc "SCF — pose C. Efface N et H, préserve Z. A inchangé."
+  @spec scf(byte8(), byte8()) :: result()
+  def scf(a, f), do: {a, (f &&& @z) ||| @c}
+
+  @doc "CCF — inverse C. Efface N et H, préserve Z. A inchangé."
+  @spec ccf(byte8(), byte8()) :: result()
+  def ccf(a, f), do: {a, (f &&& @z) ||| bxor(f &&& @c, @c)}
+
   # ── Drapeaux ────────────────────────────────────────────────────────────────
 
   # La retenue entrante, ramenée à 0 ou 1.

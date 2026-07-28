@@ -96,6 +96,20 @@ defmodule Atomboy.CPU.Gen do
     struct_ret(struct_update(%{dst => struct_read(src)}), var(:mem), cycles)
   end
 
+  # Les opérations sur l'accumulateur (z=7) — signature uniforme (a, f) → {a, f}
+  # côté ALU, donc une seule clause pour les huit.
+  defp struct_body(%Insn{mnemonic: mnemonic, operands: [], cycles: cycles})
+       when mnemonic in [:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf] do
+    result = Macro.var(:result, __MODULE__)
+    f = Macro.var(:new_f, __MODULE__)
+    call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [field(:a), field(:f)]}
+
+    quote do
+      {unquote(result), unquote(f)} = unquote(call)
+      unquote(struct_ret(struct_update(%{a: result, f: f}), var(:mem), cycles))
+    end
+  end
+
   # LD rr, d16 — le mot immédiat, little-endian, PC avance de deux.
   defp struct_body(%Insn{mnemonic: :ld, operands: [{:pair, _} = dst, {:imm, 16}], cycles: cycles}) do
     imm = Macro.var(:imm, __MODULE__)
@@ -295,6 +309,19 @@ defmodule Atomboy.CPU.Gen do
 
   defp loop_body(%Insn{mnemonic: :ld, operands: [{:reg, dst}, src], cycles: cycles}) do
     loop_ret(%{dst => loop_read(src)}, var(:ram), cycles)
+  end
+
+  # Les opérations sur l'accumulateur (z=7).
+  defp loop_body(%Insn{mnemonic: mnemonic, operands: [], cycles: cycles})
+       when mnemonic in [:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf] do
+    result = Macro.var(:result, __MODULE__)
+    f = Macro.var(:new_f, __MODULE__)
+    call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [var(:a), var(:f)]}
+
+    quote do
+      {unquote(result), unquote(f)} = unquote(call)
+      unquote(loop_ret(%{a: result, f: f}, var(:ram), cycles))
+    end
   end
 
   # LD rr, d16 — deux lectures à PC, little-endian.
