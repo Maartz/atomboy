@@ -144,11 +144,25 @@ defmodule Atomboy.CPU.Loop do
   # exec_cb, même arbre sur la table étendue.
 
   defp exec(unquote_splicing(Gen.head_args(:loop))) do
-    unquote(Gen.loop_dispatch(Table.base(), [Gen.loop_cb_entry()], Gen.unimplemented(nil)))
+    unquote(
+      Gen.loop_dispatch(
+        Table.base(),
+        [Gen.loop_cb_entry()],
+        Gen.unimplemented(:unimplemented_base)
+      )
+    )
   end
 
   defp exec_cb(unquote_splicing(Gen.head_args(:loop))) do
-    unquote(Gen.loop_dispatch(Table.extended(), [], Gen.unimplemented(:cb)))
+    unquote(Gen.loop_dispatch(Table.extended(), [], Gen.unimplemented(:unimplemented_cb)))
+  end
+
+  defp unimplemented_base(opcode) do
+    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
+  end
+
+  defp unimplemented_cb(opcode) do
+    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb
   end
 
   # ── Mémoire ─────────────────────────────────────────────────────────────────

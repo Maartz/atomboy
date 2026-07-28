@@ -90,11 +90,17 @@ defmodule Atomboy.CPU do
 
   @doc false
   def exec(unquote_splicing(Gen.head_args(:struct))) do
-    unquote(Gen.struct_dispatch(Table.base(), [Gen.struct_cb_entry()], Gen.unimplemented(nil)))
+    unquote(
+      Gen.struct_dispatch(
+        Table.base(),
+        [Gen.struct_cb_entry()],
+        Gen.unimplemented(:unimplemented_base)
+      )
+    )
   end
 
   defp exec_cb(unquote_splicing(Gen.head_args(:struct))) do
-    unquote(Gen.struct_dispatch(Table.extended(), [], Gen.unimplemented(:cb)))
+    unquote(Gen.struct_dispatch(Table.extended(), [], Gen.unimplemented(:unimplemented_cb)))
   end
 
   @doc """
@@ -107,6 +113,14 @@ defmodule Atomboy.CPU do
   """
   @spec implemented() :: [{prefix(), 0..0xFF}]
   def implemented, do: Enum.sort(@implemented)
+
+  defp unimplemented_base(opcode) do
+    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
+  end
+
+  defp unimplemented_cb(opcode) do
+    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb
+  end
 
   # ── Helpers ─────────────────────────────────────────────────────────────────
 

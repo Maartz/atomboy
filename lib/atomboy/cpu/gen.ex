@@ -1359,12 +1359,16 @@ defmodule Atomboy.CPU.Gen do
     {0xCB, body}
   end
 
-  @doc "La branche par défaut : opcode hors table."
-  @spec unimplemented(nil | :cb) :: Macro.t()
-  def unimplemented(prefix) do
-    quote do
-      raise(Atomboy.CPU.Unimplemented, opcode: unquote(var(:opcode)), prefix: unquote(prefix))
-    end
+  @doc """
+  La branche par défaut : un appel vers un helper local du module hôte, pas un
+  `raise` inline — le fallback apparaît à chaque feuille de l'arbre, et 245
+  copies de la construction d'exception par table diluent le code chaud dans
+  le cache d'instructions. Le module hôte définit `unimplemented_base/1` et
+  `unimplemented_cb/1`.
+  """
+  @spec unimplemented(atom()) :: Macro.t()
+  def unimplemented(helper) when is_atom(helper) do
+    quote do: unquote(helper)(unquote(var(:opcode)))
   end
 
   @doc "Les arguments de tête d'un `exec` — opcode inclus, contexte nil partout."
