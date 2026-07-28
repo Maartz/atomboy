@@ -14,6 +14,8 @@ defmodule Atomboy.Screen do
   comme sur la dalle, pas figés en fin de frame.
   """
 
+  import Bitwise
+
   alias Atomboy.CPU.CartLoop
   alias Atomboy.CPU.State
   alias Atomboy.PPU
@@ -53,6 +55,17 @@ defmodule Atomboy.Screen do
   defp frame(state, rom, ram, render?) do
     Enum.reduce(0..(@lines - 1), {<<>>, state, ram}, fn ly, {pixels, state, ram} ->
       ram = Map.put(ram, 0xFF44, ly)
+
+      # L'entrée en vblank lève le bit 0 d'IF — l'interruption que les jeux
+      # attendent pour toucher la VRAM. Le service lui-même vit dans le fetch
+      # de la boucle.
+      ram =
+        if ly == @visible do
+          Map.update(ram, 0xFF0F, 0x01, &bor(&1, 0x01))
+        else
+          ram
+        end
+
       {state, ram, _cycles} = CartLoop.run(state, rom, ram, @line_cycles)
 
       pixels =

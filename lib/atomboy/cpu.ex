@@ -59,15 +59,17 @@ defmodule Atomboy.CPU do
   @doc """
   Exécute une instruction : fetch à `pc`, décodage, exécution.
 
-  Renvoie `{state, mem, t_cycles}`.
+  Renvoie `{state, mem, t_cycles}`. **Aucun matériel** : ni service
+  d'interruption, ni réveil de HALT — c'est le contrat des vecteurs
+  SingleStepTests, qui ne modélisent que l'instruction. Le pas complet, avec
+  le contrôleur d'interruptions, est `tick/2`.
   """
   @spec step(State.t(), Atomboy.Memory.t()) ::
           {State.t(), Atomboy.Memory.t(), pos_integer()}
   def step(%State{pc: pc} = st, mem) do
     # L'armement d'un EI antérieur se promeut à l'entrée du pas suivant — même
     # point que le fetch de la boucle rapide, pour que les deux backends
-    # restent indiscernables. La nuance matérielle (promotion après ce pas,
-    # pas avant) ne devient observable qu'avec le contrôleur d'interruptions.
+    # restent indiscernables.
     st = if st.ime_pending == 1, do: %{st | ime: 1, ime_pending: 0}, else: st
 
     opcode = @mem.read8(mem, pc)
@@ -75,6 +77,66 @@ defmodule Atomboy.CPU do
     # occuper que si elles sautent, ce qui est le cas minoritaire.
     exec(opcode, %{st | pc: pc + 1 &&& 0xFFFF}, mem)
   end
+
+  # Les cinq sources, dans l'ordre de priorité du matériel : vblank, STAT,
+  # timer, série, joypad. Vecteurs 0x40, 0x48, 0x50, 0x58, 0x60.
+  @irq_if 0xFF0F
+  @irq_ie 0xFFFF
+
+  @doc """
+  Un pas complet de machine : promotion d'EI, sommeil de HALT, service
+  d'interruption, puis instruction.
+
+  C'est le miroir exact du fetch des boucles rapides — même ordre, mêmes
+  cycles — et c'est lui que le test d'équivalence croisée pilote. Un pas rend
+  l'un de :
+
+    * un cycle de sommeil (4 T) — HALT sans interruption en attente ;
+    * un service (20 T) — IME actif et une source en attente : IME retombe,
+      le bit d'IF s'efface, PC part sur la pile, le vecteur prend la main ;
+    * une instruction, via `step/2`.
+
+  IF et IE sont lus **en mémoire** (0xFF0F / 0xFFFF), pas dans le champ `ie`
+  du struct — c'est là que les programmes les écrivent.
+  """
+  @spec tick(State.t(), Atomboy.Memory.t()) ::
+          {State.t(), Atomboy.Memory.t(), pos_integer()}
+  def tick(%State{} = st, mem) do
+    st = if st.ime_pending == 1, do: %{st | ime: 1, ime_pending: 0}, else: st
+    irq = @mem.read8(mem, @irq_if) &&& @mem.read8(mem, @irq_ie) &&& 0x1F
+
+    cond do
+      st.halted and irq == 0 ->
+        {st, mem, 4}
+
+      st.halted ->
+        # Le réveil est gratuit ; le service éventuel se joue au pas suivant,
+        # comme dans les boucles.
+        tick(%{st | halted: false}, mem)
+
+      st.ime == 1 and irq != 0 ->
+        service(st, mem, irq)
+
+      true ->
+        step(st, mem)
+    end
+  end
+
+  defp service(%State{sp: sp, pc: pc} = st, mem, irq) do
+    # Le bit de poids faible en attente gagne.
+    bit = irq &&& -irq
+    index = index_of(bit)
+    new_sp = sp - 2 &&& 0xFFFF
+    mem = @mem.write16(mem, new_sp, pc)
+    mem = @mem.write8(mem, @irq_if, @mem.read8(mem, @irq_if) &&& bxor(bit, 0xFF))
+    {%{st | ime: 0, sp: new_sp, pc: 0x40 + index * 8}, mem, 20}
+  end
+
+  defp index_of(0x01), do: 0
+  defp index_of(0x02), do: 1
+  defp index_of(0x04), do: 2
+  defp index_of(0x08), do: 3
+  defp index_of(0x10), do: 4
 
   # ── Le dispatch ─────────────────────────────────────────────────────────────
   #

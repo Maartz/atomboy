@@ -107,8 +107,12 @@ defmodule Atomboy.CPU.LoopTest do
 
   defp oracle_loop(st, mem, cycles, 0), do: {st, mem, cycles, nil}
 
+  # tick/2, pas step/2 : les boucles rapides servent les interruptions et
+  # dorment sur HALT — les programmes aléatoires écrivent fortuitement dans
+  # IF/IE et exécutent des HALT, et l'équivalence doit couvrir ce matériel-là
+  # aussi. C'est même devenu son principal client.
   defp oracle_loop(st, mem, cycles, steps) do
-    {st, mem, step_cycles} = Atomboy.CPU.step(st, mem)
+    {st, mem, step_cycles} = Atomboy.CPU.tick(st, mem)
     oracle_loop(st, mem, cycles + step_cycles, steps - 1)
   rescue
     error in Atomboy.CPU.Unimplemented -> {st, mem, cycles, error.opcode}

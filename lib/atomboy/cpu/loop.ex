@@ -114,7 +114,80 @@ defmodule Atomboy.CPU.Loop do
   # les programmes aléatoires s'auto-modifient. Le surcoût est un test de map
   # sur la ram des écritures ; le jour du vrai MMU, le découpage par région
   # (fetch ROM sans map, fetch RAM avec) se fera dans le générateur.
+  # HALT : le processeur dort par pas de 4 T tant que rien n'est en attente —
+  # même granularité que le tick de l'oracle, l'équivalence en dépend. Le
+  # réveil est gratuit, le service éventuel se joue à la passe suivante.
+  defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, true, pending) do
+    if (mem_read(rom, ram, 0xFF0F) &&& mem_read(rom, ram, 0xFFFF) &&& 0x1F) == 0 do
+      fetch(rom, ram, budget, cycles + 4, a, f, b, c, d, e, h, l, sp, pc, ime, true, pending)
+    else
+      fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, false, pending)
+    end
+  end
+
+  # IME actif : une source en attente détourne l'exécution — IME retombe, le
+  # bit d'IF s'efface, PC part sur la pile, le vecteur prend la main. 20 T.
+  defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, 1, halted, pending) do
+    irq = mem_read(rom, ram, 0xFF0F) &&& mem_read(rom, ram, 0xFFFF) &&& 0x1F
+
+    if irq == 0 do
+      dispatch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, 1, halted, pending)
+    else
+      bit = irq &&& -irq
+      vector = 0x40 + irq_index(bit) * 8
+      new_sp = sp - 2 &&& 0xFFFF
+
+      ram =
+        ram
+        |> ram_write(new_sp, pc &&& 0xFF)
+        |> ram_write(new_sp + 1 &&& 0xFFFF, pc >>> 8)
+        |> ram_write(0xFF0F, mem_read(rom, ram, 0xFF0F) &&& bxor(bit, 0xFF))
+
+      fetch(
+        rom,
+        ram,
+        budget,
+        cycles + 20,
+        a,
+        f,
+        b,
+        c,
+        d,
+        e,
+        h,
+        l,
+        new_sp,
+        vector,
+        0,
+        halted,
+        pending
+      )
+    end
+  end
+
   defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending) do
+    dispatch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending)
+  end
+
+  defp dispatch(
+         rom,
+         ram,
+         budget,
+         cycles,
+         a,
+         f,
+         b,
+         c,
+         d,
+         e,
+         h,
+         l,
+         sp,
+         pc,
+         ime,
+         halted,
+         ime_pending
+       ) do
     exec(
       mem_read(rom, ram, pc),
       rom,
@@ -136,6 +209,12 @@ defmodule Atomboy.CPU.Loop do
       ime_pending
     )
   end
+
+  defp irq_index(0x01), do: 0
+  defp irq_index(0x02), do: 1
+  defp irq_index(0x04), do: 2
+  defp irq_index(0x08), do: 3
+  defp irq_index(0x10), do: 4
 
   # ── Le dispatch ─────────────────────────────────────────────────────────────
   #
