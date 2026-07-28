@@ -46,7 +46,8 @@ defmodule Atomboy.CPU.CartLoop do
   `{state, ram, cycles_consommés}`.
   """
   @spec run(State.t(), rom(), ram(), pos_integer()) :: {State.t(), ram(), non_neg_integer()}
-  def run(%State{} = st, rom, ram, budget) when byte_size(rom) == 0x10000 do
+  def run(%State{} = st, rom, ram, budget)
+      when byte_size(rom) >= 0x8000 and rem(byte_size(rom), 0x4000) == 0 do
     {{a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending}, ram, cycles} =
       fetch(
         rom,
@@ -234,8 +235,14 @@ defmodule Atomboy.CPU.CartLoop do
 
   @compile {:inline, mem_read: 3, ram_write: 3}
 
-  # La région ROM lit droit dans la binary — pas de map sur le chemin du fetch.
-  defp mem_read(rom, _ram, addr) when addr < 0x8000, do: :binary.at(rom, addr)
+  # La région ROM lit droit dans la binary — pas de map sur le chemin du
+  # fetch. La banque 0 est fixe ; la fenêtre 0x4000-0x7FFF regarde la banque
+  # choisie via le MBC1, dont la base précalculée vit dans la map.
+  defp mem_read(rom, _ram, addr) when addr < 0x4000, do: :binary.at(rom, addr)
+
+  defp mem_read(rom, ram, addr) when addr < 0x8000 do
+    :binary.at(rom, Map.get(ram, :rom_bank_base, 0x4000) + addr - 0x4000)
+  end
 
   # La RAM cartouche est derrière le verrou d'activation du MBC : désactivée,
   # elle lit 0xFF — le bus ouvert. Ce n'est pas du zèle : la détection SRAM de
@@ -249,10 +256,13 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  defp mem_read(rom, ram, addr) do
+  # Au-dessus de la cartouche, une adresse jamais écrite lit 0xFF — le bus
+  # ouvert. Plus de repli sur la binary : avec une ROM à banques, l'octet
+  # 0x8000 de la binary est du contenu de banque 2, pas de la VRAM.
+  defp mem_read(_rom, ram, addr) do
     case ram do
       %{^addr => value} -> value
-      _ -> :binary.at(rom, addr)
+      _ -> 0xFF
     end
   end
 
@@ -284,7 +294,17 @@ defmodule Atomboy.CPU.CartLoop do
     |> Map.put(0xFF02, value &&& 0x7F)
   end
 
-  # Le reste de la région ROM parle au MBC — banking inexistant sur 32 Ko.
+  # 0x2000-0x3FFF : la sélection de banque ROM du MBC1 — cinq bits, zéro vaut
+  # un, masqués par le nombre de banques réelles. La base précalculée évite
+  # toute arithmétique au fetch.
+  defp ram_write(ram, addr, value) when addr < 0x4000 do
+    banks = Map.get(ram, :rom_banks, 2)
+    bank = max(value &&& 0x1F, 1) &&& banks - 1
+    Map.put(ram, :rom_bank_base, max(bank, 1) * 0x4000)
+  end
+
+  # Le reste de la région ROM parle au MBC — bits hauts et mode, ignorés tant
+  # qu'aucune ROM ne dépasse les 512 Ko des cinq bits bas.
   defp ram_write(ram, addr, _value) when addr < 0x8000, do: ram
 
   defp ram_write(ram, addr, value) when addr >= 0xA000 and addr < 0xC000 do

@@ -46,18 +46,17 @@ defmodule Atomboy.Blargg do
       pc: 0x0100
     }
 
-    execute(state, rom, %{0xFF44 => 0x90}, max_cycles)
+    execute(state, rom, %{0xFF44 => 0x90, rom_banks: div(byte_size(rom), 0x4000)}, max_cycles)
   end
 
   defp load(path) do
     rom = File.read!(path)
 
-    if byte_size(rom) > 0x8000 do
-      raise "ROM de #{byte_size(rom)} octets : le banking MBC n'existe pas encore, 32 Ko max"
+    if byte_size(rom) < 0x8000 do
+      rom <> :binary.copy(<<0xFF>>, 0x8000 - byte_size(rom))
+    else
+      rom
     end
-
-    # Le reste de l'espace lit 0xFF — le bus ouvert du matériel.
-    rom <> :binary.copy(<<0xFF>>, 0x10000 - byte_size(rom))
   end
 
   defp execute(_state, _rom, ram, budget_left) when budget_left <= 0 do

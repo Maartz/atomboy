@@ -46,7 +46,9 @@ defmodule Atomboy.Screen do
       pc: 0x0100
     }
 
-    Enum.reduce(1..frames, {<<>>, state, %{}}, fn frame_index, {_frame, state, ram} ->
+    ram = %{rom_banks: div(byte_size(rom), 0x4000)}
+
+    Enum.reduce(1..frames, {<<>>, state, ram}, fn frame_index, {_frame, state, ram} ->
       render? = frame_index == frames
       frame(state, rom, ram, render?)
     end)
@@ -86,14 +88,16 @@ defmodule Atomboy.Screen do
     {state, Atomboy.Timer.advance(ram, cycles)}
   end
 
+  # Les petites ROMs sont complétées à 32 Ko ; les grandes gardent leurs
+  # banques telles quelles, le MBC1 de CartLoop fait le reste.
   defp load(path) do
     rom = File.read!(path)
 
-    if byte_size(rom) > 0x8000 do
-      raise "ROM de #{byte_size(rom)} octets : le banking MBC n'existe pas encore, 32 Ko max"
+    if byte_size(rom) < 0x8000 do
+      rom <> :binary.copy(<<0xFF>>, 0x8000 - byte_size(rom))
+    else
+      rom
     end
-
-    rom <> :binary.copy(<<0xFF>>, 0x10000 - byte_size(rom))
   end
 
   @doc """
