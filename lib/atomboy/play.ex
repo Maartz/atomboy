@@ -105,7 +105,7 @@ defmodule Atomboy.Play do
   end
 
   defp play(rom, sav, tty, opts) do
-    with :ok <- ensure_size(opts, tty) do
+    (fn ->
       parent = self()
       input = tty || "/dev/fd/0"
       reader = spawn_link(fn -> read_keys(parent, input) end)
@@ -133,6 +133,10 @@ defmodule Atomboy.Play do
           dump: Keyword.get(opts, :dump),
           state_path: Path.rootname(sav) <> ".state",
           palette: Keyword.get(opts, :palette, :dmg),
+          gfx: false,
+          gfx_id: 1,
+          dims: terminal_dims(tty),
+          size_ok: Keyword.has_key?(opts, :frames),
           turbo: false,
           paused: false,
           note: nil,
@@ -146,27 +150,36 @@ defmodule Atomboy.Play do
         Process.exit(reader, :kill)
         Audio.close(audio)
       end
+    end).()
+  end
+
+  # La taille du terminal, sur le pty nommé (`stty -f … -a` — « 66 rows;
+  # 269 columns; » sur mac, « rows 66; columns 269 » ailleurs).
+  defp terminal_dims(tty) do
+    with out when is_binary(out) <- tty && to_string(:os.cmd(stty(tty, "-a 2> /dev/null"))),
+         [_, rows] <- Regex.run(~r/(\d+) rows|rows (?:= )?(\d+)/, out) |> compact(),
+         [_, cols] <- Regex.run(~r/(\d+) columns|columns (?:= )?(\d+)/, out) |> compact() do
+      {String.to_integer(rows), String.to_integer(cols)}
+    else
+      _ -> nil
     end
   end
 
-  # L'écran DMG en demi-blocs : 160 colonnes, 72 lignes, plus le statut.
-  # La taille se lit sur le pty nommé (`stty -f … -a` — « 66 rows; 269
-  # columns; » sur mac, « rows 66; columns 269 » ailleurs). Les essais bornés
-  # par frames: tournent aussi dans un pty de 80×24 — pas d'exigence.
-  defp ensure_size(opts, tty) do
-    with false <- Keyword.has_key?(opts, :frames),
-         out when is_binary(out) <- tty && to_string(:os.cmd(stty(tty, "-a 2> /dev/null"))),
-         [_, rows] <- Regex.run(~r/(\d+) rows|rows (?:= )?(\d+)/, out) |> compact(),
-         [_, cols] <- Regex.run(~r/(\d+) columns|columns (?:= )?(\d+)/, out) |> compact(),
-         {rows, cols} = {String.to_integer(rows), String.to_integer(cols)},
-         true <- rows < 73 or cols < 160 do
-      {:error,
-       "Le terminal fait #{cols}×#{rows} ; il faut 160×73 pour l'écran DMG.\n" <>
-         "Réduire la police (Cmd -) ou agrandir la fenêtre, puis relancer."}
-    else
-      _ -> :ok
-    end
+  # Les demi-blocs exigent 160×73 ; les vraies images non. Le verdict attend
+  # donc la demi-seconde où le terminal a pu répondre à la requête graphique.
+  defp ensure_size(%{size_ok: true}), do: :ok
+  defp ensure_size(%{gfx: true}), do: :ok
+  defp ensure_size(%{frame: n}) when n < 30, do: :wait
+
+  defp ensure_size(%{dims: {rows, cols}}) when rows < 73 or cols < 160 do
+    {:error,
+     "Le terminal fait #{cols}×#{rows} ; il faut 160×73 pour l'écran DMG en\n" <>
+       "demi-blocs. Réduire la police (Cmd -), agrandir la fenêtre — ou un\n" <>
+       "terminal parlant le protocole graphique kitty (Ghostty, kitty, WezTerm)\n" <>
+       "affiche de vraies images sans contrainte de taille."}
   end
+
+  defp ensure_size(_ctx), do: :ok
 
   # Regex.run à deux alternatives : ne garder que les groupes capturés.
   defp compact(nil), do: nil
@@ -184,22 +197,36 @@ defmodule Atomboy.Play do
     else
       ctx = Enum.reduce(events, %{ctx | pending: pending}, &apply_event/2)
 
+      case ensure_size(ctx) do
+        {:error, _} = error ->
+          finish(ctx)
+          error
+
+        _ ->
+          resume(ctx)
+      end
+    end
+  end
+
+  defp resume(ctx) do
+    ctx =
+      if ctx.frame >= 30 and not ctx.size_ok do
+        %{ctx | size_ok: true}
+      else
+        ctx
+      end
+
+    (fn ->
       if ctx.paused do
         # En pause, la machine dort — l'écran reste, le clavier veille.
-        if ctx.last_frame do
-          IO.write([
-            "\e[H",
-            crlf(Screen.to_text(ctx.last_frame, ctx.palette)),
-            status(ctx, ctx.ram, [])
-          ])
-        end
+        ctx = if ctx.last_frame, do: draw(ctx, ctx.last_frame, ctx.ram, []), else: ctx
 
         Process.sleep(50)
         loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
       else
         step(ctx)
       end
-    end
+    end).()
   end
 
   defp step(ctx) do
@@ -224,9 +251,7 @@ defmodule Atomboy.Play do
     # déclenchements sans rien pousser.
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
-    if render? do
-      IO.write(["\e[H", crlf(Screen.to_text(pixels, ctx.palette)), status(ctx, ram, held)])
-    end
+    ctx = if render?, do: draw(ctx, pixels, ram, held), else: ctx
 
     # La cadence par échéancier absolu : chaque excès de sommeil se reprend
     # à la frame suivante, le débit long terme est exactement 59,7275 Hz —
@@ -266,6 +291,32 @@ defmodule Atomboy.Play do
     loop(measure_fps(ctx))
   end
 
+  # Deux chemins d'affichage. Demi-blocs : le texte, curseur en haut.
+  # Protocole graphique : l'image se transmet sous un identifiant alterné —
+  # la nouvelle se pose par-dessus l'ancienne, qui n'est effacée qu'ensuite
+  # (pas de trou entre deux frames) — et le statut s'ancre à la dernière
+  # ligne du terminal.
+  defp draw(%{gfx: true} = ctx, pixels, ram, held) do
+    id = ctx.gfx_id
+    old = 3 - id
+    rows = with {r, _c} <- ctx.dims, do: r, else: (_ -> 24)
+
+    IO.write([
+      "\e[H",
+      Screen.to_kitty(pixels, ctx.palette, id, rows - 1),
+      "\e_Ga=d,d=I,i=#{old},q=2\e\\",
+      "\e[#{rows};1H",
+      status(ctx, ram, held)
+    ])
+
+    %{ctx | gfx_id: old}
+  end
+
+  defp draw(ctx, pixels, ram, held) do
+    IO.write(["\e[H", crlf(Screen.to_text(pixels, ctx.palette)), status(ctx, ram, held)])
+    ctx
+  end
+
   # Le message éphémère de la ligne de statut s'éteint de lui-même.
   defp fade({_text, 0}), do: nil
   defp fade({text, left}), do: {text, left - 1}
@@ -290,6 +341,15 @@ defmodule Atomboy.Play do
   # La réponse à la requête kitty : le terminal parle le protocole. L'état
   # réel n'est fiable qu'avec les relâchements (bit 2 des flags).
   defp apply_event({:kitty, flags}, ctx), do: %{ctx | kitty: Bitwise.band(flags, 2) != 0}
+
+  # Le terminal sait afficher des images : on nettoie les demi-blocs et on
+  # bascule — la contrainte de taille tombe avec eux.
+  defp apply_event({:graphics, true}, ctx) do
+    IO.write("\e[2J")
+    %{ctx | gfx: true}
+  end
+
+  defp apply_event({:graphics, false}, ctx), do: ctx
 
   # Les actions — au front montant seulement : presse ou frappe, jamais la
   # répétition (un p tenu ne doit pas faire clignoter la pause).
@@ -458,6 +518,10 @@ defmodule Atomboy.Play do
     # les relâchements donnent l'état réel du clavier (diagonales, accords).
     # Un terminal muet ignore tout : le maintien par frames reste en place.
     if tty, do: IO.write("\e[>11u\e[?u")
+
+    # Et le protocole graphique : transmettre un pixel en requête (a=q) —
+    # « OK » en réponse = de vraies images plutôt que des demi-blocs.
+    if tty, do: IO.write("\e_Gi=31,a=q,t=d,f=24,s=1,v=1;AAAA\e\\")
     saved
   end
 

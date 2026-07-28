@@ -216,6 +216,52 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
+  La frame en protocole graphique kitty : une vraie image dans le terminal.
+
+  Le pixel de la DMG devient un pixel RGB transmis en APC (`ESC _ G … ESC \\`),
+  zlib puis base64 — une frame à quatre teintes se compresse en ~2 Ko. Le
+  placement `r=` laisse le terminal choisir la largeur en gardant le rapport
+  d'aspect ; `C=1` cloue le curseur ; `q=2` fait taire les accusés de
+  réception. Deux identifiants alternent en double tampon : la nouvelle image
+  se pose par-dessus l'ancienne, qui n'est effacée qu'ensuite — pas de trou,
+  pas de scintillement.
+  """
+  @spec to_kitty(PPU.frame(), :gris | :dmg, pos_integer(), pos_integer()) :: iodata()
+  def to_kitty(frame, palette, id, rows) do
+    rgb = rgb_palette(palette)
+    data = for <<shade <- frame>>, into: <<>>, do: elem(rgb, shade)
+    payload = data |> :zlib.compress() |> Base.encode64()
+
+    {width, height} = PPU.dimensions()
+    head = "a=T,i=#{id},f=24,s=#{width},v=#{height},o=z,q=2,C=1,r=#{rows}"
+
+    case chunks(payload) do
+      [only] ->
+        ["\e_G", head, ";", only, "\e\\"]
+
+      [first | rest] ->
+        {middle, [last]} = Enum.split(rest, -1)
+
+        [
+          ["\e_G", head, ",m=1;", first, "\e\\"],
+          Enum.map(middle, &["\e_Gm=1;", &1, "\e\\"]),
+          ["\e_Gm=0;", last, "\e\\"]
+        ]
+    end
+  end
+
+  # Le protocole plafonne les tronçons de charge utile à 4096 octets.
+  defp chunks(<<chunk::binary-size(4096), rest::binary>>), do: [chunk | chunks(rest)]
+  defp chunks(last), do: [last]
+
+  # Les quatre teintes en RGB : le vert de la dalle d'origine, ou les gris.
+  defp rgb_palette(:dmg),
+    do: {<<0x9B, 0xBC, 0x0F>>, <<0x8B, 0xAC, 0x0F>>, <<0x30, 0x62, 0x30>>, <<0x0F, 0x38, 0x0F>>}
+
+  defp rgb_palette(:gris),
+    do: {<<0xFF, 0xFF, 0xFF>>, <<0xAA, 0xAA, 0xAA>>, <<0x55, 0x55, 0x55>>, <<0x00, 0x00, 0x00>>}
+
+  @doc """
   La frame en PGM binaire (P5) — lisible par tout visionneur d'images.
   """
   @spec to_pgm(PPU.frame()) :: binary()

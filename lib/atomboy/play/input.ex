@@ -62,6 +62,7 @@ defmodule Atomboy.Play.Input do
           | {:repeat, key()}
           | {:release, key()}
           | {:kitty, non_neg_integer()}
+          | {:graphics, boolean()}
 
   @arrows %{?A => :up, ?B => :down, ?C => :right, ?D => :left}
 
@@ -94,12 +95,25 @@ defmodule Atomboy.Play.Input do
     end
   end
 
+  # APC : ESC _ … ESC \ — les réponses du protocole graphique kitty.
+  # « OK » après le point-virgule = le terminal sait afficher des images.
+  defp decode(<<"\e_", rest::binary>> = all, events) do
+    case :binary.split(rest, "\e\\") do
+      [payload, rest] ->
+        ok? = String.contains?(payload, ";OK")
+        decode(rest, [{:graphics, ok?} | events])
+
+      _ ->
+        {Enum.reverse(events), all}
+    end
+  end
+
   # SS3 : ESC O lettre — les flèches du mode application.
   defp decode(<<?\e, ?O, final, rest::binary>>, events) when is_map_key(@arrows, final),
     do: decode(rest, [{:key, @arrows[final]} | events])
 
   # Une séquence coupée en plein vol : attendre la suite.
-  defp decode(<<?\e, o>>, events) when o in ~c"[O", do: {Enum.reverse(events), <<?\e, o>>}
+  defp decode(<<?\e, o>>, events) when o in ~c"[O_", do: {Enum.reverse(events), <<?\e, o>>}
   defp decode(<<"\e">>, events), do: {Enum.reverse(events), "\e"}
   # Échappement suivi d'autre chose : ignoré.
   defp decode(<<"\e", _, rest::binary>>, events), do: decode(rest, events)
