@@ -1,0 +1,4 @@
+## atomboy : -noinput éteint le lecteur tty interne du BEAM (prim_tty), qui
+## sinon vole un octet sur trois au clavier du jeu — voir Atomboy.Play.
+## L'exécutable est ainsi correct par construction.
+-noinput

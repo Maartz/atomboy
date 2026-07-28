@@ -27,3 +27,4 @@ atomboy-*.tar
 # Les parties de jeu : personnelles, changeantes — pas dans l'historique.
 *.sav
 *.state
+burrito_out/

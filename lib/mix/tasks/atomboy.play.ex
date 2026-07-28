@@ -53,37 +53,17 @@ defmodule Mix.Tasks.Atomboy.Play do
 
   @impl Mix.Task
   def run(args) do
-    {opts, argv} =
-      OptionParser.parse!(args,
-        strict: [
-          hold: :integer,
-          frames: :integer,
-          dump: :string,
-          son: :boolean,
-          palette: :string
-        ]
-      )
-
-    opts =
-      case Keyword.get(opts, :palette) do
-        nil -> opts
-        "dmg" -> Keyword.put(opts, :palette, :dmg)
-        "gris" -> Keyword.put(opts, :palette, :gris)
-        autre -> Mix.raise("palette inconnue : #{autre} (dmg ou gris)")
-      end
-
-    rom =
-      case argv do
-        [rom] -> rom
-        _ -> Mix.raise("usage : mix atomboy.play <rom.gb> [--hold N] [--frames N] [--dump f.pgm]")
-      end
-
-    File.exists?(rom) || Mix.raise("ROM introuvable : #{rom}")
     Mix.Task.run("app.start")
 
-    case Atomboy.Play.run(rom, opts) do
-      :ok -> :ok
-      {:error, message} -> Mix.raise(message)
+    case Atomboy.CLI.parse(args) do
+      {:ok, rom, opts} ->
+        case Atomboy.Play.run(rom, opts) do
+          :ok -> :ok
+          {:error, message} -> Mix.raise(message)
+        end
+
+      {:error, message} ->
+        Mix.raise(message)
     end
   end
 end
