@@ -28,30 +28,21 @@ defmodule Mix.Tasks.Atomboy.Play do
 
   @impl Mix.Task
   def run(args) do
-    {opts, argv} = OptionParser.parse!(args, strict: [hold: :integer, frames: :integer])
+    {opts, argv} =
+      OptionParser.parse!(args, strict: [hold: :integer, frames: :integer, dump: :string])
 
     rom =
       case argv do
         [rom] -> rom
-        _ -> Mix.raise("usage : mix atomboy.play <rom.gb> [--hold N] [--frames N]")
+        _ -> Mix.raise("usage : mix atomboy.play <rom.gb> [--hold N] [--frames N] [--dump f.pgm]")
       end
 
     File.exists?(rom) || Mix.raise("ROM introuvable : #{rom}")
     Mix.Task.run("app.start")
-    check_size!()
-    Atomboy.Play.run(rom, opts)
-  end
 
-  defp check_size! do
-    case Atomboy.Play.terminal_size() do
-      {rows, cols} when rows < 73 or cols < 160 ->
-        Mix.raise(
-          "Le terminal fait #{cols}×#{rows} ; il faut 160×73 pour l'écran DMG.\n" <>
-            "Réduire la police (Cmd -) ou agrandir la fenêtre, puis relancer."
-        )
-
-      _ ->
-        :ok
+    case Atomboy.Play.run(rom, opts) do
+      :ok -> :ok
+      {:error, message} -> Mix.raise(message)
     end
   end
 end

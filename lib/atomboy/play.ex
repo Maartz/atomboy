@@ -10,9 +10,13 @@ defmodule Atomboy.Play do
 
     * L'écran alternatif (`\\e[?1049h`) : le jeu occupe tout, et le shell
       retrouve son historique intact à la sortie.
-    * `stty -icanon -echo -isig` : les frappes arrivent une à une, sans écho,
-      et Ctrl-C nous parvient en octet 0x03 — décodé en « quitter », pour
-      restaurer le terminal proprement au lieu de mourir dessus.
+    * Le mode raw par `:shell.start_interactive({:noshell, :raw})` — l'API
+      d'OTP 26. Depuis cette version le BEAM gère lui-même le terminal
+      (`prim_tty`) et réimpose le mode ligne par-dessus tout `stty` externe :
+      seule cette voie livre les frappes une à une, sans écho, avec Ctrl-C
+      en octet 0x03 — décodé en « quitter », pour restaurer le terminal
+      proprement au lieu de mourir dessus. En raw, rien ne traduit plus
+      `\\n` en `\\r\\n` : la sortie l'émet elle-même.
     * Chaque frame se redessine par-dessus la précédente (`\\e[H`), sans
       effacement — pas de scintillement.
 
@@ -34,62 +38,107 @@ defmodule Atomboy.Play do
 
   @doc """
   Joue `rom_path` jusqu'à `q`/Ctrl-C — ou `frames:` frames, pour les essais
-  sans clavier.
+  sans clavier. `dump:` écrit la dernière frame en PGM à la sortie.
+
+  Renvoie `:ok`, ou `{:error, message}` si le terminal est trop petit.
   """
-  @spec run(Path.t(), keyword()) :: :ok
+  @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    saved = terminal_setup()
-    parent = self()
-    reader = spawn_link(fn -> read_keys(parent) end)
+    mode = terminal_setup()
 
     try do
-      loop(%{
-        state: Screen.boot_state(),
-        rom: rom,
-        ram: %{rom_banks: div(byte_size(rom), 0x4000)},
-        hold: %{},
-        pending: "",
-        frame: 0,
-        max_frames: Keyword.get(opts, :frames, :infinity),
-        hold_frames: Keyword.get(opts, :hold, @default_hold),
-        fps: 0.0,
-        fps_mark: System.monotonic_time(:microsecond)
-      })
+      with :ok <- ensure_size(opts) do
+        parent = self()
+        reader = spawn_link(fn -> read_keys(parent) end)
+
+        try do
+          loop(%{
+            state: Screen.boot_state(),
+            rom: rom,
+            ram: %{rom_banks: div(byte_size(rom), 0x4000)},
+            hold: %{},
+            pending: "",
+            frame: 0,
+            max_frames: Keyword.get(opts, :frames, :infinity),
+            hold_frames: Keyword.get(opts, :hold, @default_hold),
+            dump: Keyword.get(opts, :dump),
+            last_frame: nil,
+            fps: 0.0,
+            fps_mark: System.monotonic_time(:microsecond)
+          })
+        after
+          Process.unlink(reader)
+          Process.exit(reader, :kill)
+        end
+      end
     after
-      Process.unlink(reader)
-      Process.exit(reader, :kill)
-      terminal_restore(saved)
+      terminal_restore(mode)
+    end
+  end
+
+  # L'écran DMG en demi-blocs : 160 colonnes, 72 lignes, plus le statut.
+  # Mesurable seulement une fois le mode raw en place (`:io.columns` répond
+  # :enotsup en -noshell ordinaire) ; sans réponse, on tente. Les essais
+  # bornés par frames: tournent aussi dans un pty de 80×24 — pas de exigence.
+  defp ensure_size(opts) do
+    case {Keyword.has_key?(opts, :frames), :io.columns(), :io.rows()} do
+      {false, {:ok, cols}, {:ok, rows}} when cols < 160 or rows < 73 ->
+        {:error,
+         "Le terminal fait #{cols}×#{rows} ; il faut 160×73 pour l'écran DMG.\n" <>
+           "Réduire la police (Cmd -) ou agrandir la fenêtre, puis relancer."}
+
+      _ ->
+        :ok
     end
   end
 
   # ── La boucle de frame ──────────────────────────────────────────────────────
 
-  defp loop(%{frame: n, max_frames: max}) when n >= max, do: :ok
+  defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: dump(ctx)
 
   defp loop(ctx) do
     started = System.monotonic_time(:microsecond)
     {keys, pending} = Input.decode(ctx.pending <> collect_input([]))
 
     if :quit in keys do
-      :ok
+      dump(ctx)
     else
       hold = Enum.reduce(keys, ctx.hold, &Map.put(&2, &1, ctx.hold_frames))
       held = Map.keys(hold)
       ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
 
       {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, true)
-      IO.write(["\e[H", Screen.to_text(pixels), status(ctx, ram, held)])
+      IO.write(["\e[H", crlf(Screen.to_text(pixels)), status(ctx, ram, held)])
 
       now = System.monotonic_time(:microsecond)
       spare = @frame_us - (now - started)
       if spare > 999, do: Process.sleep(div(spare, 1000))
 
       hold = for {key, left} <- hold, left > 1, into: %{}, do: {key, left - 1}
-      ctx = %{ctx | state: state, ram: ram, hold: hold, pending: pending, frame: ctx.frame + 1}
+
+      ctx = %{
+        ctx
+        | state: state,
+          ram: ram,
+          hold: hold,
+          pending: pending,
+          frame: ctx.frame + 1,
+          last_frame: pixels
+      }
+
       loop(measure_fps(ctx))
     end
   end
+
+  # En mode raw, plus personne ne traduit \n en \r\n — on s'en charge.
+  defp crlf(text), do: :binary.replace(text, "\n", "\r\n", [:global])
+
+  defp dump(%{dump: path, last_frame: pixels}) when is_binary(path) and is_binary(pixels) do
+    File.write!(path, Screen.to_pgm(pixels))
+  end
+
+  defp dump(_ctx), do: :ok
 
   defp collect_input(acc) do
     receive do
@@ -136,34 +185,44 @@ defmodule Atomboy.Play do
 
   # ── Le terminal ─────────────────────────────────────────────────────────────
 
+  # Le mode raw d'OTP 26 en voie royale ; à défaut (vieux OTP, environnement
+  # sans prim_tty), le repli stty — qui ne peut rien contre prim_tty, mais
+  # prim_tty absent est justement le cas où il suffit.
   defp terminal_setup do
-    saved = ~c"stty -g < /dev/tty" |> :os.cmd() |> List.to_string() |> String.trim()
-    :os.cmd(~c"stty -icanon -echo -isig min 1 time 0 < /dev/tty")
+    mode =
+      try do
+        case :shell.start_interactive({:noshell, :raw}) do
+          :ok -> :shell
+          _ -> stty_setup()
+        end
+      catch
+        _, _ -> stty_setup()
+      end
+
     IO.write("\e[?1049h\e[?25l\e[2J")
-    saved
+    mode
   end
 
-  defp terminal_restore(saved) do
+  defp stty_setup do
+    :os.cmd(~c"stty -icanon -echo -isig min 1 time 0 < /dev/tty 2> /dev/null")
+    :stty
+  end
+
+  defp terminal_restore(mode) do
     IO.write("\e[?1049l\e[?25h\e[0m")
 
-    if saved =~ ~r/^[\w:=,]+$/ do
-      :os.cmd(String.to_charlist("stty #{saved} < /dev/tty"))
-    else
-      :os.cmd(~c"stty sane < /dev/tty")
+    case mode do
+      :shell ->
+        try do
+          :shell.start_interactive({:noshell, :cooked})
+        catch
+          _, _ -> :ok
+        end
+
+      :stty ->
+        :os.cmd(~c"stty sane < /dev/tty 2> /dev/null")
     end
 
     :ok
-  end
-
-  @doc """
-  La taille du terminal en `{lignes, colonnes}` — via `stty size`, la seule
-  voie fiable sous `-noshell`. `:unknown` sans tty (sortie redirigée, CI).
-  """
-  @spec terminal_size() :: {pos_integer(), pos_integer()} | :unknown
-  def terminal_size do
-    case ~c"stty size < /dev/tty 2> /dev/null" |> :os.cmd() |> List.to_string() |> String.split() do
-      [rows, cols] -> {String.to_integer(rows), String.to_integer(cols)}
-      _ -> :unknown
-    end
   end
 end
