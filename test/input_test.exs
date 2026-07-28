@@ -3,43 +3,64 @@ defmodule Atomboy.Play.InputTest do
 
   alias Atomboy.Play.Input
 
-  test "les lettres se décodent en touches" do
-    assert Input.decode("x") == {[:a], ""}
-    assert Input.decode("c") == {[:b], ""}
-    assert Input.decode("\r") == {[:start], ""}
-    assert Input.decode(" ") == {[:select], ""}
-    assert Input.decode("q") == {[:quit], ""}
-    assert Input.decode(<<0x03>>) == {[:quit], ""}
+  test "les lettres se décodent en frappes au relâchement inconnu" do
+    assert Input.decode("x") == {[{:key, :a}], ""}
+    assert Input.decode("c") == {[{:key, :b}], ""}
+    assert Input.decode("\r") == {[{:key, :start}], ""}
+    assert Input.decode(" ") == {[{:key, :select}], ""}
+    assert Input.decode("q") == {[{:key, :quit}], ""}
+    assert Input.decode(<<0x03>>) == {[{:key, :quit}], ""}
   end
 
-  test "les flèches se décodent depuis leurs séquences CSI" do
-    assert Input.decode("\e[A") == {[:up], ""}
-    assert Input.decode("\e[B") == {[:down], ""}
-    assert Input.decode("\e[C") == {[:right], ""}
-    assert Input.decode("\e[D") == {[:left], ""}
-    # Le mode application (SS3) de certains terminaux.
-    assert Input.decode("\eOA") == {[:up], ""}
+  test "les flèches classiques, CSI comme SS3" do
+    assert Input.decode("\e[A") == {[{:key, :up}], ""}
+    assert Input.decode("\e[B") == {[{:key, :down}], ""}
+    assert Input.decode("\e[C") == {[{:key, :right}], ""}
+    assert Input.decode("\e[D") == {[{:key, :left}], ""}
+    assert Input.decode("\eOA") == {[{:key, :up}], ""}
   end
 
-  test "plusieurs touches dans une même lecture, dans l'ordre" do
-    assert Input.decode("\e[Ax\r") == {[:up, :a, :start], ""}
+  test "plusieurs événements dans une même lecture, dans l'ordre" do
+    assert Input.decode("\e[Ax\r") == {[{:key, :up}, {:key, :a}, {:key, :start}], ""}
   end
 
   test "une séquence coupée attend la suite" do
     assert Input.decode("\e") == {[], "\e"}
-    assert Input.decode("x\e[") == {[:a], "\e["}
-
-    # La suite arrive : le reste préfixé se complète.
-    {keys, rest} = Input.decode("\e[" <> "A")
-    assert {keys, rest} == {[:up], ""}
+    assert Input.decode("x\e[") == {[{:key, :a}], "\e["}
+    assert Input.decode("\e[1;1:") == {[], "\e[1;1:"}
+    assert Input.decode("\e[" <> "A") == {[{:key, :up}], ""}
   end
 
-  test "un échappement qui n'est pas une flèche s'ignore" do
-    assert Input.decode("\eOx") == {[:a], ""}
+  test "le protocole kitty : presse, répétition, relâchement" do
+    assert Input.decode("\e[120;1u") == {[{:press, :a}], ""}
+    assert Input.decode("\e[120;1:2u") == {[{:repeat, :a}], ""}
+    assert Input.decode("\e[120;1:3u") == {[{:release, :a}], ""}
+    assert Input.decode("\e[99;1u") == {[{:press, :b}], ""}
+    assert Input.decode("\e[13;1u") == {[{:press, :start}], ""}
+    assert Input.decode("\e[32;1:3u") == {[{:release, :select}], ""}
   end
 
-  test "le reste du clavier est muet" do
-    assert Input.decode("zk9") == {[], ""}
+  test "le protocole kitty : les flèches paramétrées" do
+    assert Input.decode("\e[1;1:1A") == {[{:press, :up}], ""}
+    assert Input.decode("\e[1;1:2C") == {[{:repeat, :right}], ""}
+    assert Input.decode("\e[1;1:3B") == {[{:release, :down}], ""}
+  end
+
+  test "le protocole kitty : quitter par q, Échap ou Ctrl-C" do
+    assert Input.decode("\e[113;1u") == {[{:press, :quit}], ""}
+    assert Input.decode("\e[27;1u") == {[{:press, :quit}], ""}
+    assert Input.decode("\e[99;5u") == {[{:press, :quit}], ""}
+  end
+
+  test "la réponse à la requête kitty se reconnaît" do
+    assert Input.decode("\e[?11u") == {[{:kitty, 11}], ""}
+    assert Input.decode("\e[?1u") == {[{:kitty, 1}], ""}
+  end
+
+  test "les séquences inconnues s'ignorent" do
+    assert Input.decode("\e[5~zk9") == {[], ""}
+    assert Input.decode("\e[121;1u") == {[], ""}
+    assert Input.decode("\eOx") == {[{:key, :a}], ""}
   end
 
   test "les touches tenues deviennent des lignes, actives à zéro" do

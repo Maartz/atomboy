@@ -39,12 +39,19 @@ defmodule Atomboy.Play do
     * Sans pty visible (`--frames` en test, entrée redirigée), la lecture
       se replie sur `/dev/fd/0` et aucune taille n'est exigée.
 
-  ## Le relâchement qui n'existe pas
+  ## Le relâchement, selon le terminal
 
-  Un terminal ne signale que les frappes, jamais les relâchements. Chaque
-  frappe devient donc une pression tenue `hold` frames (~170 ms), rafraîchie
-  par la répétition automatique du clavier — un maintien réel reste tenu,
-  une frappe brève reste brève. Réglable par `hold:` si un jeu s'y prête mal.
+  Sur un terminal parlant le protocole clavier kitty (Ghostty, kitty,
+  WezTerm…), chaque touche envoie presse *et* relâchement : l'état du
+  clavier est réel, les diagonales et les accords A+direction marchent. Le
+  protocole se demande au démarrage (`CSI > 11 u` puis requête) — la réponse
+  confirme, un terminal muet ignore tout.
+
+  Sans lui, un terminal ne signale que les frappes, et macOS ne répète que
+  la dernière touche enfoncée : chaque frappe devient une pression tenue
+  `hold` frames (~170 ms), rafraîchie par la répétition automatique —
+  un maintien réel reste tenu, une frappe brève reste brève, mais les
+  accords ne durent que leur fenêtre de maintien. Réglable par `hold:`.
   """
 
   alias Atomboy.Joypad
@@ -105,6 +112,8 @@ defmodule Atomboy.Play do
           rom: rom,
           ram: %{rom_banks: div(byte_size(rom), 0x4000)},
           hold: %{},
+          down: MapSet.new(),
+          kitty: false,
           pending: "",
           frame: 0,
           max_frames: Keyword.get(opts, :frames, :infinity),
@@ -150,13 +159,13 @@ defmodule Atomboy.Play do
 
   defp loop(ctx) do
     started = System.monotonic_time(:microsecond)
-    {keys, pending} = Input.decode(ctx.pending <> collect_input([]))
+    {events, pending} = Input.decode(ctx.pending <> collect_input([]))
 
-    if :quit in keys do
+    if Enum.any?(events, &match?({tag, :quit} when tag != :release, &1)) do
       dump(ctx)
     else
-      hold = Enum.reduce(keys, ctx.hold, &Map.put(&2, &1, ctx.hold_frames))
-      held = Map.keys(hold)
+      ctx = Enum.reduce(events, ctx, &apply_event/2)
+      held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
       ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
 
       {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, true)
@@ -166,7 +175,7 @@ defmodule Atomboy.Play do
       spare = @frame_us - (now - started)
       if spare > 999, do: Process.sleep(div(spare, 1000))
 
-      hold = for {key, left} <- hold, left > 1, into: %{}, do: {key, left - 1}
+      hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
 
       ctx = %{
         ctx
@@ -181,6 +190,30 @@ defmodule Atomboy.Play do
       loop(measure_fps(ctx))
     end
   end
+
+  # ── L'état des touches ──────────────────────────────────────────────────────
+
+  # La réponse à la requête kitty : le terminal parle le protocole. L'état
+  # réel n'est fiable qu'avec les relâchements (bit 2 des flags).
+  defp apply_event({:kitty, flags}, ctx), do: %{ctx | kitty: Bitwise.band(flags, 2) != 0}
+
+  defp apply_event({:release, key}, %{kitty: true} = ctx),
+    do: %{ctx | down: MapSet.delete(ctx.down, key), hold: Map.delete(ctx.hold, key)}
+
+  defp apply_event({tag, key}, %{kitty: true} = ctx) when tag in [:press, :repeat],
+    do: %{ctx | down: MapSet.put(ctx.down, key)}
+
+  # En kitty, la presse nue d'une flèche (« ESC [ A ») aura son relâchement.
+  defp apply_event({:key, key}, %{kitty: true} = ctx)
+       when key in [:up, :down, :left, :right],
+       do: %{ctx | down: MapSet.put(ctx.down, key)}
+
+  # Régime classique : frappe sans relâchement connu → pression tenue.
+  defp apply_event({tag, key}, ctx) when tag in [:key, :press, :repeat],
+    do: %{ctx | hold: Map.put(ctx.hold, key, ctx.hold_frames)}
+
+  # Relâchement sans protocole confirmé : ignoré.
+  defp apply_event(_event, ctx), do: ctx
 
   # Le \r explicite avant chaque \n : inoffensif quand opost traduit déjà,
   # salvateur si un environnement l'a éteint — l'affichage ne dépend ainsi
@@ -264,10 +297,18 @@ defmodule Atomboy.Play do
       end
 
     IO.write("\e[?1049h\e[?25l\e[2J")
+
+    # Le protocole clavier kitty, s'il est parlé : pousser les flags
+    # (1 désambiguïser, 2 événements presse/relâchement, 8 toutes les touches
+    # en séquences) puis interroger — la réponse « CSI ? … u » confirme, et
+    # les relâchements donnent l'état réel du clavier (diagonales, accords).
+    # Un terminal muet ignore tout : le maintien par frames reste en place.
+    if tty, do: IO.write("\e[>11u\e[?u")
     saved
   end
 
   defp terminal_restore(tty, saved) do
+    if tty, do: IO.write("\e[<u")
     IO.write("\e[?1049l\e[?25h\e[0m")
 
     if tty do
