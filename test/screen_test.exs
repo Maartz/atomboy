@@ -31,6 +31,17 @@ defmodule Atomboy.ScreenTest do
     assert :erlang.crc32(frame) == @golden_crc
   end
 
+  @acid2 "test/fixtures/dmg-acid2.gb"
+  @acid2_crc 0x9F51DD25
+
+  test "dmg-acid2 dessine son visage, au pixel près" do
+    # Le test d'acceptance des PPU : chaque trait du visage nomme la feature
+    # qui le casse — sprites 8×16, miroirs, priorités, fenêtre et son
+    # compteur de ligne interne. Un CRC pour tout le rendu.
+    {frame, _state, _ram} = Atomboy.Screen.run(@acid2, 120)
+    assert :erlang.crc32(frame) == @acid2_crc
+  end
+
   test "une frame rendue ne contient que des teintes DMG" do
     {frame, _state, _ram} = Atomboy.Screen.run(@rom, 60)
     assert for(<<shade <- frame>>, shade > 3, do: shade) == []

@@ -55,14 +55,20 @@ defmodule Atomboy.Screen do
   end
 
   defp frame(state, rom, ram, render?) do
-    Enum.reduce(0..(@lines - 1), {<<>>, state, ram}, fn ly, {pixels, state, ram} ->
-      {state, ram} = step_line(state, rom, ram, ly)
+    {pixels, state, ram, _window_line} =
+      Enum.reduce(0..(@lines - 1), {<<>>, state, ram, 0}, fn ly,
+                                                             {pixels, state, ram, window_line} ->
+        {state, ram} = step_line(state, rom, ram, ly)
 
-      pixels =
-        if render? and ly < @visible, do: pixels <> PPU.render_line(ram, ly), else: pixels
+        if render? and ly < @visible do
+          {line, window_line} = PPU.render_line(ram, ly, window_line)
+          {pixels <> line, state, ram, window_line}
+        else
+          {pixels, state, ram, window_line}
+        end
+      end)
 
-      {pixels, state, ram}
-    end)
+    {pixels, state, ram}
   end
 
   @doc """
@@ -82,6 +88,24 @@ defmodule Atomboy.Screen do
         Map.update(ram, 0xFF0F, 0x01, &bor(&1, 0x01))
       else
         ram
+      end
+
+    # La coïncidence LY=LYC : le bit 2 de STAT la reflète, et si le jeu a armé
+    # le bit 6, l'interruption STAT part — c'est l'outil des effets raster, et
+    # dmg-acid2 s'endormait dessus.
+    stat = Map.get(ram, 0xFF41, 0)
+
+    ram =
+      if ly == Map.get(ram, 0xFF45, 0) do
+        ram = Map.put(ram, 0xFF41, bor(stat, 0x04))
+
+        if band(stat, 0x40) != 0 do
+          Map.update(ram, 0xFF0F, 0x02, &bor(&1, 0x02))
+        else
+          ram
+        end
+      else
+        Map.put(ram, 0xFF41, band(stat, 0xFB))
       end
 
     {state, ram, cycles} = CartLoop.run(state, rom, ram, @line_cycles)

@@ -12,8 +12,9 @@ defmodule Atomboy.PPU do
 
     * **Fond** — la grille 32×32, défilée par SCX/SCY, palette BGP.
     * **Fenêtre** — la seconde grille, ancrée à (WX-7, WY), par-dessus le
-      fond. Son compteur de ligne est approximé par `ly - WY` : exact tant
-      que la fenêtre n'est pas basculée en cours de frame.
+      fond. Son compteur de ligne interne n'avance que sur les scanlines où
+      elle s'est réellement affichée — le quirk que dmg-acid2 vérifie en la
+      basculant en cours de frame, et que l'approximation `ly - WY` casse.
     * **Sprites** — 40 entrées d'OAM, 10 au plus par scanline (l'ordre OAM
       décide, comme le matériel), 8×8 ou 8×16, miroirs, palettes OBP0/OBP1,
       couleur 0 transparente. La priorité entre sprites : le X le plus petit
@@ -47,43 +48,54 @@ defmodule Atomboy.PPU do
   def dimensions, do: {@width, @height}
 
   @doc """
-  Rend la scanline `ly` depuis l'état mémoire du CPU.
+  Rend la scanline `ly` depuis l'état mémoire du CPU, avec le compteur de
+  ligne interne de la fenêtre. Renvoie `{scanline, compteur}` — le compteur
+  n'avance que si la fenêtre s'est affichée sur cette ligne.
 
   L'écran éteint rend la teinte 0 partout.
   """
-  @spec render_line(map(), 0..143) :: line()
-  def render_line(ram, ly) do
+  @spec render_line(map(), 0..143, non_neg_integer()) :: {line(), non_neg_integer()}
+  def render_line(ram, ly, window_line) do
     lcdc = Map.get(ram, 0xFF40, 0x91)
 
     if band(lcdc, 0x80) == 0 do
-      :binary.copy(<<0>>, @width)
+      {:binary.copy(<<0>>, @width), window_line}
     else
-      raw = background_raw(ram, lcdc, ly)
+      {raw, window_line} = background_raw(ram, lcdc, ly, window_line)
       sprites = if band(lcdc, 0x02) != 0, do: sprite_pixels(ram, lcdc, ly), else: %{}
       bgp = Map.get(ram, 0xFF47, 0xE4)
 
-      for x <- 0..(@width - 1), into: <<>> do
-        bg_color = :binary.at(raw, x)
+      line =
+        for x <- 0..(@width - 1), into: <<>> do
+          bg_color = :binary.at(raw, x)
 
-        case sprites do
-          %{^x => {shade, behind?}} when not behind? or bg_color == 0 -> <<shade>>
-          _ -> <<band(bsr(bgp, bg_color * 2), 3)>>
+          case sprites do
+            %{^x => {shade, behind?}} when not behind? or bg_color == 0 -> <<shade>>
+            _ -> <<band(bsr(bgp, bg_color * 2), 3)>>
+          end
         end
-      end
+
+      {line, window_line}
     end
   end
 
   @doc "Rend les 144 scanlines d'une frame."
   @spec render_frame(map()) :: frame()
   def render_frame(ram) do
-    for ly <- 0..(@height - 1), into: <<>>, do: render_line(ram, ly)
+    {frame, _window_line} =
+      Enum.reduce(0..(@height - 1), {<<>>, 0}, fn ly, {frame, window_line} ->
+        {line, window_line} = render_line(ram, ly, window_line)
+        {frame <> line, window_line}
+      end)
+
+    frame
   end
 
   # ── Fond et fenêtre — couleurs brutes, avant palette ────────────────────────
 
-  defp background_raw(ram, lcdc, ly) do
+  defp background_raw(ram, lcdc, ly, window_line) do
     if band(lcdc, 0x01) == 0 do
-      :binary.copy(<<0>>, @width)
+      {:binary.copy(<<0>>, @width), window_line}
     else
       scy = Map.get(ram, 0xFF42, 0)
       scx = Map.get(ram, 0xFF43, 0)
@@ -99,18 +111,20 @@ defmodule Atomboy.PPU do
       bg_row = bg_map + bsr(y, 3) * 32
       bg_tile_line = band(y, 7) * 2
 
-      win_y = ly - wy
-      win_row = win_map + bsr(win_y, 3) * 32
-      win_tile_line = band(win_y, 7) * 2
+      win_row = win_map + bsr(window_line, 3) * 32
+      win_tile_line = band(window_line, 7) * 2
 
-      for x <- 0..(@width - 1), into: <<>> do
-        if window? and x >= wx do
-          <<tile_color(ram, win_row + bsr(x - wx, 3), win_tile_line, band(x - wx, 7), signed?)>>
-        else
-          xx = band(x + scx, 0xFF)
-          <<tile_color(ram, bg_row + bsr(xx, 3), bg_tile_line, band(xx, 7), signed?)>>
+      raw =
+        for x <- 0..(@width - 1), into: <<>> do
+          if window? and x >= wx do
+            <<tile_color(ram, win_row + bsr(x - wx, 3), win_tile_line, band(x - wx, 7), signed?)>>
+          else
+            xx = band(x + scx, 0xFF)
+            <<tile_color(ram, bg_row + bsr(xx, 3), bg_tile_line, band(xx, 7), signed?)>>
+          end
         end
-      end
+
+      {raw, if(window? and wx < @width, do: window_line + 1, else: window_line)}
     end
   end
 
