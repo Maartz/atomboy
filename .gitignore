@@ -24,3 +24,5 @@ atomboy-*.tar
 
 # Corpus de vecteurs SingleStepTests — récupéré par `mix atomboy.corpus`
 /test/fixtures/
+# Les parties de jeu : personnelles, changeantes — pas dans l'historique.
+*.sav
