@@ -24,6 +24,7 @@ mix test             # rejoue tous les vecteurs des opcodes implémentés
 | `mix atomboy.progress` | grille de couverture des deux tables d'opcodes |
 | `mix atomboy.bench [n]` | débit du CPU en instructions/s |
 | `mix atomboy.atomvm` | vérifie que le code se charge et s'exécute sous AtomVM |
+| `mix atomboy.esp32 [--firmware]` | flashe la carte — ESP32 (bytecode) ou C6 (AOT natif riscv32), cible déduite du port |
 | `mix atomboy.corpus` | récupère le corpus de vecteurs |
 
 ## Comment c'est organisé

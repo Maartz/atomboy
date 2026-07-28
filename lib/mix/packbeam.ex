@@ -20,8 +20,8 @@ defmodule Mix.Atomboy.Packbeam do
   Sur l'ancienne CLI, le module de démarrage est placé en tête d'archive —
   c'était la convention. Sur la nouvelle, il est passé à `--start`.
   """
-  @spec create(Path.t(), Path.t(), [Path.t()], module()) :: :ok
-  def create(build, output, inputs, start_module) do
+  @spec create(Path.t(), Path.t(), [Path.t()], module(), keyword()) :: :ok
+  def create(build, output, inputs, start_module, options \\ []) do
     packbeam = Path.join(build, "tools/packbeam/PackBEAM")
 
     unless File.regular?(packbeam) do
@@ -34,9 +34,14 @@ defmodule Mix.Atomboy.Packbeam do
     # abrégée d'inspect/1.
     module_name = Atom.to_string(start_module)
 
+    # `--prune` (garder la seule fermeture transitive du module de départ)
+    # n'existe que sur la CLI à sous-commandes ; l'ancienne empaquette tout,
+    # tant pis pour elle.
+    prune = if options[:prune], do: ["--prune"], else: []
+
     args =
       if subcommand_cli?(packbeam) do
-        ["create", "--start", module_name, output | inputs]
+        ["create" | prune] ++ ["--start", module_name, output | inputs]
       else
         [output | order_entry_first(inputs, module_name)]
       end
