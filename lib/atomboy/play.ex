@@ -6,19 +6,31 @@ defmodule Atomboy.Play do
   faire tourner une frame de machine (154 scanlines), l'afficher, tenir la
   cadence — 59,7 Hz, celle de la dalle.
 
-  ## Le terminal comme console
+  ## Le terminal comme console — la voie du pty nommé
+
+  Le clavier ne passe **pas** par l'étage d'E/S d'Erlang, pour deux raisons
+  mesurées à la sonde (`scripts/probe_clavier*.exs`) :
+
+    * `:shell.start_interactive({:noshell, :raw})`, l'API d'OTP 26, ne
+      réveille jamais une lecture en attente quand la frappe arrive après
+      elle — l'entrée déjà tamponnée passe, la frappe humaine jamais.
+    * Le BEAM détache ses processus fils du terminal de contrôle (`setsid`
+      avant exec) : `/dev/tty` est mort pour eux, tout `stty < /dev/tty`
+      est un no-op silencieux.
+
+  Mais le pty a un *nom* (`/dev/ttysNNN`), que `ps -o tty=` sait donner, et
+  un device se manipule sans lien de contrôle : `stty -f` pose les modes
+  (`-icanon -echo -isig` : frappes une à une, sans écho, Ctrl-C en octet
+  0x03 décodé en « quitter »), et `:file.read` octet par octet livre les
+  frappes en temps réel — vérifié écritures simultanées comprises.
 
     * L'écran alternatif (`\\e[?1049h`) : le jeu occupe tout, et le shell
-      retrouve son historique intact à la sortie.
-    * Le mode raw par `:shell.start_interactive({:noshell, :raw})` — l'API
-      d'OTP 26. Depuis cette version le BEAM gère lui-même le terminal
-      (`prim_tty`) et réimpose le mode ligne par-dessus tout `stty` externe :
-      seule cette voie livre les frappes une à une, sans écho, avec Ctrl-C
-      en octet 0x03 — décodé en « quitter », pour restaurer le terminal
-      proprement au lieu de mourir dessus. En raw, rien ne traduit plus
-      `\\n` en `\\r\\n` : la sortie l'émet elle-même.
+      retrouve son historique intact à la sortie ; les réglages `stty`
+      d'origine sont sauvés (`-g`) et restaurés.
     * Chaque frame se redessine par-dessus la précédente (`\\e[H`), sans
       effacement — pas de scintillement.
+    * Sans pty visible (`--frames` en test, entrée redirigée), la lecture
+      se replie sur `/dev/fd/0` et aucune taille n'est exigée.
 
   ## Le relâchement qui n'existe pas
 
@@ -45,12 +57,14 @@ defmodule Atomboy.Play do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    mode = terminal_setup()
+    tty = pty_path()
+    saved = terminal_setup(tty)
 
     try do
-      with :ok <- ensure_size(opts) do
+      with :ok <- ensure_size(opts, tty) do
         parent = self()
-        reader = spawn_link(fn -> read_keys(parent) end)
+        input = tty || "/dev/fd/0"
+        reader = spawn_link(fn -> read_keys(parent, input) end)
 
         try do
           loop(%{
@@ -73,25 +87,32 @@ defmodule Atomboy.Play do
         end
       end
     after
-      terminal_restore(mode)
+      terminal_restore(tty, saved)
     end
   end
 
   # L'écran DMG en demi-blocs : 160 colonnes, 72 lignes, plus le statut.
-  # Mesurable seulement une fois le mode raw en place (`:io.columns` répond
-  # :enotsup en -noshell ordinaire) ; sans réponse, on tente. Les essais
-  # bornés par frames: tournent aussi dans un pty de 80×24 — pas de exigence.
-  defp ensure_size(opts) do
-    case {Keyword.has_key?(opts, :frames), :io.columns(), :io.rows()} do
-      {false, {:ok, cols}, {:ok, rows}} when cols < 160 or rows < 73 ->
-        {:error,
-         "Le terminal fait #{cols}×#{rows} ; il faut 160×73 pour l'écran DMG.\n" <>
-           "Réduire la police (Cmd -) ou agrandir la fenêtre, puis relancer."}
-
-      _ ->
-        :ok
+  # La taille se lit sur le pty nommé (`stty -f … -a` — « 66 rows; 269
+  # columns; » sur mac, « rows 66; columns 269 » ailleurs). Les essais bornés
+  # par frames: tournent aussi dans un pty de 80×24 — pas d'exigence.
+  defp ensure_size(opts, tty) do
+    with false <- Keyword.has_key?(opts, :frames),
+         out when is_binary(out) <- tty && to_string(:os.cmd(stty(tty, "-a 2> /dev/null"))),
+         [_, rows] <- Regex.run(~r/(\d+) rows|rows (?:= )?(\d+)/, out) |> compact(),
+         [_, cols] <- Regex.run(~r/(\d+) columns|columns (?:= )?(\d+)/, out) |> compact(),
+         {rows, cols} = {String.to_integer(rows), String.to_integer(cols)},
+         true <- rows < 73 or cols < 160 do
+      {:error,
+       "Le terminal fait #{cols}×#{rows} ; il faut 160×73 pour l'écran DMG.\n" <>
+         "Réduire la police (Cmd -) ou agrandir la fenêtre, puis relancer."}
+    else
+      _ -> :ok
     end
   end
+
+  # Regex.run à deux alternatives : ne garder que les groupes capturés.
+  defp compact(nil), do: nil
+  defp compact(matches), do: Enum.reject(matches, &(&1 in [nil, ""]))
 
   # ── La boucle de frame ──────────────────────────────────────────────────────
 
@@ -131,7 +152,9 @@ defmodule Atomboy.Play do
     end
   end
 
-  # En mode raw, plus personne ne traduit \n en \r\n — on s'en charge.
+  # Le \r explicite avant chaque \n : inoffensif quand opost traduit déjà,
+  # salvateur si un environnement l'a éteint — l'affichage ne dépend ainsi
+  # d'aucun réglage de sortie du terminal.
   defp crlf(text), do: :binary.replace(text, "\n", "\r\n", [:global])
 
   defp dump(%{dump: path, last_frame: pixels}) when is_binary(path) and is_binary(pixels) do
@@ -169,14 +192,23 @@ defmodule Atomboy.Play do
 
   # ── Le clavier ──────────────────────────────────────────────────────────────
 
-  # Un octet à la fois depuis stdin — le terminal en -icanon les livre dès la
-  # frappe. La fin de flux (entrée redirigée épuisée) arrête juste la lecture :
-  # la partie continue au joypad relâché.
-  defp read_keys(parent) do
-    case IO.getn("", 1) do
-      data when is_binary(data) ->
+  # Le pty s'ouvre ici même : un descripteur :raw ne se lit que depuis le
+  # processus qui l'a ouvert. Puis un octet à la fois, en lecture bloquante
+  # hors de l'étage d'E/S d'Erlang — c'est elle que le terminal en -icanon
+  # réveille à chaque frappe. La fin de flux (entrée redirigée épuisée)
+  # arrête juste la lecture : la partie continue au joypad relâché.
+  defp read_keys(parent, path) do
+    case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
+      {:ok, f} -> read_loop(parent, f)
+      _ -> :ok
+    end
+  end
+
+  defp read_loop(parent, f) do
+    case :file.read(f, 1) do
+      {:ok, data} ->
         send(parent, {:input, data})
-        read_keys(parent)
+        read_loop(parent, f)
 
       _eof_or_error ->
         :ok
@@ -185,44 +217,40 @@ defmodule Atomboy.Play do
 
   # ── Le terminal ─────────────────────────────────────────────────────────────
 
-  # Le mode raw d'OTP 26 en voie royale ; à défaut (vieux OTP, environnement
-  # sans prim_tty), le repli stty — qui ne peut rien contre prim_tty, mais
-  # prim_tty absent est justement le cas où il suffit.
-  defp terminal_setup do
-    mode =
-      try do
-        case :shell.start_interactive({:noshell, :raw}) do
-          :ok -> :shell
-          _ -> stty_setup()
-        end
-      catch
-        _, _ -> stty_setup()
+  # Le nom du pty de ce BEAM — « ttys005 » — par ps, seul lien qui survive
+  # au setsid. nil sans terminal (entrée redirigée, CI).
+  defp pty_path do
+    tty = :os.cmd(String.to_charlist("ps -o tty= -p #{System.pid()}"))
+    tty = tty |> to_string() |> String.trim()
+    if String.starts_with?(tty, "tty"), do: "/dev/#{tty}"
+  end
+
+  defp terminal_setup(tty) do
+    saved =
+      if tty do
+        saved = tty |> stty("-g 2> /dev/null") |> :os.cmd() |> to_string() |> String.trim()
+        :os.cmd(stty(tty, "-icanon -echo -isig min 1 time 0 2> /dev/null"))
+        saved
       end
 
     IO.write("\e[?1049h\e[?25l\e[2J")
-    mode
+    saved
   end
 
-  defp stty_setup do
-    :os.cmd(~c"stty -icanon -echo -isig min 1 time 0 < /dev/tty 2> /dev/null")
-    :stty
-  end
-
-  defp terminal_restore(mode) do
+  defp terminal_restore(tty, saved) do
     IO.write("\e[?1049l\e[?25h\e[0m")
 
-    case mode do
-      :shell ->
-        try do
-          :shell.start_interactive({:noshell, :cooked})
-        catch
-          _, _ -> :ok
-        end
-
-      :stty ->
-        :os.cmd(~c"stty sane < /dev/tty 2> /dev/null")
+    if tty do
+      restore = if saved && saved =~ ~r/^[\w:=,.-]+$/, do: saved, else: "sane"
+      :os.cmd(stty(tty, "#{restore} 2> /dev/null"))
     end
 
     :ok
+  end
+
+  # macOS dit `stty -f fichier`, GNU dit `stty -F fichier`.
+  defp stty(tty, args) do
+    flag = if match?({:unix, :linux}, :os.type()), do: "-F", else: "-f"
+    String.to_charlist("stty #{flag} #{tty} #{args}")
   end
 end
