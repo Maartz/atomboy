@@ -94,10 +94,35 @@ defmodule Atomboy.CPU do
     end
   end
 
+  # ── La table étendue ────────────────────────────────────────────────────────
+  #
+  # 0xCB est un préfixe : le vrai opcode est l'octet suivant, décodé par une
+  # seconde table de clauses. Les cycles des clauses CB incluent le fetch du
+  # préfixe — rien à additionner ici.
+
+  @implemented {nil, 0xCB}
+  def exec(0xCB, %State{pc: pc} = st, mem) do
+    cb_opcode = @mem.read8(mem, pc)
+    exec_cb(cb_opcode, %{st | pc: pc + 1 &&& 0xFFFF}, mem)
+  end
+
   # ── Filet ───────────────────────────────────────────────────────────────────
 
   def exec(opcode, _state, _mem) do
     raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
+  end
+
+  for %Insn{prefix: :cb} = insn <- Table.extended() do
+    @implemented {:cb, insn.opcode}
+    {args, body} = Gen.clause(insn)
+
+    defp exec_cb(unquote(insn.opcode), unquote_splicing(args)) do
+      unquote(body)
+    end
+  end
+
+  defp exec_cb(opcode, _state, _mem) do
+    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb
   end
 
   @doc """

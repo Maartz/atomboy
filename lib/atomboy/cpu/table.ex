@@ -49,10 +49,46 @@ defmodule Atomboy.CPU.Table do
   end
 
   @doc """
-  La table étendue, préfixée par 0xCB. Vide pour l'instant.
+  La table étendue, préfixée par 0xCB — la plus régulière des deux.
+
+  x=0 : huit rotations/décalages sur les huit cibles ; x=1/2/3 : BIT, RES et
+  SET, le numéro de bit dans le champ y. Les formes (HL) coûtent le
+  lu-modifié-écrit (16 T), sauf BIT qui ne fait que lire (12 T). Les cycles
+  incluent le fetch du préfixe.
   """
+  @cb_rots {:rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl}
+
   @spec extended() :: [Insn.t()]
-  def extended, do: []
+  def extended do
+    rotations =
+      for y <- 0..7, z <- 0..7 do
+        %Insn{
+          prefix: :cb,
+          opcode: y * 8 + z,
+          mnemonic: elem(@cb_rots, y),
+          operands: [operand(z)],
+          cycles: if(z == 6, do: 16, else: 8)
+        }
+      end
+
+    bit_ops =
+      for {mnemonic, x} <- [bit: 0x40, res: 0x80, set: 0xC0], y <- 0..7, z <- 0..7 do
+        %Insn{
+          prefix: :cb,
+          opcode: x + y * 8 + z,
+          mnemonic: mnemonic,
+          operands: [{:bit, y}, operand(z)],
+          cycles:
+            cond do
+              z != 6 -> 8
+              mnemonic == :bit -> 12
+              true -> 16
+            end
+        }
+      end
+
+    rotations ++ bit_ops
+  end
 
   @doc "Toutes les instructions décrites, tous préfixes confondus."
   @spec all() :: [Insn.t()]

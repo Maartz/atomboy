@@ -264,6 +264,80 @@ defmodule Atomboy.CPU.ALU do
   @spec ccf(byte8(), byte8()) :: result()
   def ccf(a, f), do: {a, (f &&& @z) ||| bxor(f &&& @c, @c)}
 
+  # ── Rotations et décalages de la table CB ───────────────────────────────────
+  #
+  # Contrairement aux rotations de A (RLCA & co) qui effacent toujours Z,
+  # celles-ci le posent normalement. Même signature `(v, f) → {v, f}` que le
+  # reste, pour que le générateur les traite d'une clause.
+
+  @doc "RLC — rotation circulaire gauche. C reçoit le bit 7, Z normal."
+  @spec rlc(byte8(), byte8()) :: result()
+  def rlc(value, _f) do
+    bit7 = bsr(value, 7)
+    result = (bsl(value, 1) ||| bit7) &&& 0xFF
+    {result, zero(result) ||| bit7 * @c}
+  end
+
+  @doc "RRC — rotation circulaire droite. C reçoit le bit 0."
+  @spec rrc(byte8(), byte8()) :: result()
+  def rrc(value, _f) do
+    bit0 = value &&& 1
+    result = bsr(value, 1) ||| bsl(bit0, 7)
+    {result, zero(result) ||| bit0 * @c}
+  end
+
+  @doc "RL — rotation gauche à travers C."
+  @spec rl(byte8(), byte8()) :: result()
+  def rl(value, f) do
+    result = (bsl(value, 1) ||| carry_in(f)) &&& 0xFF
+    {result, zero(result) ||| bsr(value, 7) * @c}
+  end
+
+  @doc "RR — rotation droite à travers C."
+  @spec rr(byte8(), byte8()) :: result()
+  def rr(value, f) do
+    result = bsr(value, 1) ||| bsl(carry_in(f), 7)
+    {result, zero(result) ||| (value &&& 1) * @c}
+  end
+
+  @doc "SLA — décalage gauche arithmétique. Le bit 0 entre à zéro."
+  @spec sla(byte8(), byte8()) :: result()
+  def sla(value, _f) do
+    result = bsl(value, 1) &&& 0xFF
+    {result, zero(result) ||| bsr(value, 7) * @c}
+  end
+
+  @doc "SRA — décalage droite arithmétique. Le bit 7 est **répliqué** — le signe survit."
+  @spec sra(byte8(), byte8()) :: result()
+  def sra(value, _f) do
+    result = bsr(value, 1) ||| (value &&& 0x80)
+    {result, zero(result) ||| (value &&& 1) * @c}
+  end
+
+  @doc "SWAP — échange des deux quartets. Seul Z peut se lever."
+  @spec swap(byte8(), byte8()) :: result()
+  def swap(value, _f) do
+    result = bsl(value &&& 0x0F, 4) ||| bsr(value, 4)
+    {result, zero(result)}
+  end
+
+  @doc "SRL — décalage droite logique. Le bit 7 entre à zéro."
+  @spec srl(byte8(), byte8()) :: result()
+  def srl(value, _f) do
+    result = bsr(value, 1)
+    {result, zero(result) ||| (value &&& 1) * @c}
+  end
+
+  @doc """
+  BIT n — teste un bit : Z reçoit son inverse, N s'efface, H se pose,
+  **C est préservé**. La valeur n'est pas écrite.
+  """
+  @spec bit_test(0..7, byte8(), byte8()) :: byte8()
+  def bit_test(n, value, f) do
+    z = if (value &&& bsl(1, n)) == 0, do: @z, else: 0
+    z ||| @h ||| (f &&& @c)
+  end
+
   # ── Drapeaux ────────────────────────────────────────────────────────────────
 
   # La retenue entrante, ramenée à 0 ou 1.

@@ -150,6 +150,39 @@ defmodule Atomboy.CPU.Loop do
     end
   end
 
+  # Le préfixe CB : second fetch, seconde table de dispatch, mêmes appels
+  # terminaux vers le fetch principal en sortie de clause.
+  defp exec(0xCB, rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, pending) do
+    exec_cb(
+      mem_read(rom, ram, pc),
+      rom,
+      ram,
+      budget,
+      cycles,
+      a,
+      f,
+      b,
+      c,
+      d,
+      e,
+      h,
+      l,
+      sp,
+      pc + 1 &&& 0xFFFF,
+      ime,
+      halted,
+      pending
+    )
+  end
+
+  for %Insn{prefix: :cb} = insn <- Table.extended() do
+    {args, body} = Gen.loop_clause(insn)
+
+    defp exec_cb(unquote(insn.opcode), unquote_splicing(args)) do
+      unquote(body)
+    end
+  end
+
   defp exec(
          opcode,
          _rom,
@@ -171,6 +204,29 @@ defmodule Atomboy.CPU.Loop do
          _ime_pending
        ) do
     raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: nil
+  end
+
+  defp exec_cb(
+         opcode,
+         _rom,
+         _ram,
+         _budget,
+         _cycles,
+         _a,
+         _f,
+         _b,
+         _c,
+         _d,
+         _e,
+         _h,
+         _l,
+         _sp,
+         _pc,
+         _ime,
+         _halted,
+         _ime_pending
+       ) do
+    raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb
   end
 
   # ── Mémoire ─────────────────────────────────────────────────────────────────

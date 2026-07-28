@@ -54,7 +54,13 @@ defmodule Atomboy.CPU.TableTest do
 
   test "la table et le décodeur décrivent le même ensemble" do
     described = MapSet.new(Table.all(), &{&1.prefix, &1.opcode})
-    compiled = MapSet.new(Atomboy.CPU.implemented())
+
+    # Le dispatcher 0xCB est implémenté sans figurer dans la table : c'est un
+    # préfixe, pas une instruction — il n'a ni cycles ni sémantique propres.
+    compiled =
+      Atomboy.CPU.implemented()
+      |> MapSet.new()
+      |> MapSet.delete({nil, Mix.Tasks.Atomboy.Corpus.prefix_opcode()})
 
     assert described == compiled
   end

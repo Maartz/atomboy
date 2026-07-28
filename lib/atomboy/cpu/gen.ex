@@ -383,9 +383,10 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC r / DEC r — C préservé, ce que les primitives assurent en recevant F.
+  # INC r / DEC r et les huit rotations/décalages CB — même forme :
+  # (valeur, F) → {valeur, F}, la primitive porte toute la sémantique.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [{:reg, name}], cycles: cycles})
-       when mnemonic in [:inc, :dec] do
+       when mnemonic in [:inc, :dec, :rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl] do
     result = Macro.var(:result, __MODULE__)
     f = Macro.var(:new_f, __MODULE__)
     call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [field(name), field(:f)]}
@@ -396,10 +397,10 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC (HL) / DEC (HL) — lu-modifié-écrit : la valeur passe par la mémoire
-  # dans les deux sens, seul F change dans l'état.
+  # INC (HL) / DEC (HL) et rotations (HL) — lu-modifié-écrit : la valeur passe
+  # par la mémoire dans les deux sens, seul F change dans l'état.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [:hl_ind], cycles: cycles})
-       when mnemonic in [:inc, :dec] do
+       when mnemonic in [:inc, :dec, :rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl] do
     result = Macro.var(:result, __MODULE__)
     f = Macro.var(:new_f, __MODULE__)
     call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [struct_read(:hl_ind), field(:f)]}
@@ -418,6 +419,50 @@ defmodule Atomboy.CPU.Gen do
   end
 
   # DI / EI / HALT — un seul champ de contrôle chacun.
+  # BIT n — lecture seule, F seul change ; C traverse.
+  defp struct_body(%Insn{mnemonic: :bit, operands: [{:bit, n}, target], cycles: cycles}) do
+    f = Macro.var(:new_f, __MODULE__)
+
+    quote do
+      unquote(f) =
+        Atomboy.CPU.ALU.bit_test(unquote(n), unquote(struct_read(target)), unquote(field(:f)))
+
+      unquote(struct_ret(struct_update(%{f: f}), var(:mem), cycles))
+    end
+  end
+
+  # RES n / SET n — bit effacé ou posé, aucun drapeau. L'arithmétique est
+  # inline : il n'y a aucune subtilité à centraliser.
+  defp struct_body(%Insn{mnemonic: mnemonic, operands: [{:bit, n}, target], cycles: cycles})
+       when mnemonic in [:res, :set] do
+    result = Macro.var(:result, __MODULE__)
+    mask = Bitwise.bsl(1, n)
+
+    expr =
+      case mnemonic do
+        :res ->
+          quote do: Bitwise.band(unquote(struct_read(target)), unquote(Bitwise.bxor(mask, 0xFF)))
+
+        :set ->
+          quote do: Bitwise.bor(unquote(struct_read(target)), unquote(mask))
+      end
+
+    tail =
+      case target do
+        {:reg, name} ->
+          struct_ret(struct_update(%{name => result}), var(:mem), cycles)
+
+        :hl_ind ->
+          write = quote do: mem_write(unquote(var(:mem)), unquote(var(:st)), unquote(result))
+          struct_ret(var(:st), write, cycles)
+      end
+
+    quote do
+      unquote(result) = unquote(expr)
+      unquote(tail)
+    end
+  end
+
   # DI coupe tout, l'armement différé d'un EI précédent compris.
   defp struct_body(%Insn{mnemonic: :di, cycles: cycles}),
     do: struct_ret(struct_update(%{ime: 0, ime_pending: 0}), var(:mem), cycles)
@@ -759,6 +804,49 @@ defmodule Atomboy.CPU.Gen do
   end
 
   # DI / EI / HALT.
+  # BIT n.
+  defp loop_body(%Insn{mnemonic: :bit, operands: [{:bit, n}, target], cycles: cycles}) do
+    f = Macro.var(:new_f, __MODULE__)
+
+    quote do
+      unquote(f) =
+        Atomboy.CPU.ALU.bit_test(unquote(n), unquote(loop_read(target)), unquote(var(:f)))
+
+      unquote(loop_ret(%{f: f}, var(:ram), cycles))
+    end
+  end
+
+  # RES n / SET n.
+  defp loop_body(%Insn{mnemonic: mnemonic, operands: [{:bit, n}, target], cycles: cycles})
+       when mnemonic in [:res, :set] do
+    result = Macro.var(:result, __MODULE__)
+    mask = Bitwise.bsl(1, n)
+
+    expr =
+      case mnemonic do
+        :res ->
+          quote do: Bitwise.band(unquote(loop_read(target)), unquote(Bitwise.bxor(mask, 0xFF)))
+
+        :set ->
+          quote do: Bitwise.bor(unquote(loop_read(target)), unquote(mask))
+      end
+
+    tail =
+      case target do
+        {:reg, name} ->
+          loop_ret(%{name => result}, var(:ram), cycles)
+
+        :hl_ind ->
+          ram = quote do: ram_write(unquote(var(:ram)), unquote(hl()), unquote(result))
+          loop_ret(%{}, ram, cycles)
+      end
+
+    quote do
+      unquote(result) = unquote(expr)
+      unquote(tail)
+    end
+  end
+
   defp loop_body(%Insn{mnemonic: :di, cycles: cycles}),
     do: loop_ret(%{ime: 0, ime_pending: 0}, var(:ram), cycles)
 
@@ -1053,9 +1141,9 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC r / DEC r et leurs formes (HL).
+  # INC r / DEC r, rotations CB, et leurs formes (HL).
   defp loop_body(%Insn{mnemonic: mnemonic, operands: [target], cycles: cycles})
-       when mnemonic in [:inc, :dec] do
+       when mnemonic in [:inc, :dec, :rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl] do
     result = Macro.var(:result, __MODULE__)
     f = Macro.var(:new_f, __MODULE__)
     call = {{:., [], [Atomboy.CPU.ALU, mnemonic]}, [], [loop_read(target), var(:f)]}
