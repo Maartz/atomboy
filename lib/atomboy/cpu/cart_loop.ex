@@ -262,6 +262,14 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
+  # L'écho de la WRAM : sur le bus réel, 0xE000-0xFDFF recâble les lignes
+  # d'adresse vers 0xC000-0xDDFF. Pokémon lit réellement par ce miroir —
+  # sans lui, une table de sauts se lit en 0xFF et le PC part dans des
+  # données (opcode illégal E3, neuf minutes après le lancement).
+  defp mem_read(_rom, ram, addr) when addr >= 0xE000 and addr < 0xFE00 do
+    Map.get(ram, addr - 0x2000, 0xFF)
+  end
+
   # Au-dessus de la cartouche, une adresse jamais écrite lit 0xFF — le bus
   # ouvert. Plus de repli sur la binary : avec une ROM à banques, l'octet
   # 0x8000 de la binary est du contenu de banque 2, pas de la VRAM.
@@ -389,6 +397,11 @@ defmodule Atomboy.CPU.CartLoop do
       _ ->
         ram
     end
+  end
+
+  # L'écho en écriture : même recâblage, la donnée vit à sa vraie adresse.
+  defp ram_write(ram, addr, value) when addr >= 0xE000 and addr < 0xFE00 do
+    Map.put(ram, addr - 0x2000, value)
   end
 
   defp ram_write(ram, addr, value), do: Map.put(ram, addr, value)
