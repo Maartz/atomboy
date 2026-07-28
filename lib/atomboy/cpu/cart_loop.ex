@@ -273,6 +273,17 @@ defmodule Atomboy.CPU.CartLoop do
     Map.put(ram, :cram_enabled, (value &&& 0x0F) == 0x0A)
   end
 
+  # 0xFF00 : le joypad. Le jeu écrit les bits de sélection (5-4) et relit les
+  # lignes de touches dans le quartet bas — actives à zéro. Renvoyer l'octet
+  # écrit tel quel, quartet bas à zéro, simule quatre boutons enfoncés en
+  # permanence : Tetris y voit A+B+Start+Select, son combo de reset logiciel,
+  # et reboote pour l'éternité, écran blanc. Ici : sélection conservée, bits
+  # hauts à 1 comme le bus, aucune touche pressée — le vrai joypad branchera
+  # ses lignes ici même.
+  defp ram_write(ram, 0xFF00, value) do
+    Map.put(ram, 0xFF00, 0xC0 ||| (value &&& 0x30) ||| 0x0F)
+  end
+
   # 0xFF46 : l'OAM DMA — la page source, copiée d'un bloc vers l'OAM. C'est
   # ainsi que les jeux réels placent leurs sprites : un tampon en WRAM,
   # recopié à chaque vblank. Sans cette interception, l'OAM reste vide et
