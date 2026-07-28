@@ -277,11 +277,10 @@ defmodule Atomboy.CPU.CartLoop do
   # lignes de touches dans le quartet bas — actives à zéro. Renvoyer l'octet
   # écrit tel quel, quartet bas à zéro, simule quatre boutons enfoncés en
   # permanence : Tetris y voit A+B+Start+Select, son combo de reset logiciel,
-  # et reboote pour l'éternité, écran blanc. Ici : sélection conservée, bits
-  # hauts à 1 comme le bus, aucune touche pressée — le vrai joypad branchera
-  # ses lignes ici même.
+  # et reboote pour l'éternité, écran blanc. Les vraies lignes vivent dans
+  # Atomboy.Joypad — le clavier les pose via Joypad.set/3 entre deux frames.
   defp ram_write(ram, 0xFF00, value) do
-    Map.put(ram, 0xFF00, 0xC0 ||| (value &&& 0x30) ||| 0x0F)
+    Atomboy.Joypad.write(ram, value)
   end
 
   # 0xFF46 : l'OAM DMA — la page source, copiée d'un bloc vers l'OAM. C'est
