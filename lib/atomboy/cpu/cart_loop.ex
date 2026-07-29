@@ -156,6 +156,27 @@ defmodule Atomboy.CPU.CartLoop do
     dispatch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending)
   end
 
+  # Aucun jeu n'exécute la VRAM : un PC qui y entre a déraillé en amont
+  # (table de sauts hors bornes, pile écrasée). L'opcode invalide qui
+  # surgirait des décombres arrive trop tard pour comprendre — arrêter à
+  # l'entrée, photographier registres et haut de pile.
+  defp dispatch(rom, ram, _budget, _cycles, a, f, b, c, d, e, h, l, sp, pc, _ime, _halted, _pending)
+       when pc >= 0x8000 and pc < 0xA000 do
+    stack =
+      for i <- 0..7 do
+        lo = mem_read(rom, ram, sp + 2 * i &&& 0xFFFF)
+        hi = mem_read(rom, ram, sp + 2 * i + 1 &&& 0xFFFF)
+        bsl(hi, 8) ||| lo
+      end
+
+    raise Atomboy.CPU.Deraille,
+      pc: pc,
+      sp: sp,
+      bank: div(Map.get(ram, :rom_bank_base, 0x4000), 0x4000),
+      regs: {a, f, b, c, d, e, h, l},
+      stack: stack
+  end
+
   defp dispatch(
          rom,
          ram,

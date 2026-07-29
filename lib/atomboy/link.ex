@@ -112,6 +112,8 @@ defmodule Atomboy.Link do
   def line(ram) do
     case Map.get(ram, :link) do
       %__MODULE__{} = link ->
+        ram = Map.update(ram, :link_ligne, 1, &(&1 + 1))
+
         {ram, link} =
           case Map.get(ram, :link_op) do
             :master -> clock_out(link, ram)
@@ -259,6 +261,16 @@ defmodule Atomboy.Link do
   @retenue_ms 25
   @retenue_active_ms 400
 
+  # Le transfert matériel dure huit bits à 8192 Hz ≈ 4194 cycles ≈ neuf
+  # scanlines — et c'est cette durée qui, sur silicium, laisse à la boucle
+  # principale de l'esclave le temps de copier hSerialReceive : l'ISR
+  # ré-arme SC immédiatement, une cellule unique, aucune file. Servir dès
+  # l'armement écrase l'octet précédent entre deux passages de la boucle
+  # (vécu : octets avalés dans les blocs d'équipe, structures décalées,
+  # « HERICENDRE a l'air bizarre ! », et le déraillement en VRAM du
+  # rapport de crash — GetPokemonName sur une espèce fantôme).
+  @cadence_lignes 9
+
   defp pump(link, ram) do
     case Map.get(ram, :link_held) do
       {byte, depuis} -> serve_held(link, ram, byte, depuis)
@@ -316,15 +328,24 @@ defmodule Atomboy.Link do
   end
 
   defp serve(link, ram, byte) do
-    réponse = Map.get(ram, @sb, 0xFF)
+    ligne = Map.get(ram, :link_ligne, 0)
 
-    case :gen_tcp.send(link.socket, <<1, réponse>>) do
-      :ok ->
-        trace(link, "E ← #{hex(byte)} → #{hex(réponse)}")
-        {complete(ram, byte), link}
+    if ligne - Map.get(ram, :link_servi, -@cadence_lignes) < @cadence_lignes do
+      # Trop tôt après le service précédent : l'horloge patiente en
+      # retenue, comme sur le fil réel où le transfert est encore en
+      # train de cadencer ses bits.
+      {Map.put_new(ram, :link_held, {byte, System.monotonic_time(:millisecond)}), link}
+    else
+      réponse = Map.get(ram, @sb, 0xFF)
 
-      {:error, _} ->
-        unplugged(ram)
+      case :gen_tcp.send(link.socket, <<1, réponse>>) do
+        :ok ->
+          trace(link, "E ← #{hex(byte)} → #{hex(réponse)}")
+          {complete(ram, byte) |> Map.put(:link_servi, ligne), link}
+
+        {:error, _} ->
+          unplugged(ram)
+      end
     end
   end
 

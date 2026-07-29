@@ -243,3 +243,35 @@ defmodule Atomboy.CPU.Unimplemented do
   defp hex(opcode), do: opcode |> Integer.to_string(16) |> String.pad_leading(2, "0")
   defp hex4(v), do: v |> Integer.to_string(16) |> String.pad_leading(4, "0")
 end
+
+defmodule Atomboy.CPU.Deraille do
+  @moduledoc """
+  Le PC est entré en VRAM — aucun jeu ne fait ça volontairement.
+
+  Le contrôle a déraillé en amont : table de sauts indexée hors bornes,
+  pile écrasée, `jp hl` sur un pointeur de tuiles… L'opcode invalide qui
+  finirait par surgir des décombres arrive trop tard pour comprendre ;
+  ici le rapport photographie l'instant de l'entrée : registres, banque,
+  et le haut de la pile — les adresses de retour y désignent le coupable.
+  """
+
+  defexception [:pc, :sp, :bank, :regs, :stack]
+
+  @impl true
+  def message(%{pc: pc, sp: sp, bank: bank, regs: regs, stack: stack}) do
+    {a, f, b, c, d, e, h, l} = regs
+
+    pile =
+      stack
+      |> Enum.map(&("0x" <> hex4(&1)))
+      |> Enum.join(" ")
+
+    "le processeur a déraillé en VRAM : PC 0x#{hex4(pc)}, banque ROM #{bank}\n" <>
+      "    AF=#{hex(a)}#{hex(f)} BC=#{hex(b)}#{hex(c)} DE=#{hex(d)}#{hex(e)} " <>
+      "HL=#{hex(h)}#{hex(l)} SP=0x#{hex4(sp)}\n" <>
+      "    pile : #{pile}"
+  end
+
+  defp hex(v), do: v |> Integer.to_string(16) |> String.pad_leading(2, "0")
+  defp hex4(v), do: v |> Integer.to_string(16) |> String.pad_leading(4, "0")
+end

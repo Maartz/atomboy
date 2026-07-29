@@ -203,7 +203,17 @@ defmodule Atomboy.Window do
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
 
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
-    {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, render?)
+
+    # Un déraillement tue la partie, pas la progression : la pile de la
+    # cartouche est écrite avant de laisser filer le rapport de crash.
+    {pixels, state, ram} =
+      try do
+        Screen.frame(ctx.state, ctx.rom, ram, render?)
+      rescue
+        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
+          Save.flush(ram, ctx.sav)
+          reraise e, __STACKTRACE__
+      end
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     if render? do

@@ -81,6 +81,7 @@ defmodule Atomboy.CLI do
           hold: :integer,
           frames: :integer,
           dump: :string,
+          dump_toutes: :integer,
           son: :boolean,
           palette: :string,
           fenetre: :boolean,

@@ -155,6 +155,7 @@ defmodule Atomboy.Play do
           max_frames: Keyword.get(opts, :frames, :infinity),
           hold_frames: Keyword.get(opts, :hold, @default_hold),
           dump: Keyword.get(opts, :dump),
+          dump_toutes: Keyword.get(opts, :dump_toutes),
           state_base: Path.rootname(sav),
           state_slot: 1,
           palette: Keyword.get(opts, :palette, :dmg),
@@ -309,7 +310,7 @@ defmodule Atomboy.Play do
       try do
         Screen.frame(ctx.state, ctx.rom, ram, render?)
       rescue
-        e in Atomboy.CPU.Unimplemented ->
+        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
           Save.flush(ram, ctx.sav)
           reraise e, __STACKTRACE__
       end
@@ -341,6 +342,12 @@ defmodule Atomboy.Play do
 
     # L'autosauvegarde : la pile de la cartouche n'attend pas la sortie.
     ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
+
+    # Le dump périodique : l'œil du harnais — l'écran courant, écrasé
+    # toutes les N frames, pour piloter une session depuis l'extérieur.
+    if ctx.dump_toutes && ctx.dump && rem(ctx.frame, ctx.dump_toutes) == 0 do
+      dump(%{ctx | last_frame: if(render?, do: pixels, else: ctx.last_frame)})
+    end
 
     ctx = %{
       ctx

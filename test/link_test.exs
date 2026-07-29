@@ -17,6 +17,15 @@ defmodule Atomboy.LinkTest do
     {Map.delete(ram, :link), Map.get(ram, :link)}
   end
 
+  # Un transfert matériel dure ~9 scanlines (8 bits à 8192 Hz) : les
+  # services esclaves respectent cette cadence. Ce tick-là avale les
+  # scanlines nécessaires avant de constater le résultat.
+  defp tick_transfert(link, ram) do
+    Enum.reduce(1..12, {ram, link}, fn _, {ram, link} ->
+      tick(link, ram)
+    end)
+  end
+
   # Une paire de câbles sur le port éphémère local.
   defp pair do
     {:ok, lsock} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
@@ -208,10 +217,11 @@ defmodule Atomboy.LinkTest do
     # Première horloge servie avec l'octet armé…
     assert ram_d[0xFF01] == 0x01
     assert {:ok, <<1, 0xAA>>} = :gen_tcp.recv(gauche.socket, 2, 200)
-    # …la seconde attend la frame suivante — et l'esclave réarmé, comme le
-    # ferait son ISR (non armé, la ligne lirait 0xFF).
+    # …la seconde attend la cadence du transfert (≈ 9 scanlines) — et
+    # l'esclave réarmé, comme le ferait son ISR (non armé, la ligne
+    # lirait 0xFF).
     ram_d = ram_d |> Map.put(:link, true) |> arme(0xBB, 0x80)
-    {ram_d, _droite} = tick(droite, ram_d)
+    {ram_d, _droite} = tick_transfert(droite, ram_d)
     assert ram_d[0xFF01] == 0x02
     assert {:ok, <<1, 0xBB>>} = :gen_tcp.recv(gauche.socket, 2, 200)
   end
@@ -239,12 +249,39 @@ defmodule Atomboy.LinkTest do
     {ram_d, droite} = tick(droite, ram_d)
     assert {_, _} = ram_d[:link_held]
 
-    # L'esclave sort du menu et s'arme : l'octet retenu se sert.
+    # L'esclave sort du menu et s'arme : l'octet retenu se sert (à la
+    # cadence du transfert).
     ram_d = ram_d |> Map.put(:link, true) |> arme(0x71, 0x80)
-    {ram_d, _} = tick(droite, ram_d)
+    {ram_d, _} = tick_transfert(droite, ram_d)
     {ram_g, _} = tick(gauche, ram_g)
     assert ram_d[0xFF01] == 0x70
     assert ram_g[0xFF01] == 0x71
+  end
+
+  test "la cadence matérielle : pas deux services esclaves en neuf scanlines" do
+    {gauche, droite} = pair()
+
+    # Le maître déverse deux horloges d'un coup (dérive réelle entre les
+    # deux BEAM : les octets s'empilent dans la socket).
+    :gen_tcp.send(gauche.socket, <<0, 0x11>>)
+    :gen_tcp.send(gauche.socket, <<0, 0x22>>)
+    Process.sleep(20)
+
+    ram_d = arme(%{link: true}, 0xAA, 0x80)
+    {ram_d, droite} = tick(droite, ram_d)
+    assert ram_d[0xFF01] == 0x11
+
+    # Réarmé aussitôt (l'ISR du jeu ré-arme SC avant que la boucle
+    # principale ait copié hSerialReceive) : la scanline suivante ne sert
+    # PAS — sur silicium le transfert cadence encore ses huit bits, et
+    # c'est cette durée qui protège l'octet précédent de l'écrasement.
+    ram_d = ram_d |> Map.put(:link, true) |> arme(0xBB, 0x80)
+    {ram_d, droite} = tick(droite, ram_d)
+    assert ram_d[0xFF01] == 0xBB
+
+    # Neuf scanlines plus tard : oui.
+    {ram_d, _} = tick_transfert(droite, ram_d)
+    assert ram_d[0xFF01] == 0x22
   end
 
   test "réécrire SC en vol relance le même transfert — une seule horloge" do
