@@ -27,6 +27,9 @@ atomboy-*.tar
 # Les parties de jeu : personnelles, changeantes — pas dans l'historique.
 *.sav
 *.state
+*.gb
+*.gbc
+
 burrito_out/
 atomboy-crash.log
 erl_crash.dump
