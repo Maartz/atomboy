@@ -228,9 +228,7 @@ defmodule Atomboy.Screen do
   """
   @spec to_kitty(PPU.frame(), :gris | :dmg, pos_integer(), pos_integer()) :: iodata()
   def to_kitty(frame, palette, id, rows) do
-    rgb = rgb_palette(palette)
-    data = for <<shade <- frame>>, into: <<>>, do: elem(rgb, shade)
-    payload = data |> :zlib.compress() |> Base.encode64()
+    payload = frame |> to_rgb(palette) |> :zlib.compress() |> Base.encode64()
 
     {width, height} = PPU.dimensions()
     head = "a=T,i=#{id},f=24,s=#{width},v=#{height},o=z,q=2,C=1,r=#{rows}"
@@ -248,6 +246,13 @@ defmodule Atomboy.Screen do
           ["\e_Gm=0;", last, "\e\\"]
         ]
     end
+  end
+
+  @doc "La frame en RGB 24 bits — trois octets par pixel, selon la palette."
+  @spec to_rgb(PPU.frame(), :gris | :dmg) :: binary()
+  def to_rgb(frame, palette) do
+    rgb = rgb_palette(palette)
+    for <<shade <- frame>>, into: <<>>, do: elem(rgb, shade)
   end
 
   # Le protocole plafonne les tronçons de charge utile à 4096 octets.

@@ -27,6 +27,9 @@ defmodule Mix.Tasks.Atomboy.Play do
 
   ## Options
 
+    * `--fenetre` — jouer dans une vraie fenêtre (wxWidgets) plutôt que dans
+      le terminal : vrais événements clavier, pixels nets à l'échelle, aucun
+      des prérequis du terminal (ni `bin/play`, ni taille minimale).
     * `--hold N` — frames de maintien par frappe (défaut 10), pour les
       terminaux sans protocole clavier kitty ; avec lui (Ghostty…), l'état
       des touches est réel et ce réglage ne sert plus.
@@ -57,7 +60,10 @@ defmodule Mix.Tasks.Atomboy.Play do
 
     case Atomboy.CLI.parse(args) do
       {:ok, rom, opts} ->
-        case Atomboy.Play.run(rom, opts) do
+        {fenetre, opts} = Keyword.pop(opts, :fenetre, false)
+        runner = if fenetre, do: Atomboy.Window, else: Atomboy.Play
+
+        case runner.run(rom, opts) do
           :ok -> :ok
           {:error, message} -> Mix.raise(message)
         end

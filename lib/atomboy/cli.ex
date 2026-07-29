@@ -34,7 +34,10 @@ defmodule Atomboy.CLI do
   def main(args) do
     case parse(args) do
       {:ok, rom, opts} ->
-        case Atomboy.Play.run(rom, opts) do
+        {fenetre, opts} = Keyword.pop(opts, :fenetre, false)
+        runner = if fenetre, do: Atomboy.Window, else: Atomboy.Play
+
+        case runner.run(rom, opts) do
           :ok ->
             0
 
@@ -62,7 +65,8 @@ defmodule Atomboy.CLI do
           frames: :integer,
           dump: :string,
           son: :boolean,
-          palette: :string
+          palette: :string,
+          fenetre: :boolean
         ]
       )
 
@@ -93,7 +97,7 @@ defmodule Atomboy.CLI do
 
   defp rom(_argv) do
     {:error,
-     "usage : atomboy <rom.gb> [--hold N] [--frames N] [--dump f.pgm] " <>
-       "[--no-son] [--palette dmg|gris]"}
+     "usage : atomboy <rom.gb> [--fenetre] [--hold N] [--frames N] " <>
+       "[--dump f.pgm] [--no-son] [--palette dmg|gris]"}
   end
 end

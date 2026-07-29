@@ -7,6 +7,9 @@ defmodule Atomboy.MixProject do
       version: "0.1.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
+      # wx (la fenêtre native) vit dans OTP, pas dans nos deps : sans ceci,
+      # mix élague son chemin de code et :wx devient introuvable.
+      prune_code_paths: false,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       releases: releases()
@@ -42,6 +45,7 @@ defmodule Atomboy.MixProject do
   defp releases do
     [
       atomboy: [
+        applications: [wx: :load],
         steps: [:assemble, &Burrito.wrap/1],
         burrito: [
           targets: [
