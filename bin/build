@@ -1,0 +1,51 @@
+#!/bin/sh
+# Le build des exécutables atomboy, en une commande.
+#
+#     bin/build              tests puis binaires dans burrito_out/
+#     bin/build --vite       sans les tests
+#     bin/build --install    + copie vers ~/.local/bin/atomboy
+#
+# Sous le capot : Burrito exige zig 0.16.0 (mise l'installe au besoin),
+# la release se construit en prod, et les vieux caches d'extraction
+# (~/Library/Application Support/.burrito/atomboy_*) sont purgés — la
+# version porte le SHA du commit, chaque build a sa clé, les anciennes
+# ne servent plus.
+set -e
+cd "$(dirname "$0")/.."
+
+ZIG=zig@0.16.0
+vite=false
+install=false
+for arg in "$@"; do
+  case "$arg" in
+    --vite) vite=true ;;
+    --install) install=true ;;
+    *) echo "option inconnue : $arg" >&2; exit 2 ;;
+  esac
+done
+
+command -v xz > /dev/null || { echo "xz manquant (brew install xz)" >&2; exit 1; }
+mise which zig --tool-version "$ZIG" > /dev/null 2>&1 || mise install "$ZIG"
+
+if ! $vite; then
+  echo "── tests ──"
+  mix test
+fi
+
+echo "── release ──"
+# Burrito suffixe (« atomboy_macos_arm 2 ») au lieu d'écraser : table rase.
+rm -rf burrito_out
+MIX_ENV=prod mise exec "$ZIG" -- mix release --overwrite
+
+echo "── caches ──"
+rm -rf "$HOME/Library/Application Support/.burrito/atomboy_"*
+echo "caches d'extraction purgés (ils renaissent au premier lancement)"
+
+echo "── binaires ──"
+ls -lh burrito_out/ | awk 'NR > 1 {print "  " $NF " (" $5 ")"}'
+
+if $install; then
+  mkdir -p "$HOME/.local/bin"
+  cp burrito_out/atomboy_macos_arm "$HOME/.local/bin/atomboy"
+  echo "installé : ~/.local/bin/atomboy"
+fi
