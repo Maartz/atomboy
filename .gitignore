@@ -33,3 +33,5 @@ atomboy-*.tar
 burrito_out/
 atomboy-crash.log
 erl_crash.dump
+atomboy_mac
+atomboy_mac.tar
