@@ -364,11 +364,21 @@ defmodule Atomboy.CPU.CartLoop do
   # capture doit se faire à l'écriture, les caractères partent à quelques
   # dizaines de cycles d'écart et un échantillonnage les perdrait.
   # Câble link branché : le transfert reste en cours (bit 7 levé) et
-  # l'échange se joue à la frontière de frame, où vit la socket
-  # (Atomboy.Link.tick/2). Maître si l'horloge est interne (bit 0).
+  # l'échange se joue à la scanline, où vit la socket (Atomboy.Link.line/1).
+  # Maître si l'horloge est interne (bit 0). Réécrire SC pendant qu'une
+  # horloge maître est déjà en vol relance le MÊME transfert — un seul
+  # octet sur le fil, comme le silicium : les boucles de sonde des jeux
+  # réécrivent SC chaque frame, et en faire des horloges neuves inondait
+  # le fil (deux horloges par réponse, la réponse décisive purgée en
+  # orpheline — vécu, à la trace).
   defp ram_write(ram, 0xFF02, value)
        when (value &&& 0x80) != 0 and :erlang.is_map_key(:link, ram) do
-    op = if (value &&& 0x01) != 0, do: :master, else: :slave
+    op =
+      case {value &&& 0x01, Map.get(ram, :link_op)} do
+        {1, :master_sent} -> :master_sent
+        {1, _} -> :master
+        {0, _} -> :slave
+      end
 
     ram
     |> Map.put(0xFF02, value)

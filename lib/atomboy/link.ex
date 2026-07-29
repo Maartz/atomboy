@@ -138,28 +138,52 @@ defmodule Atomboy.Link do
   # ── Le maître ───────────────────────────────────────────────────────────────
 
   defp clock_out(link, ram) do
-    # Purger les réponses orphelines d'abord : aucune horloge à nous n'est
-    # en vol, toute réponse en attente est un résidu de désynchronisation —
-    # la consommer ici guérit le flux au lieu de perpétuer le décalage.
+    # LE FIL N'A QU'UN SLOT. Si une horloge est déjà en vol, ce nouveau
+    # transfert la réutilise — les boucles de sonde des jeux réécrivent SC
+    # chaque frame en alternant maître/esclave, et chaque réécriture qui
+    # enverrait une horloge neuve inonde le fil : cinq horloges servies
+    # dans la même milliseconde, la réponse décisive noyée (vécu, à la
+    # trace). Une horloge, une réponse, toujours.
+    if Map.get(ram, :link_wire) do
+      await(link, Map.put(ram, :link_op, :master_sent))
+    else
+      clock_send(link, ram)
+    end
+  end
+
+  defp clock_send(link, ram) do
+    # Fil libre : toute réponse qui traîne est une vraie orpheline.
     case drain_stale(link) do
       :ok ->
         case :gen_tcp.send(link.socket, <<0, Map.get(ram, @sb, 0xFF)>>) do
           :ok ->
             trace(link, "M horloge → #{hex(Map.get(ram, @sb, 0xFF))}")
-            await(link, %{ram | :link_op => :master_sent})
+
+            await(
+              link,
+              ram
+              |> Map.put(:link_op, :master_sent)
+              |> Map.put(:link_wire, true)
+              |> Map.put(:link_sent, System.monotonic_time(:millisecond))
+            )
 
           {:error, _} ->
             unplugged(ram)
         end
 
-      {:clock, byte} ->
-        # Le pair a cadencé le premier : nos horloges se croisent — la
-        # nôtre part quand même (il l'attend), et la sienne conclut chez
-        # nous. L'échange des deux maîtres, sans réponse orpheline.
+      {:clock, _byte} ->
+        # Le pair a cadencé aussi : deux maîtres, deux horloges qui se
+        # croisent — sur le fil réel c'est du bruit électrique, pas un
+        # échange. La nôtre part quand même (le pair conclura pareil en la
+        # voyant), et chacun lit 0xFF : les jeux retentent leur
+        # établissement jusqu'à ce qu'une sonde rencontre une vraie
+        # fenêtre esclave. (Échanger proprement les octets croisés faisait
+        # lire $01 aux DEUX sondes : chacune s'établissait esclave — le
+        # sync « capricieux » du rapport.)
         case :gen_tcp.send(link.socket, <<0, Map.get(ram, @sb, 0xFF)>>) do
           :ok ->
-            trace(link, "M croisé  → #{hex(Map.get(ram, @sb, 0xFF))} ← #{hex(byte)}")
-            {complete(ram, byte), link}
+            trace(link, "M croisé : bus indéterminé, FF")
+            {complete(ram, 0xFF), link}
 
           {:error, _} ->
             unplugged(ram)
@@ -188,18 +212,23 @@ defmodule Atomboy.Link do
         trace(link, "M reçu    ← #{hex(byte)}")
         {complete(ram, byte), link}
 
-      {:ok, <<0, byte>>} ->
-        # Deux maîtres à la fois : les horloges qui se croisent SONT
-        # l'échange — chacun conclut avec l'octet de l'autre, personne ne
-        # répond. Répondre en plus laisserait une réponse orpheline dans
-        # chaque socket : le flux se décale d'un cran et chaque console
-        # finit par relire ses propres octets (vécu : Nolan qui s'échange
-        # des Pokémon avec Nolan).
-        trace(link, "M croisé² ← #{hex(byte)}")
-        {complete(ram, byte), link}
+      {:ok, <<0, _byte>>} ->
+        # Deux maîtres à la fois : du bruit, pas un échange — 0xFF, et
+        # les jeux retentent. Personne ne répond (le pair conclut pareil
+        # en voyant notre horloge) : aucune réponse orpheline.
+        trace(link, "M croisé : bus indéterminé, FF")
+        {complete(ram, 0xFF), link}
 
       {:error, :timeout} ->
-        {ram, link}
+        # Le matériel conclut toujours en ~4 ms ; un maître qui attend au-
+        # delà de la retenue longue du pair a affaire à un partenaire
+        # disparu — la ligne au repos, et le jeu gère.
+        if System.monotonic_time(:millisecond) - Map.get(ram, :link_sent, 0) > 600 do
+          trace(link, "M timeout : FF")
+          {complete(ram, 0xFF), link}
+        else
+          {ram, link}
+        end
 
       {:error, _} ->
         unplugged(ram)
@@ -246,6 +275,12 @@ defmodule Atomboy.Link do
           trace(link, "E retient #{hex(byte)} (pas encore armé)")
           {Map.put(ram, :link_held, {byte, System.monotonic_time(:millisecond)}), link}
         end
+
+      {:ok, <<1, byte>>} ->
+        # La réponse d'une horloge abandonnée (le jeu a basculé esclave
+        # entre-temps) : consommée, le fil se libère.
+        trace(link, "réponse tardive #{hex(byte)} — fil libéré")
+        pump_recv(link, Map.delete(ram, :link_wire))
 
       {:ok, _autre} ->
         pump_recv(link, ram)
@@ -302,6 +337,8 @@ defmodule Atomboy.Link do
     |> Map.update(@if_addr, 0x08, &(&1 ||| 0x08))
     |> Map.put(:link_active, true)
     |> Map.delete(:link_op)
+    |> Map.delete(:link_sent)
+    |> Map.delete(:link_wire)
   end
 
   # Câble débranché : la ligne lit 0xFF, le transfert armé se conclut.
