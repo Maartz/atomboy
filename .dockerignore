@@ -1,0 +1,14 @@
+# Le contexte de build reste minimal : le code et la config de release.
+_build/
+deps/
+burrito_out/
+test/fixtures/
+.git/
+*.gb
+*.gbc
+*.sav
+*.state
+*.pgm
+*.ppm
+erl_crash.dump
+atomboy-crash.log

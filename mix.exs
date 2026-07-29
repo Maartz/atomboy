@@ -35,7 +35,12 @@ defmodule Atomboy.MixProject do
         "#{@version}+#{String.trim(sha)}#{dirty}"
 
       _ ->
-        @version
+        # Sans dépôt (build Docker : le contexte n'embarque pas .git), le
+        # SHA arrive par l'environnement — ou la version reste nue.
+        case System.get_env("ATOMBOY_SHA") do
+          nil -> @version
+          sha -> "#{@version}+#{sha}"
+        end
     end
   end
 
