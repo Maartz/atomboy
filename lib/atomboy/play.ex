@@ -141,7 +141,7 @@ defmodule Atomboy.Play do
           rom: rom,
           ram:
             Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
-            |> then(&if(link, do: Map.put(&1, :link, true), else: &1))
+            |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
             |> Save.load(sav),
           sav: sav,
           hold: %{},
@@ -165,7 +165,6 @@ defmodule Atomboy.Play do
           turbo: false,
           paused: false,
           history: [],
-          link: link,
           note: nil,
           last_frame: nil,
           fps: 0.0,
@@ -317,7 +316,6 @@ defmodule Atomboy.Play do
 
     # Pendant le turbo le port audio est fermé : sound/3 jette les
     # déclenchements sans rien pousser.
-    {ram, link} = Link.tick(ctx.link, ram)
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     ctx = if render?, do: draw(ctx, pixels, ram, held), else: ctx
@@ -351,7 +349,6 @@ defmodule Atomboy.Play do
         hold: hold,
         apu: apu,
         audio: audio,
-        link: link,
         frame: ctx.frame + 1,
         deadline: deadline,
         note: fade(ctx.note),
@@ -422,6 +419,13 @@ defmodule Atomboy.Play do
   defp apply_event({tag, :load_state}, ctx) when tag in [:key, :press] do
     case Save.read_state(state_path(ctx)) do
       {:ok, {state, ram, apu}} ->
+        # Le câble courant survit au voyage dans le temps.
+        ram =
+          case Map.get(ctx.ram, :link) do
+            nil -> Map.delete(ram, :link)
+            link -> Map.put(ram, :link, link)
+          end
+
         %{ctx | state: state, ram: ram, apu: apu, note: {"état repris (case #{ctx.state_slot})", 120}}
 
       :error ->
@@ -441,22 +445,14 @@ defmodule Atomboy.Play do
   # sortie — tampon vierge, pas de famine héritée.
   # Le câble exige le tempo : deux consoles en turbo dérivent l'une de
   # l'autre et le protocole série se déchire — turbo indisponible branché.
-  defp apply_event({tag, :turbo}, %{link: link} = ctx) when tag in [:key, :press] and link != nil,
-    do: %{ctx | note: {"turbo indisponible : câble branché", 120}}
-
   defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press] do
-    turbo = not ctx.turbo
-
-    audio =
-      if turbo do
-        Audio.close(ctx.audio)
-        nil
-      else
-        if ctx.son?, do: Audio.open()
-      end
-
-    %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
+    if Map.has_key?(ctx.ram, :link) do
+      %{ctx | note: {"turbo indisponible : câble branché", 120}}
+    else
+      turbo_toggle(ctx)
+    end
   end
+
 
   defp apply_event({tag, :pause}, ctx) when tag in [:key, :press],
     do: %{ctx | paused: not ctx.paused}
@@ -482,6 +478,20 @@ defmodule Atomboy.Play do
 
   # Relâchement sans protocole confirmé : ignoré.
   defp apply_event(_event, ctx), do: ctx
+
+  defp turbo_toggle(ctx) do
+    turbo = not ctx.turbo
+
+    audio =
+      if turbo do
+        Audio.close(ctx.audio)
+        nil
+      else
+        if ctx.son?, do: Audio.open()
+      end
+
+    %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
+  end
 
   defp state_path(ctx) do
     if ctx.state_slot == 1 do
@@ -541,7 +551,7 @@ defmodule Atomboy.Play do
       "\e[0m ✚ flèches · x A · c B · ⏎ Start · ␣ Select · s/r état · ⇥ turbo · p pause · q quitte   ",
       :io_lib.format(~c"~5.1f fps · banque ~2..0B", [ctx.fps, bank]),
       if(ctx.audio, do: " · ♪", else: ""),
-      if(ctx.link, do: " · ⇄", else: ""),
+      if(Map.has_key?(ram, :link), do: " · ⇄", else: ""),
       if(ctx.turbo, do: " · »»", else: ""),
       if(ctx.paused, do: " · ⏸ pause", else: ""),
       note,

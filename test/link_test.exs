@@ -7,6 +7,16 @@ defmodule Atomboy.LinkTest do
   alias Atomboy.CPU.State
   alias Atomboy.Link
 
+  # L'API scanline : le câble vit dans la map. L'adaptateur garde les tests
+  # dans la forme « {ram, link} » historique.
+  defp tick(link, ram) do
+    # L'await est non bloquant (rythme scanline) : laisser au loopback le
+    # temps de livrer avant chaque passage.
+    Process.sleep(5)
+    ram = ram |> Map.put(:link, link) |> Link.line()
+    {Map.delete(ram, :link), Map.get(ram, :link)}
+  end
+
   # Une paire de câbles sur le port éphémère local.
   defp pair do
     {:ok, lsock} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
@@ -47,11 +57,11 @@ defmodule Atomboy.LinkTest do
     assert (ram_g[0xFF02] &&& 0x80) == 0x80
 
     # Frame 1 : le maître envoie son horloge (pas encore de réponse).
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    {ram_g, gauche} = tick(gauche, ram_g)
     # L'esclave la pompe et répond.
-    {ram_d, _droite} = Link.tick(droite, ram_d)
+    {ram_d, _droite} = tick(droite, ram_d)
     # Le maître récolte.
-    {ram_g, _gauche} = Link.tick(gauche, ram_g)
+    {ram_g, _gauche} = tick(gauche, ram_g)
 
     assert ram_g[0xFF01] == 0x99
     assert ram_d[0xFF01] == 0x42
@@ -69,9 +79,9 @@ defmodule Atomboy.LinkTest do
     ram_g = arme(%{link: true}, 0x11, 0x81)
     ram_d = %{:link => true, 0xFF01 => 0x77}
 
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
-    {ram_d, _} = Link.tick(droite, ram_d)
-    {ram_g, _} = Link.tick(gauche, ram_g)
+    {ram_g, gauche} = tick(gauche, ram_g)
+    {ram_d, _} = tick(droite, ram_d)
+    {ram_g, _} = tick(gauche, ram_g)
 
     assert ram_d[0xFF01] == 0x11
     assert (Map.get(ram_d, 0xFF0F, 0) &&& 0x08) == 0
@@ -82,10 +92,10 @@ defmodule Atomboy.LinkTest do
     {gauche, droite} = pair()
 
     ram_g = arme(%{link: true}, 0x42, 0x81)
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    {ram_g, gauche} = tick(gauche, ram_g)
     assert ram_g[:link_op] == :master_sent
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    {ram_g, gauche} = tick(gauche, ram_g)
+    {ram_g, gauche} = tick(gauche, ram_g)
     assert ram_g[:link_op] == :master_sent
 
     # Une seule horloge doit être partie.
@@ -99,10 +109,10 @@ defmodule Atomboy.LinkTest do
     Link.close(droite)
 
     ram_g = arme(%{link: true}, 0x42, 0x81)
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    {ram_g, gauche} = tick(gauche, ram_g)
     # L'envoi a pu réussir (tampon) ; la lecture, elle, échoue.
     {ram_g, gauche} =
-      if gauche, do: Link.tick(gauche, ram_g), else: {ram_g, gauche}
+      if gauche, do: tick(gauche, ram_g), else: {ram_g, gauche}
 
     assert gauche == nil
     assert ram_g[0xFF01] == 0xFF
@@ -116,10 +126,10 @@ defmodule Atomboy.LinkTest do
     ram_d = arme(%{link: true}, 0x22, 0x81)
 
     # Chacun envoie son horloge, puis conclut sur celle de l'autre.
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
-    {ram_d, droite} = Link.tick(droite, ram_d)
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
-    {ram_d, droite} = Link.tick(droite, ram_d)
+    {ram_g, gauche} = tick(gauche, ram_g)
+    {ram_d, droite} = tick(droite, ram_d)
+    {ram_g, gauche} = tick(gauche, ram_g)
+    {ram_d, droite} = tick(droite, ram_d)
 
     assert ram_g[0xFF01] == 0x22
     assert ram_d[0xFF01] == 0x11
@@ -141,14 +151,14 @@ defmodule Atomboy.LinkTest do
     Process.sleep(20)
 
     ram_g = arme(%{link: true}, 0x42, 0x81)
-    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    {ram_g, gauche} = tick(gauche, ram_g)
     # Le résidu n'a PAS conclu le transfert : l'horloge est partie.
     assert ram_g[:link_op] == :master_sent
 
     # L'esclave répond normalement.
     ram_d = arme(%{link: true}, 0x55, 0x80)
-    {ram_d, _} = Link.tick(droite, ram_d)
-    {ram_g, _} = Link.tick(gauche, ram_g)
+    {ram_d, _} = tick(droite, ram_d)
+    {ram_g, _} = tick(gauche, ram_g)
 
     assert ram_g[0xFF01] == 0x55
     assert ram_d[0xFF01] == 0x42
@@ -164,14 +174,14 @@ defmodule Atomboy.LinkTest do
     Process.sleep(20)
 
     ram_d = arme(%{link: true}, 0xAA, 0x80)
-    {ram_d, droite} = Link.tick(droite, ram_d)
+    {ram_d, droite} = tick(droite, ram_d)
 
     # Première horloge servie avec l'octet armé…
     assert ram_d[0xFF01] == 0x01
     assert {:ok, <<1, 0xAA>>} = :gen_tcp.recv(gauche.socket, 2, 200)
     # …la seconde attend la frame suivante — et le SB rechargé entre-temps.
     ram_d = Map.put(ram_d, 0xFF01, 0xBB)
-    {ram_d, _droite} = Link.tick(droite, ram_d)
+    {ram_d, _droite} = tick(droite, ram_d)
     assert ram_d[0xFF01] == 0x02
     assert {:ok, <<1, 0xBB>>} = :gen_tcp.recv(gauche.socket, 2, 200)
   end

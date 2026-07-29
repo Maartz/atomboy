@@ -15,11 +15,15 @@ defmodule Atomboy.Link do
   latence d'un aller-retour ≈ une frame de chaque côté — le rythme d'un
   échange Pokémon, pas celui d'une course.
 
-  `tick/2` est le seul point de contact des boucles : il résout l'opération
-  série en attente (posée par CartLoop sous `:link_op`) et pompe les
-  horloges entrantes. Un maître sans réponse réessaie à la frame suivante
-  (`:master_sent` — l'horloge ne part qu'une fois) ; un câble coupé conclut
-  l'échange sur 0xFF, comme un câble débranché.
+  Le câble vit DANS la map mémoire (`ram[:link]`, la struct socket) et se
+  résout à la **scanline** (`line/1`, appelé par `Screen.step_line`) : 154
+  occasions par frame, une latence de quelques millisecondes — l'échelle du
+  vrai matériel, dont le transfert maître se conclut en ~4 ms. C'est la
+  condition de la négociation du Club Câble, dont la sonde n'attend pas
+  une frame. Un maître sans réponse réessaie à la scanline suivante
+  (`:master_sent` — l'horloge ne part qu'une fois) ; une seule horloge
+  servie par passage — le jeu doit recharger SB entre deux ; un câble
+  coupé conclut sur 0xFF et disparaît de la map, comme débranché.
   """
 
   import Bitwise
@@ -81,17 +85,25 @@ defmodule Atomboy.Link do
   end
 
   @doc """
-  Une frame de câble : résout l'opération série en attente et pompe les
-  horloges entrantes. Renvoie `{ram, link}` — link `nil` si le câble tombe.
+  Une scanline de câble : résout l'opération série en attente et pompe au
+  plus une horloge entrante. Sans câble dans la map, ne touche à rien ;
+  un câble coupé s'efface de la map.
   """
-  @spec tick(t() | nil, map()) :: {map(), t() | nil}
-  def tick(nil, ram), do: {ram, nil}
+  @spec line(map()) :: map()
+  def line(ram) do
+    case Map.get(ram, :link) do
+      %__MODULE__{} = link ->
+        {ram, link} =
+          case Map.get(ram, :link_op) do
+            :master -> clock_out(link, ram)
+            :master_sent -> await(link, ram)
+            _ -> pump(link, ram)
+          end
 
-  def tick(link, ram) do
-    case Map.get(ram, :link_op) do
-      :master -> clock_out(link, ram)
-      :master_sent -> await(link, ram)
-      _ -> pump(link, ram)
+        if link, do: Map.put(ram, :link, link), else: Map.delete(ram, :link)
+
+      _ ->
+        ram
     end
   end
 
@@ -142,7 +154,7 @@ defmodule Atomboy.Link do
   end
 
   defp await(link, ram) do
-    case :gen_tcp.recv(link.socket, 2, 30) do
+    case :gen_tcp.recv(link.socket, 2, 0) do
       {:ok, <<1, byte>>} ->
         {complete(ram, byte), link}
 

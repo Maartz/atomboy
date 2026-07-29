@@ -110,7 +110,7 @@ defmodule Atomboy.Window do
       rom: rom,
       ram:
         Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
-        |> then(&if(link, do: Map.put(&1, :link, true), else: &1))
+        |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
         |> Save.load(sav),
       sav: sav,
       state_base: Path.rootname(sav),
@@ -126,7 +126,6 @@ defmodule Atomboy.Window do
       turbo: false,
       paused: false,
       history: [],
-      link: link,
       note: nil,
       last_frame: nil,
       fps: 0.0,
@@ -205,7 +204,6 @@ defmodule Atomboy.Window do
 
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
     {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, render?)
-    {ram, link} = Link.tick(ctx.link, ram)
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     if render? do
@@ -232,7 +230,6 @@ defmodule Atomboy.Window do
         ram: ram,
         apu: apu,
         audio: audio,
-        link: link,
         frame: ctx.frame + 1,
         deadline: deadline,
         note: fade(ctx.note),
@@ -288,6 +285,12 @@ defmodule Atomboy.Window do
   defp act(ctx, :load_state) do
     case Save.read_state(state_path(ctx)) do
       {:ok, {state, ram, apu}} ->
+        ram =
+          case Map.get(ctx.ram, :link) do
+            nil -> Map.delete(ram, :link)
+            link -> Map.put(ram, :link, link)
+          end
+
         %{ctx | state: state, ram: ram, apu: apu, note: {"état repris (case #{ctx.state_slot})", 120}}
 
       :error ->
@@ -297,10 +300,18 @@ defmodule Atomboy.Window do
 
   defp act(ctx, {:slot, n}), do: %{ctx | state_slot: n, note: {"case d'état #{n}", 120}}
 
-  defp act(%{link: link} = ctx, :turbo) when link != nil,
-    do: %{ctx | note: {"turbo indisponible : câble branché", 120}}
-
   defp act(ctx, :turbo) do
+    if Map.has_key?(ctx.ram, :link) do
+      %{ctx | note: {"turbo indisponible : câble branché", 120}}
+    else
+      turbo_toggle(ctx)
+    end
+  end
+
+
+  defp act(ctx, :pause), do: %{ctx | paused: not ctx.paused}
+
+  defp turbo_toggle(ctx) do
     turbo = not ctx.turbo
 
     audio =
@@ -313,8 +324,6 @@ defmodule Atomboy.Window do
 
     %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
   end
-
-  defp act(ctx, :pause), do: %{ctx | paused: not ctx.paused}
 
   defp state_path(ctx) do
     if ctx.state_slot == 1 do
@@ -360,7 +369,7 @@ defmodule Atomboy.Window do
         if(ctx.turbo, do: "»»"),
         if(ctx.paused, do: "⏸"),
         if(ctx.audio, do: "♪"),
-        if(ctx.link, do: "⇄"),
+        if(Map.has_key?(ram, :link), do: "⇄"),
         case ctx.note do
           {text, _} -> text
           nil -> nil

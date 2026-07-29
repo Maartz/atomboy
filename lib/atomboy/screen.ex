@@ -142,6 +142,9 @@ defmodule Atomboy.Screen do
     # au pire 456 cycles de retard sur le matériel, qui copie sur-le-champ.
     ram = gdma(rom, ram)
     ram = hdma(rom, ram, ly, lcd_on?)
+
+    # Le câble link se résout à la scanline — la latence du vrai matériel.
+    ram = if :erlang.is_map_key(:link, ram), do: Atomboy.Link.line(ram), else: ram
     {state, Atomboy.Timer.advance(ram, cycles)}
   end
 
