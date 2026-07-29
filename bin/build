@@ -4,6 +4,7 @@
 #     bin/build              tests puis binaires dans burrito_out/
 #     bin/build --vite       sans les tests
 #     bin/build --install    + copie vers ~/.local/bin/atomboy
+#     bin/build --app        + Atomboy.app (coquille SwiftUI native)
 #     bin/build --menage     purge les caches d'extraction (jeu fermé !)
 #
 # Sous le capot : Burrito exige zig 0.16.0 (mise l'installe au besoin),
@@ -18,11 +19,13 @@ ZIG=zig@0.16.0
 vite=false
 install=false
 menage=false
+app=false
 for arg in "$@"; do
   case "$arg" in
     --vite) vite=true ;;
     --install) install=true ;;
     --menage) menage=true ;;
+    --app) app=true ;;
     *) echo "option inconnue : $arg" >&2; exit 2 ;;
   esac
 done
@@ -46,6 +49,30 @@ if $menage; then
   echo "── ménage ──"
   rm -rf "$HOME/Library/Application Support/.burrito/atomboy_"*
   echo "caches d'extraction purgés (ils renaissent au premier lancement)"
+fi
+
+if $app; then
+  # La .app macOS : la coquille SwiftUI (rel/macos/Atomboy.swift) devant,
+  # le binaire Burrito en moteur --serveur derrière. Signature ad hoc —
+  # obligatoire sur Apple Silicon, et suffisante en local.
+  echo "── Atomboy.app ──"
+  version=$(mix run --no-start -e 'IO.write(Atomboy.MixProject.project()[:version])' 2>/dev/null | tail -1)
+  # Assemblage et signature dans /tmp : sous un dossier synchronisé
+  # (iCloud Documents…), le file provider restampe des xattrs en continu
+  # et codesign refuse (« detritus ») — hors de sa portée, puis déplacé.
+  contenu=/tmp/Atomboy.app/Contents
+  rm -rf /tmp/Atomboy.app burrito_out/Atomboy.app
+  mkdir -p "$contenu/MacOS" "$contenu/Resources"
+  # « atomboy-moteur », pas « atomboy » : APFS est insensible à la casse —
+  # « atomboy » écraserait la coquille « Atomboy » (vécu).
+  cp burrito_out/atomboy_macos_arm "$contenu/MacOS/atomboy-moteur"
+  swiftc -O -parse-as-library -o "$contenu/MacOS/Atomboy" rel/macos/Atomboy.swift 2> /dev/null
+  python3 rel/macos/icone.py "$contenu/Resources/Atomboy.icns"
+  sed "s/VERSION_ATOMBOY/$version/g" rel/macos/Info.plist > "$contenu/Info.plist"
+  xattr -cr /tmp/Atomboy.app
+  codesign --force --deep --sign - /tmp/Atomboy.app 2> /dev/null
+  mv /tmp/Atomboy.app burrito_out/Atomboy.app
+  echo "  burrito_out/Atomboy.app (glisser dans /Applications)"
 fi
 
 echo "── binaires ──"

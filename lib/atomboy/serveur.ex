@@ -62,6 +62,10 @@ defmodule Atomboy.Serveur do
     sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
 
     with {:ok, link} <- link_up(opts) do
+      # stdout est un flux binaire : en Unicode (le défaut du BEAM), tout
+      # octet ≥ 128 deviendrait deux octets UTF-8 — frames déchirées.
+      :io.setopts(:standard_io, encoding: :latin1)
+
       parent = self()
       reader = spawn_link(fn -> read_stdin(parent) end)
 

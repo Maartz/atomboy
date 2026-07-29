@@ -39,11 +39,17 @@ MBCs, link cable) is plain immutable Elixir on top of it.
 
 ## Playing
 
-Grab or build a binary (see below), then:
+On macOS, the nicest way is the native app — `bin/build --vite --app`
+produces `burrito_out/Atomboy.app`: a SwiftUI shell (Metal-sharp pixels,
+sound through AVAudioEngine — no ffplay needed) driving the BEAM engine
+over a pipe. Drag it to /Applications, double-click, pick a ROM — or open
+a `.gb`/`.gbc` file with it.
+
+Everywhere else (and for the terminal aficionados), the standalone binary:
 
 ```sh
 atomboy game.gb                 # terminal renderer
-atomboy game.gbc --fenetre      # native window
+atomboy game.gbc --fenetre      # native window (wxWidgets)
 ```
 
 | Key | | Key | |
@@ -103,6 +109,7 @@ Natively (needs Elixir 1.18/OTP 26, `xz`, and zig 0.16.0 — installed via
 bin/build                # tests, then binaries in burrito_out/
 bin/build --vite         # skip the tests
 bin/build --install      # also copy to ~/.local/bin/atomboy
+bin/build --app          # also assemble Atomboy.app (macOS, needs swiftc)
 ```
 
 Or straight from the repo without building a release:
