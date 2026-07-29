@@ -41,7 +41,14 @@ defmodule Atomboy.CLI do
     case parse(args) do
       {:ok, rom, opts} ->
         {fenetre, opts} = Keyword.pop(opts, :fenetre, false)
-        runner = if fenetre, do: Atomboy.Window, else: Atomboy.Play
+        {serveur, opts} = Keyword.pop(opts, :serveur, false)
+
+        runner =
+          cond do
+            serveur -> Atomboy.Serveur
+            fenetre -> Atomboy.Window
+            true -> Atomboy.Play
+          end
 
         try do
           case runner.run(rom, opts) do
@@ -85,6 +92,7 @@ defmodule Atomboy.CLI do
           son: :boolean,
           palette: :string,
           fenetre: :boolean,
+          serveur: :boolean,
           dmg: :boolean,
           ecoute: :integer,
           lien: :string,

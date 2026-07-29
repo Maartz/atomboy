@@ -49,11 +49,11 @@ defmodule Atomboy.Link do
   def listen(port) do
     with {:ok, lsock} <-
            :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true]),
-         IO.puts("câble link : en attente du partenaire sur le port #{port}…"),
+         IO.puts(:stderr, "câble link : en attente du partenaire sur le port #{port}…"),
          {:ok, socket} <- :gen_tcp.accept(lsock, 120_000) do
       :gen_tcp.close(lsock)
       :inet.setopts(socket, nodelay: true)
-      IO.puts("câble link : partenaire branché.")
+      IO.puts(:stderr, "câble link : partenaire branché.")
       {:ok, nouveau(socket)}
     else
       {:error, reason} -> {:error, "câble link : #{inspect(reason)}"}
@@ -72,7 +72,7 @@ defmodule Atomboy.Link do
            nodelay: true
          ]) do
       {:ok, socket} ->
-        IO.puts("câble link : branché sur #{host}:#{port}.")
+        IO.puts(:stderr, "câble link : branché sur #{host}:#{port}.")
         {:ok, nouveau(socket)}
 
       {:error, _} when tries > 1 ->

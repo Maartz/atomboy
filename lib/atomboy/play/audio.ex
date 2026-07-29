@@ -60,25 +60,34 @@ defmodule Atomboy.Play.Audio do
   def stream(nil, ram, apu), do: {Map.delete(ram, :apu_triggers), apu, nil}
 
   def stream(audio, ram, apu) do
-    now = System.monotonic_time(:microsecond)
-    due = div((now - audio.t0) * @rate, 1_000_000) + @lead
-
-    {audio, needed} =
-      case due - audio.sent do
-        n when n > @max_burst ->
-          # Recaler : t0 tel que le dû retombe à l'avance nominale.
-          t0 = now - div((audio.sent + @lead) * 1_000_000, @rate)
-          {%{audio | t0: t0}, @lead}
-
-        n ->
-          {audio, max(n, 0)}
-      end
-
+    {audio, needed} = cadence(audio)
     {pcm, ram, apu} = APU.samples(ram, apu, needed)
 
     case push(audio.port, pcm) do
       :ok -> {ram, apu, %{audio | sent: audio.sent + needed}}
       :dead -> {ram, apu, nil}
+    end
+  end
+
+  @doc """
+  Ce que l'horloge murale exige maintenant : `{audio, n}` — l'état avancé
+  et le nombre d'échantillons dus. Le cœur anti-famine, partagé entre le
+  flux ffplay et le mode serveur (qui pousse le PCM ailleurs).
+  """
+  @spec cadence(%{t0: integer(), sent: non_neg_integer()}) ::
+          {%{t0: integer(), sent: non_neg_integer()}, non_neg_integer()}
+  def cadence(audio) do
+    now = System.monotonic_time(:microsecond)
+    due = div((now - audio.t0) * @rate, 1_000_000) + @lead
+
+    case due - audio.sent do
+      n when n > @max_burst ->
+        # Recaler : t0 tel que le dû retombe à l'avance nominale.
+        t0 = now - div((audio.sent + @lead) * 1_000_000, @rate)
+        {%{audio | t0: t0}, @lead}
+
+      n ->
+        {audio, max(n, 0)}
     end
   end
 
