@@ -439,6 +439,11 @@ defmodule Atomboy.Play do
   # Le turbo affame tout lecteur audio (production stoppée, consommation
   # continue) : on ferme ffplay à l'entrée, on en rouvre un neuf à la
   # sortie — tampon vierge, pas de famine héritée.
+  # Le câble exige le tempo : deux consoles en turbo dérivent l'une de
+  # l'autre et le protocole série se déchire — turbo indisponible branché.
+  defp apply_event({tag, :turbo}, %{link: link} = ctx) when tag in [:key, :press] and link != nil,
+    do: %{ctx | note: {"turbo indisponible : câble branché", 120}}
+
   defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press] do
     turbo = not ctx.turbo
 

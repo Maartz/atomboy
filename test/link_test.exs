@@ -154,6 +154,28 @@ defmodule Atomboy.LinkTest do
     assert ram_d[0xFF01] == 0x42
   end
 
+  test "deux horloges d'affilée : une seule réponse par frame" do
+    {gauche, droite} = pair()
+
+    # Le maître (impatient) envoie deux horloges avant que l'esclave n'ait
+    # digéré la première.
+    :gen_tcp.send(gauche.socket, <<0, 0x01>>)
+    :gen_tcp.send(gauche.socket, <<0, 0x02>>)
+    Process.sleep(20)
+
+    ram_d = arme(%{link: true}, 0xAA, 0x80)
+    {ram_d, droite} = Link.tick(droite, ram_d)
+
+    # Première horloge servie avec l'octet armé…
+    assert ram_d[0xFF01] == 0x01
+    assert {:ok, <<1, 0xAA>>} = :gen_tcp.recv(gauche.socket, 2, 200)
+    # …la seconde attend la frame suivante — et le SB rechargé entre-temps.
+    ram_d = Map.put(ram_d, 0xFF01, 0xBB)
+    {ram_d, _droite} = Link.tick(droite, ram_d)
+    assert ram_d[0xFF01] == 0x02
+    assert {:ok, <<1, 0xBB>>} = :gen_tcp.recv(gauche.socket, 2, 200)
+  end
+
   test "sans câble, la capture série de blargg reste intacte" do
     ram = arme(%{}, ?A, 0x81)
     assert IO.iodata_to_binary(Map.get(ram, :serial)) == "A"

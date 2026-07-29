@@ -297,6 +297,9 @@ defmodule Atomboy.Window do
 
   defp act(ctx, {:slot, n}), do: %{ctx | state_slot: n, note: {"case d'état #{n}", 120}}
 
+  defp act(%{link: link} = ctx, :turbo) when link != nil,
+    do: %{ctx | note: {"turbo indisponible : câble branché", 120}}
+
   defp act(ctx, :turbo) do
     turbo = not ctx.turbo
 

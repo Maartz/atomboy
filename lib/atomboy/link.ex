@@ -167,7 +167,10 @@ defmodule Atomboy.Link do
 
   # L'horloge du maître peut arriver que l'esclave soit armé ou non — le
   # matériel décale SB dans tous les cas ; l'interruption n'appartient qu'à
-  # un transfert armé (bit 7 de SC).
+  # un transfert armé (bit 7 de SC). UNE horloge par frame, pas plus : la
+  # réponse à la suivante doit attendre que le jeu ait digéré la précédente
+  # (son ISR recharge SB) — répondre à deux d'affilée renverrait au maître
+  # son propre octet (vécu : l'écho, côté esclave, sous turbo).
   defp pump(link, ram) do
     case :gen_tcp.recv(link.socket, 2, 0) do
       {:ok, <<0, byte>>} ->
@@ -180,7 +183,7 @@ defmodule Atomboy.Link do
                 Map.put(ram, @sb, byte)
               end
 
-            pump(link, ram)
+            {ram, link}
 
           {:error, _} ->
             unplugged(ram)
