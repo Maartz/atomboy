@@ -200,10 +200,12 @@ final class VueÉcran: NSView {
     }
 
     // La fenêtre garde le ratio de la dalle : pas de bandes noires — et le
-    // clavier nous revient dès qu'elle existe, sans clic préalable.
+    // clavier nous revient dès qu'elle existe, sans clic préalable. Sans
+    // barre de titre, c'est la frame qu'on attrape pour déplacer la fenêtre.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.contentAspectRatio = NSSize(width: LARGEUR, height: HAUTEUR)
+        window?.isMovableByWindowBackground = true
         window?.makeFirstResponder(self)
     }
 
@@ -229,6 +231,72 @@ struct Écran: NSViewRepresentable {
     }
 
     func updateNSView(_ vue: VueÉcran, context: Context) {}
+}
+
+// ── La HUD de verre : les commandes au survol, l'écran sinon ─────────────────
+
+struct BoutonHUD: View {
+    let symbole: String
+    let aide: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbole)
+                .font(.system(size: 15, weight: .medium))
+                .frame(width: 34, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(aide)
+    }
+}
+
+struct HUD: View {
+    let moteur: Moteur
+
+    var body: some View {
+        HStack(spacing: 2) {
+            BoutonHUD(symbole: "forward.fill", aide: "Turbo (Tab)") { moteur.tape("T") }
+            BoutonHUD(symbole: "square.and.arrow.down", aide: "Sauver l'état (⌘S)") { moteur.tape("s") }
+            BoutonHUD(symbole: "arrow.counterclockwise", aide: "Charger l'état (⌘R)") { moteur.tape("r") }
+            BoutonHUD(symbole: "list.bullet", aide: "Menu en jeu (Échap)") { moteur.tape("M") }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .modifier(Verre())
+    }
+}
+
+// Liquid Glass quand le système le parle, verre dépoli sinon.
+struct Verre: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule())
+        } else {
+            content.background(.ultraThinMaterial, in: Capsule())
+        }
+    }
+}
+
+struct Scène: View {
+    let moteur: Moteur
+    @State private var survol = false
+
+    init(moteur: Moteur) { self.moteur = moteur }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Écran(moteur: moteur)
+                .ignoresSafeArea()
+
+            HUD(moteur: moteur)
+                .padding(.bottom, 14)
+                .opacity(survol ? 1 : 0)
+                .animation(.easeOut(duration: 0.18), value: survol)
+        }
+        .onHover { survol = $0 }
+    }
 }
 
 // ── L'application ────────────────────────────────────────────────────────────
@@ -273,10 +341,13 @@ struct AtomboyApp: App {
 
     var body: some Scene {
         WindowGroup("atomboy") {
-            Écran(moteur: délégué.moteur)
-                .frame(minWidth: CGFloat(LARGEUR), minHeight: CGFloat(HAUTEUR))
-                .aspectRatio(CGFloat(LARGEUR) / CGFloat(HAUTEUR), contentMode: .fit)
+            // Plein cadre : la frame va jusqu'aux coins arrondis de la
+            // fenêtre, les feux tricolores flottent par-dessus — le ratio
+            // est verrouillé par la fenêtre elle-même (contentAspectRatio).
+            Scène(moteur: délégué.moteur)
+                .frame(minWidth: CGFloat(LARGEUR * 2), minHeight: CGFloat(HAUTEUR * 2))
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: CGFloat(LARGEUR * 3), height: CGFloat(HAUTEUR * 3))
         .commands {
             CommandGroup(replacing: .newItem) {
