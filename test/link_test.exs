@@ -73,7 +73,7 @@ defmodule Atomboy.LinkTest do
     refute Map.has_key?(ram_d, :link_op)
   end
 
-  test "l'horloge décale SB même chez un esclave non armé — sans interruption" do
+  test "face à un partenaire non armé, la ligne lit 0xFF — SB intact" do
     {gauche, droite} = pair()
 
     ram_g = arme(%{link: true}, 0x11, 0x81)
@@ -83,9 +83,13 @@ defmodule Atomboy.LinkTest do
     {ram_d, _} = tick(droite, ram_d)
     {ram_g, _} = tick(gauche, ram_g)
 
-    assert ram_d[0xFF01] == 0x11
+    # Le maître lit la ligne au repos ; le SB du non-armé ne bouge pas,
+    # aucune interruption — c'est le silicium : le registre ne se branche
+    # que transfert armé. (L'ancienne sémantique fabriquait de fausses
+    # poignées de main au Club Câble.)
+    assert ram_g[0xFF01] == 0xFF
+    assert ram_d[0xFF01] == 0x77
     assert (Map.get(ram_d, 0xFF0F, 0) &&& 0x08) == 0
-    assert ram_g[0xFF01] == 0x77
   end
 
   test "un maître sans réponse patiente sans renvoyer son horloge" do
@@ -179,8 +183,9 @@ defmodule Atomboy.LinkTest do
     # Première horloge servie avec l'octet armé…
     assert ram_d[0xFF01] == 0x01
     assert {:ok, <<1, 0xAA>>} = :gen_tcp.recv(gauche.socket, 2, 200)
-    # …la seconde attend la frame suivante — et le SB rechargé entre-temps.
-    ram_d = Map.put(ram_d, 0xFF01, 0xBB)
+    # …la seconde attend la frame suivante — et l'esclave réarmé, comme le
+    # ferait son ISR (non armé, la ligne lirait 0xFF).
+    ram_d = ram_d |> Map.put(:link, true) |> arme(0xBB, 0x80)
     {ram_d, _droite} = tick(droite, ram_d)
     assert ram_d[0xFF01] == 0x02
     assert {:ok, <<1, 0xBB>>} = :gen_tcp.recv(gauche.socket, 2, 200)

@@ -33,7 +33,7 @@ defmodule Atomboy.Link do
   @sc 0xFF02
   @if_addr 0xFF0F
 
-  defstruct [:socket]
+  defstruct [:socket, :trace, :t0]
 
   @type t :: %__MODULE__{}
 
@@ -54,7 +54,7 @@ defmodule Atomboy.Link do
       :gen_tcp.close(lsock)
       :inet.setopts(socket, nodelay: true)
       IO.puts("câble link : partenaire branché.")
-      {:ok, %__MODULE__{socket: socket}}
+      {:ok, nouveau(socket)}
     else
       {:error, reason} -> {:error, "câble link : #{inspect(reason)}"}
     end
@@ -73,7 +73,7 @@ defmodule Atomboy.Link do
          ]) do
       {:ok, socket} ->
         IO.puts("câble link : branché sur #{host}:#{port}.")
-        {:ok, %__MODULE__{socket: socket}}
+        {:ok, nouveau(socket)}
 
       {:error, _} when tries > 1 ->
         Process.sleep(500)
@@ -83,6 +83,25 @@ defmodule Atomboy.Link do
         {:error, "câble link : #{host}:#{port} injoignable (#{inspect(reason)})"}
     end
   end
+
+  # La trace série (ATOMBOY_LINK_TRACE=fichier) : chaque événement du câble,
+  # horodaté en millisecondes — l'outil des protocoles qui se déchirent.
+  defp nouveau(socket) do
+    %__MODULE__{
+      socket: socket,
+      trace: System.get_env("ATOMBOY_LINK_TRACE"),
+      t0: System.monotonic_time(:millisecond)
+    }
+  end
+
+  defp trace(%__MODULE__{trace: nil}, _msg), do: :ok
+
+  defp trace(link, msg) do
+    ms = System.monotonic_time(:millisecond) - link.t0
+    File.write!(link.trace, "#{ms} #{msg}\n", [:append])
+  end
+
+  defp hex(b), do: b |> Integer.to_string(16) |> String.pad_leading(2, "0")
 
   @doc """
   Une scanline de câble : résout l'opération série en attente et pompe au
@@ -125,8 +144,12 @@ defmodule Atomboy.Link do
     case drain_stale(link) do
       :ok ->
         case :gen_tcp.send(link.socket, <<0, Map.get(ram, @sb, 0xFF)>>) do
-          :ok -> await(link, %{ram | :link_op => :master_sent})
-          {:error, _} -> unplugged(ram)
+          :ok ->
+            trace(link, "M horloge → #{hex(Map.get(ram, @sb, 0xFF))}")
+            await(link, %{ram | :link_op => :master_sent})
+
+          {:error, _} ->
+            unplugged(ram)
         end
 
       {:clock, byte} ->
@@ -134,8 +157,12 @@ defmodule Atomboy.Link do
         # nôtre part quand même (il l'attend), et la sienne conclut chez
         # nous. L'échange des deux maîtres, sans réponse orpheline.
         case :gen_tcp.send(link.socket, <<0, Map.get(ram, @sb, 0xFF)>>) do
-          :ok -> {complete(ram, byte), link}
-          {:error, _} -> unplugged(ram)
+          :ok ->
+            trace(link, "M croisé  → #{hex(Map.get(ram, @sb, 0xFF))} ← #{hex(byte)}")
+            {complete(ram, byte), link}
+
+          {:error, _} ->
+            unplugged(ram)
         end
 
       :closed ->
@@ -145,7 +172,9 @@ defmodule Atomboy.Link do
 
   defp drain_stale(link) do
     case :gen_tcp.recv(link.socket, 2, 0) do
-      {:ok, <<1, _stale>>} -> drain_stale(link)
+      {:ok, <<1, stale>>} ->
+        trace(link, "purge orpheline #{hex(stale)}")
+        drain_stale(link)
       {:ok, <<0, byte>>} -> {:clock, byte}
       {:ok, _autre} -> drain_stale(link)
       {:error, :timeout} -> :ok
@@ -156,6 +185,7 @@ defmodule Atomboy.Link do
   defp await(link, ram) do
     case :gen_tcp.recv(link.socket, 2, 0) do
       {:ok, <<1, byte>>} ->
+        trace(link, "M reçu    ← #{hex(byte)}")
         {complete(ram, byte), link}
 
       {:ok, <<0, byte>>} ->
@@ -165,6 +195,7 @@ defmodule Atomboy.Link do
         # chaque socket : le flux se décale d'un cran et chaque console
         # finit par relire ses propres octets (vécu : Nolan qui s'échange
         # des Pokémon avec Nolan).
+        trace(link, "M croisé² ← #{hex(byte)}")
         {complete(ram, byte), link}
 
       {:error, :timeout} ->
@@ -177,24 +208,23 @@ defmodule Atomboy.Link do
 
   # ── L'esclave, et le repos ──────────────────────────────────────────────────
 
-  # L'horloge du maître peut arriver que l'esclave soit armé ou non — le
-  # matériel décale SB dans tous les cas ; l'interruption n'appartient qu'à
-  # un transfert armé (bit 7 de SC). UNE horloge par frame, pas plus : la
-  # réponse à la suivante doit attendre que le jeu ait digéré la précédente
-  # (son ISR recharge SB) — répondre à deux d'affilée renverrait au maître
-  # son propre octet (vécu : l'écho, côté esclave, sous turbo).
+  # L'horloge du maître ne rencontre le SB de l'esclave QUE transfert armé
+  # (bit 7 de SC) : non armé, la ligne série reste au repos et le maître
+  # lit 0xFF — le silicium ne branche le registre qu'à la demande. Servir
+  # le SB d'un non-armé (et l'écraser) fabriquait de fausses poignées de
+  # main : la sonde $01 d'un joueur, recyclée par l'autre, se lisait comme
+  # « partenaire maître détecté » (vécu, à la trace). UNE horloge par
+  # frame : la réponse à la suivante attend que l'ISR ait rechargé SB.
   defp pump(link, ram) do
     case :gen_tcp.recv(link.socket, 2, 0) do
       {:ok, <<0, byte>>} ->
-        case :gen_tcp.send(link.socket, <<1, Map.get(ram, @sb, 0xFF)>>) do
-          :ok ->
-            ram =
-              if Map.get(ram, :link_op) == :slave do
-                complete(ram, byte)
-              else
-                Map.put(ram, @sb, byte)
-              end
+        armé = Map.get(ram, :link_op) == :slave
+        réponse = if armé, do: Map.get(ram, @sb, 0xFF), else: 0xFF
 
+        case :gen_tcp.send(link.socket, <<1, réponse>>) do
+          :ok ->
+            trace(link, "E ← #{hex(byte)} → #{hex(réponse)}#{if armé, do: "", else: " (repos)"}")
+            ram = if armé, do: complete(ram, byte), else: ram
             {ram, link}
 
           {:error, _} ->
