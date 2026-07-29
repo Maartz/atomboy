@@ -22,8 +22,10 @@ defmodule Atomboy.Serveur do
   Des enregistrements de deux octets : `<<op, touche>>`, `op` valant `?+`
   (presse) ou `?-` (relâchement). Touches : `?U ?D ?L ?R` les directions,
   `?A ?B` les boutons, `?S` Start, `?E` Select, `?M` le menu, `?W` le
-  rembobinage (tenu), `?P` pause. La fin de l'entrée (coquille fermée)
-  arrête la partie proprement — sauvegarde écrite.
+  rembobinage (tenu), `?P` pause — et les actions directes pour la barre
+  de menus native : `?s`/`?r` sauver/charger l'état, `?1`-`?9` la case.
+  La fin de l'entrée (coquille fermée) arrête la partie proprement —
+  sauvegarde écrite.
 
   Tout le reste est la machinerie habituelle : menu dans la frame, états,
   mixer, câble link (`--ecoute`/`--lien` marchent aussi en serveur).
@@ -42,18 +44,24 @@ defmodule Atomboy.Serveur do
   @frame_us 16_742
 
   @touches %{
-    ?U => :up,
-    ?D => :down,
-    ?L => :left,
-    ?R => :right,
-    ?A => :a,
-    ?B => :b,
-    ?S => :start,
-    ?E => :select,
-    ?M => :menu,
-    ?W => :rewind,
-    ?P => :pause
-  }
+                ?U => :up,
+                ?D => :down,
+                ?L => :left,
+                ?R => :right,
+                ?A => :a,
+                ?B => :b,
+                ?S => :start,
+                ?E => :select,
+                ?M => :menu,
+                ?W => :rewind,
+                ?P => :pause,
+                # Les actions directes — la barre de menus native s'en sert.
+                ?s => :save_state,
+                ?r => :load_state
+              }
+              |> Map.merge(for n <- 1..9, into: %{}, do: {?0 + n, {:slot, n}})
+
+  @boutons [:up, :down, :left, :right, :a, :b, :start, :select, :rewind]
 
   @doc "Joue `rom_path` en mode serveur. Mêmes options que la fenêtre."
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
@@ -258,8 +266,11 @@ defmodule Atomboy.Serveur do
     }
 
   defp appuie(ctx, ?+, :pause), do: appuie(ctx, ?+, :menu)
-  defp appuie(ctx, ?+, key), do: %{ctx | down: MapSet.put(ctx.down, key)}
-  defp appuie(ctx, ?-, key), do: %{ctx | down: MapSet.delete(ctx.down, key)}
+  defp appuie(ctx, ?+, :save_state), do: menu_action(:save_state, ctx)
+  defp appuie(ctx, ?+, :load_state), do: menu_action(:load_state, ctx)
+  defp appuie(ctx, ?+, {:slot, n}), do: %{ctx | state_slot: n}
+  defp appuie(ctx, ?+, key) when key in @boutons, do: %{ctx | down: MapSet.put(ctx.down, key)}
+  defp appuie(ctx, ?-, key) when key in @boutons, do: %{ctx | down: MapSet.delete(ctx.down, key)}
   defp appuie(ctx, _op, _key), do: ctx
 
   defp menu_action(_action, :quit), do: :quit

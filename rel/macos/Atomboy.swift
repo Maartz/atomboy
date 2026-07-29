@@ -36,7 +36,15 @@ final class Moteur: ObservableObject {
 
     init() {
         couche.magnificationFilter = .nearest
+        couche.contentsGravity = .resizeAspect
         couche.backgroundColor = NSColor.black.cgColor
+    }
+
+    // Un appui bref « depuis la barre de menus » : presse puis relâche.
+    func tape(_ clé: Character) {
+        let octet = UInt8(clé.asciiValue ?? 0)
+        try? entrée?.write(contentsOf: Data([UInt8(ascii: "+"), octet]))
+        try? entrée?.write(contentsOf: Data([UInt8(ascii: "-"), octet]))
     }
 
     func lance(rom: URL) {
@@ -190,6 +198,14 @@ final class VueÉcran: NSView {
         moteur?.couche ?? CALayer()
     }
 
+    // La fenêtre garde le ratio de la dalle : pas de bandes noires — et le
+    // clavier nous revient dès qu'elle existe, sans clic préalable.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.contentAspectRatio = NSSize(width: LARGEUR, height: HAUTEUR)
+        window?.makeFirstResponder(self)
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.isARepeat { return }
         if moteur?.touche(event, pressée: true) != true { super.keyDown(with: event) }
@@ -265,6 +281,27 @@ struct AtomboyApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Ouvrir une ROM…") { délégué.choisisROM() }
                     .keyboardShortcut("o")
+            }
+
+            // L'idiome natif : les actions du jeu vivent aussi dans la
+            // barre de menus — le menu en jeu (Échap) reste pour le style.
+            CommandMenu("Partie") {
+                Button("Sauver l'état") { délégué.moteur.tape("s") }
+                    .keyboardShortcut("s")
+                Button("Charger l'état") { délégué.moteur.tape("r") }
+                    .keyboardShortcut("r")
+
+                Menu("Case d'état") {
+                    ForEach(1...9, id: \.self) { n in
+                        Button("Case \(n)") { délégué.moteur.tape(Character("\(n)")) }
+                            .keyboardShortcut(KeyEquivalent(Character("\(n)")))
+                    }
+                }
+
+                Divider()
+
+                Button("Menu en jeu") { délégué.moteur.tape("M") }
+                    .keyboardShortcut("m")
             }
         }
     }
