@@ -14,6 +14,7 @@
 
 import SwiftUI
 import AVFoundation
+import GameController
 
 let LARGEUR = 160
 let HAUTEUR = 144
@@ -48,7 +49,82 @@ final class Moteur: ObservableObject {
         couche.magnificationFilter = .nearest
         couche.contentsGravity = .resizeAspect
         couche.backgroundColor = NSColor.black.cgColor
+        brancheManettes()
     }
+
+    // Un bouton tenu ou relâché — la manette et le clavier parlent le même
+    // protocole, presse et relâchement séparés.
+    func bouton(_ clé: Character, pressée: Bool) {
+        let op: UInt8 = pressée ? UInt8(ascii: "+") : UInt8(ascii: "-")
+        try? entrée?.write(contentsOf: Data([op, UInt8(clé.asciiValue ?? 0)]))
+    }
+
+    // ── La manette : GameController, fronts seulement ────────────────────────
+
+    // L'état tenu par manette : n'émettre que les CHANGEMENTS — les
+    // handlers de GameController tirent à chaque frémissement de stick, et
+    // le tuyau n'a pas besoin de dix mille presses identiques.
+    private var manetteTenu: [ObjectIdentifier: Set<Character>] = [:]
+
+    private func brancheManettes() {
+        NotificationCenter.default.addObserver(
+            forName: .GCControllerDidConnect, object: nil, queue: .main
+        ) { [weak self] note in
+            if let manette = note.object as? GCController { self?.équipe(manette) }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: .GCControllerDidDisconnect, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let manette = note.object as? GCController else { return }
+            // Relâcher tout ce qu'elle tenait — pas de bouton fantôme.
+            for clé in manetteTenu[ObjectIdentifier(manette)] ?? [] {
+                bouton(clé, pressée: false)
+            }
+            manetteTenu[ObjectIdentifier(manette)] = nil
+        }
+
+        GCController.controllers().forEach(équipe)
+    }
+
+    private func équipe(_ manette: GCController) {
+        guard let pad = manette.extendedGamepad else { return }
+        let id = ObjectIdentifier(manette)
+        manetteTenu[id] = []
+
+        pad.valueChangedHandler = { [weak self] pad, _ in
+            DispatchQueue.main.async { self?.litPad(pad, id: id) }
+        }
+    }
+
+    // L'état voulu se recalcule entier à chaque événement (dpad OU stick
+    // par direction, seuil ±0,5), puis se diffe contre le tenu : seuls les
+    // fronts partent sur le tuyau.
+    private func litPad(_ pad: GCExtendedGamepad, id: ObjectIdentifier) {
+        var voulu: Set<Character> = []
+
+        if pad.dpad.up.isPressed || pad.leftThumbstick.yAxis.value > 0.5 { voulu.insert("U") }
+        if pad.dpad.down.isPressed || pad.leftThumbstick.yAxis.value < -0.5 { voulu.insert("D") }
+        if pad.dpad.left.isPressed || pad.leftThumbstick.xAxis.value < -0.5 { voulu.insert("L") }
+        if pad.dpad.right.isPressed || pad.leftThumbstick.xAxis.value > 0.5 { voulu.insert("R") }
+        if pad.buttonA.isPressed { voulu.insert("A") }
+        if pad.buttonB.isPressed { voulu.insert("B") }
+        if pad.buttonMenu.isPressed { voulu.insert("S") }
+        if pad.buttonOptions?.isPressed == true { voulu.insert("E") }
+        if pad.leftShoulder.isPressed { voulu.insert("W") }
+
+        let tenu = manetteTenu[id] ?? []
+        for clé in voulu.subtracting(tenu) { bouton(clé, pressée: true) }
+        for clé in tenu.subtracting(voulu) { bouton(clé, pressée: false) }
+        manetteTenu[id] = voulu
+
+        // Le turbo est une bascule côté moteur : front montant seulement.
+        let turbo = pad.rightShoulder.isPressed || pad.rightTrigger.isPressed
+        if turbo && !turboTenu { tape("T") }
+        turboTenu = turbo
+    }
+
+    private var turboTenu = false
 
     // Un appui bref « depuis la barre de menus » : presse puis relâche.
     func tape(_ clé: Character) {

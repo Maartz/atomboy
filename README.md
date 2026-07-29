@@ -4,6 +4,8 @@ A Game Boy and Game Boy Color emulator written in Elixir — playable, with
 sound, in your terminal or in a native window. Two copies can even trade
 Pokémon over a TCP link cable.
 
+<p align="center"><img src="docs/demo.gif" width="320" alt="Pokémon Silver running in atomboy"></p>
+
 The unusual bet: **the emulated CPU is BEAM code.** The SM83 decoder is not
 written by hand — it is generated from a data table into two backends (a
 readable oracle and a fast tail-call loop), validated against ~500,000
@@ -36,6 +38,19 @@ MBCs, link cable) is plain immutable Elixir on top of it.
   a native window (wxWidgets, ships with OTP).
 - **Single-file binaries** — Burrito wraps the app and the BEAM into one
   executable per platform. No Erlang required to play.
+
+## Installing
+
+On macOS, Homebrew has both the app and the CLI binary:
+
+```sh
+brew install --cask maartz/tap/atomboy      # Atomboy.app
+brew install maartz/tap/atomboy-cli         # the terminal binary
+```
+
+Or grab a binary from the
+[releases](https://github.com/Maartz/atomboy/releases) — `atomboy_linux_x64`,
+`atomboy_macos_arm`, or `Atomboy.app.zip`.
 
 ## Playing
 
