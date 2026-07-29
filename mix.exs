@@ -1,10 +1,12 @@
 defmodule Atomboy.MixProject do
   use Mix.Project
 
+  @version "0.2.0"
+
   def project do
     [
       app: :atomboy,
-      version: "0.1.0",
+      version: version(),
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       # wx (la fenêtre native) vit dans OTP, pas dans nos deps : sans ceci,
@@ -14,6 +16,27 @@ defmodule Atomboy.MixProject do
       deps: deps(),
       releases: releases()
     ]
+  end
+
+  # La version porte le SHA du commit (et l'heure si l'arbre est sale) :
+  # le binaire Burrito extrait son contenu dans un cache nommé par version —
+  # sans cela, un rebuild de même numéro fait tourner l'ancien code. Chaque
+  # build a désormais sa clé ; le cache s'accumule dans
+  # ~/Library/Application Support/.burrito, à purger de temps en temps.
+  defp version do
+    case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+      {sha, 0} ->
+        dirty =
+          case System.cmd("git", ["status", "--porcelain"], stderr_to_stdout: true) do
+            {"", 0} -> ""
+            _ -> ".#{System.os_time(:second)}"
+          end
+
+        "#{@version}+#{String.trim(sha)}#{dirty}"
+
+      _ ->
+        @version
+    end
   end
 
   def application do
