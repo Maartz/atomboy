@@ -290,16 +290,7 @@ defmodule Atomboy.Window do
 
   # ── Le reste, comme au terminal ─────────────────────────────────────────────
 
-  defp sound(ram, apu, nil), do: {Map.delete(ram, :apu_triggers), apu, nil}
-
-  defp sound(ram, apu, audio) do
-    {pcm, ram, apu} = APU.frame(ram, apu)
-
-    case Audio.push(audio, pcm) do
-      :ok -> {ram, apu, audio}
-      :dead -> {ram, apu, nil}
-    end
-  end
+  defp sound(ram, apu, audio), do: Audio.stream(audio, ram, apu)
 
   defp finish(ctx) do
     Save.flush(ctx.ram, ctx.sav)

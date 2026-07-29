@@ -14,33 +14,77 @@ defmodule Atomboy.Play.Audio do
 
   alias Atomboy.APU
 
+  @rate 32_768
+  # L'avance entretenue sur le lecteur : ~63 ms — la marge qui absorbe la
+  # gigue d'une frame lente sans que le tampon ne touche le fond.
+  @lead 2048
+  # Un retard au-delà d'une demi-seconde (pause, blocage) ne se rattrape
+  # pas en rafale : on recale l'horloge.
+  @max_burst div(@rate, 2)
+
+  defstruct [:port, :t0, sent: 0]
+
+  @type t :: %__MODULE__{}
+
   @doc "Ouvre le lecteur, ou `nil` sans ffplay."
-  @spec open() :: port() | nil
+  @spec open() :: t() | nil
   def open do
     case System.find_executable("ffplay") do
       nil ->
         nil
 
       path ->
-        Port.open(
-          {:spawn_executable, path},
-          [
-            :binary,
-            :use_stdio,
-            :exit_status,
-            args:
-              ~w(-v quiet -nodisp -autoexit -f s16le -ar #{APU.sample_rate()} -ch_layout stereo -)
-          ]
-        )
+        port =
+          Port.open(
+            {:spawn_executable, path},
+            [
+              :binary,
+              :use_stdio,
+              :exit_status,
+              args: ~w(-v quiet -nodisp -autoexit -f s16le -ar #{@rate} -ch_layout stereo -)
+            ]
+          )
+
+        %__MODULE__{port: port, t0: System.monotonic_time(:microsecond)}
     end
   end
 
   @doc """
-  Pousse une frame d'échantillons. `:dead` si le lecteur a disparu —
-  le jeu continue alors en silence.
+  La frame de son, asservie à l'horloge murale : produit exactement ce que
+  le temps réel écoulé exige — que la boucle de jeu tourne à 58 ou 60 fps,
+  le flux vise 32 768 échantillons/s et le tampon d'ffplay ne meurt jamais
+  de faim. Sans lecteur, jette les déclenchements ; un lecteur disparu
+  coupe le son sans arrêter la partie.
   """
-  @spec push(port(), binary()) :: :ok | :dead
-  def push(port, pcm) do
+  @spec stream(t() | nil, map(), APU.t()) :: {map(), APU.t(), t() | nil}
+  def stream(nil, ram, apu), do: {Map.delete(ram, :apu_triggers), apu, nil}
+
+  def stream(audio, ram, apu) do
+    now = System.monotonic_time(:microsecond)
+    due = div((now - audio.t0) * @rate, 1_000_000) + @lead
+
+    {audio, needed} =
+      case due - audio.sent do
+        n when n > @max_burst ->
+          # Recaler : t0 tel que le dû retombe à l'avance nominale.
+          t0 = now - div((audio.sent + @lead) * 1_000_000, @rate)
+          {%{audio | t0: t0}, @lead}
+
+        n ->
+          {audio, max(n, 0)}
+      end
+
+    {pcm, ram, apu} = APU.samples(ram, apu, needed)
+
+    case push(audio.port, pcm) do
+      :ok -> {ram, apu, %{audio | sent: audio.sent + needed}}
+      :dead -> {ram, apu, nil}
+    end
+  end
+
+  defp push(_port, <<>>), do: :ok
+
+  defp push(port, pcm) do
     Port.command(port, pcm)
     :ok
   rescue
@@ -48,10 +92,10 @@ defmodule Atomboy.Play.Audio do
   end
 
   @doc "Referme le tuyau — ffplay sort sur la fin de flux."
-  @spec close(port() | nil) :: :ok
+  @spec close(t() | nil) :: :ok
   def close(nil), do: :ok
 
-  def close(port) do
+  def close(%__MODULE__{port: port}) do
     Port.close(port)
     :ok
   rescue

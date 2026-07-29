@@ -325,16 +325,7 @@ defmodule Atomboy.Play do
   # La frame de son suit la frame d'image ; un lecteur disparu coupe le son
   # sans arrêter la partie. Sans lecteur, les déclenchements capturés se
   # jettent — la liste ne doit pas enfler pour rien.
-  defp sound(ram, apu, nil), do: {Map.delete(ram, :apu_triggers), apu, nil}
-
-  defp sound(ram, apu, audio) do
-    {pcm, ram, apu} = APU.frame(ram, apu)
-
-    case Audio.push(audio, pcm) do
-      :ok -> {ram, apu, audio}
-      :dead -> {ram, apu, nil}
-    end
-  end
+  defp sound(ram, apu, audio), do: Audio.stream(audio, ram, apu)
 
   # ── L'état des touches ──────────────────────────────────────────────────────
 

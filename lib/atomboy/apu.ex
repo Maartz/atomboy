@@ -102,9 +102,23 @@ defmodule Atomboy.APU do
   @doc """
   Une frame de son : consomme les déclenchements capturés, avance les
   canaux de 70 224 cycles, rend `{échantillons, ram, apu}` — stéréo s16le.
+  Le reste de cycles se reporte : dérive nulle sur la durée.
   """
   @spec frame(map(), t()) :: {binary(), map(), t()}
   def frame(ram, apu) do
+    {count, carry} = sample_count(apu)
+    {bin, ram, apu} = samples(ram, apu, count)
+    {bin, ram, %{apu | sample_acc: carry}}
+  end
+
+  @doc """
+  Exactement `count` échantillons — la voie de la sortie audio asservie à
+  l'horloge murale : le temps de l'APU y avance d'un pas de 128 cycles par
+  échantillon, indépendamment du découpage en frames. Les déclenchements
+  capturés sont consommés même à zéro échantillon demandé.
+  """
+  @spec samples(map(), t(), non_neg_integer()) :: {binary(), map(), t()}
+  def samples(ram, apu, count) do
     apu =
       ram
       |> Map.get(:apu_triggers, [])
@@ -113,17 +127,19 @@ defmodule Atomboy.APU do
 
     ram = Map.delete(ram, :apu_triggers)
 
-    if (Map.get(ram, 0xFF26, 0xF1) &&& 0x80) == 0 do
-      {count, carry} = sample_count(apu)
-      {:binary.copy(<<0, 0, 0, 0>>, count), ram, %{apu | sample_acc: carry}}
-    else
-      {samples, apu} = generate(ram, apu)
-      {samples, ram, apu}
+    cond do
+      count <= 0 ->
+        {<<>>, ram, apu}
+
+      (Map.get(ram, 0xFF26, 0xF1) &&& 0x80) == 0 ->
+        {:binary.copy(<<0, 0, 0, 0>>, count), ram, apu}
+
+      true ->
+        {bin, apu} = generate(ram, apu, count)
+        {bin, ram, apu}
     end
   end
 
-  # Le nombre d'échantillons de la frame — le reste de cycles se reporte,
-  # la dérive reste nulle sur la durée.
   defp sample_count(apu) do
     total = @frame_cycles + apu.sample_acc
     {div(total, @cycles_per_sample), rem(total, @cycles_per_sample)}
@@ -188,8 +204,7 @@ defmodule Atomboy.APU do
     |> List.to_tuple()
   end
 
-  defp generate(ram, apu) do
-    {count, carry} = sample_count(apu)
+  defp generate(ram, apu, count) do
     cfg = config(ram)
 
     {samples, ch1, ch2, ch3, ch4, seq_acc, seq_step} =
@@ -239,8 +254,7 @@ defmodule Atomboy.APU do
         ch3: ch3,
         ch4: ch4,
         seq_acc: seq_acc,
-        seq_step: seq_step,
-        sample_acc: carry
+        seq_step: seq_step
     }
 
     {samples |> Enum.reverse() |> IO.iodata_to_binary(), apu}
