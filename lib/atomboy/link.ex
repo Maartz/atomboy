@@ -107,9 +107,37 @@ defmodule Atomboy.Link do
   # ── Le maître ───────────────────────────────────────────────────────────────
 
   defp clock_out(link, ram) do
-    case :gen_tcp.send(link.socket, <<0, Map.get(ram, @sb, 0xFF)>>) do
-      :ok -> await(link, %{ram | :link_op => :master_sent})
-      {:error, _} -> unplugged(ram)
+    # Purger les réponses orphelines d'abord : aucune horloge à nous n'est
+    # en vol, toute réponse en attente est un résidu de désynchronisation —
+    # la consommer ici guérit le flux au lieu de perpétuer le décalage.
+    case drain_stale(link) do
+      :ok ->
+        case :gen_tcp.send(link.socket, <<0, Map.get(ram, @sb, 0xFF)>>) do
+          :ok -> await(link, %{ram | :link_op => :master_sent})
+          {:error, _} -> unplugged(ram)
+        end
+
+      {:clock, byte} ->
+        # Le pair a cadencé le premier : nos horloges se croisent — la
+        # nôtre part quand même (il l'attend), et la sienne conclut chez
+        # nous. L'échange des deux maîtres, sans réponse orpheline.
+        case :gen_tcp.send(link.socket, <<0, Map.get(ram, @sb, 0xFF)>>) do
+          :ok -> {complete(ram, byte), link}
+          {:error, _} -> unplugged(ram)
+        end
+
+      :closed ->
+        unplugged(ram)
+    end
+  end
+
+  defp drain_stale(link) do
+    case :gen_tcp.recv(link.socket, 2, 0) do
+      {:ok, <<1, _stale>>} -> drain_stale(link)
+      {:ok, <<0, byte>>} -> {:clock, byte}
+      {:ok, _autre} -> drain_stale(link)
+      {:error, :timeout} -> :ok
+      {:error, _} -> :closed
     end
   end
 
@@ -119,8 +147,12 @@ defmodule Atomboy.Link do
         {complete(ram, byte), link}
 
       {:ok, <<0, byte>>} ->
-        # Deux maîtres à la fois : on répond, et son octet vaut réponse.
-        :gen_tcp.send(link.socket, <<1, Map.get(ram, @sb, 0xFF)>>)
+        # Deux maîtres à la fois : les horloges qui se croisent SONT
+        # l'échange — chacun conclut avec l'octet de l'autre, personne ne
+        # répond. Répondre en plus laisserait une réponse orpheline dans
+        # chaque socket : le flux se décale d'un cran et chaque console
+        # finit par relire ses propres octets (vécu : Nolan qui s'échange
+        # des Pokémon avec Nolan).
         {complete(ram, byte), link}
 
       {:error, :timeout} ->

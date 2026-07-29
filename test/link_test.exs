@@ -109,6 +109,51 @@ defmodule Atomboy.LinkTest do
     assert (ram_g[0xFF02] &&& 0x80) == 0
   end
 
+  test "deux maîtres simultanés échangent sans laisser de résidu" do
+    {gauche, droite} = pair()
+
+    ram_g = arme(%{link: true}, 0x11, 0x81)
+    ram_d = arme(%{link: true}, 0x22, 0x81)
+
+    # Chacun envoie son horloge, puis conclut sur celle de l'autre.
+    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    {ram_d, droite} = Link.tick(droite, ram_d)
+    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    {ram_d, droite} = Link.tick(droite, ram_d)
+
+    assert ram_g[0xFF01] == 0x22
+    assert ram_d[0xFF01] == 0x11
+    refute Map.has_key?(ram_g, :link_op)
+    refute Map.has_key?(ram_d, :link_op)
+
+    # Les sockets doivent être VIDES — le décalage d'un cran venait des
+    # réponses orphelines (Nolan qui échangeait avec Nolan).
+    assert {:error, :timeout} = :gen_tcp.recv(gauche.socket, 2, 50)
+    assert {:error, :timeout} = :gen_tcp.recv(droite.socket, 2, 50)
+    _ = {gauche, droite}
+  end
+
+  test "une réponse orpheline se purge avant une nouvelle horloge" do
+    {gauche, droite} = pair()
+
+    # Un résidu artificiel traîne dans la socket du maître.
+    :gen_tcp.send(droite.socket, <<1, 0x99>>)
+    Process.sleep(20)
+
+    ram_g = arme(%{link: true}, 0x42, 0x81)
+    {ram_g, gauche} = Link.tick(gauche, ram_g)
+    # Le résidu n'a PAS conclu le transfert : l'horloge est partie.
+    assert ram_g[:link_op] == :master_sent
+
+    # L'esclave répond normalement.
+    ram_d = arme(%{link: true}, 0x55, 0x80)
+    {ram_d, _} = Link.tick(droite, ram_d)
+    {ram_g, _} = Link.tick(gauche, ram_g)
+
+    assert ram_g[0xFF01] == 0x55
+    assert ram_d[0xFF01] == 0x42
+  end
+
   test "sans câble, la capture série de blargg reste intacte" do
     ram = arme(%{}, ?A, 0x81)
     assert IO.iodata_to_binary(Map.get(ram, :serial)) == "A"
