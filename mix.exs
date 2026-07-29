@@ -36,9 +36,10 @@ defmodule Atomboy.MixProject do
 
       _ ->
         # Sans dépôt (build Docker : le contexte n'embarque pas .git), le
-        # SHA arrive par l'environnement — ou la version reste nue.
+        # SHA arrive par l'environnement — ou la version reste nue. Un ARG
+        # Docker non fourni arrive en chaîne vide, pas en absence.
         case System.get_env("ATOMBOY_SHA") do
-          nil -> @version
+          sha when sha in [nil, ""] -> @version
           sha -> "#{@version}+#{sha}"
         end
     end
