@@ -23,6 +23,7 @@ let FRAME_OCTETS = LARGEUR * HAUTEUR * 3
 
 final class Moteur: ObservableObject {
     let couche = CALayer()
+    @Published var panneau = false
     var processusEnCours: Process? { processus }
     private var processus: Process?
     private var entrée: FileHandle?
@@ -45,6 +46,17 @@ final class Moteur: ObservableObject {
         let octet = UInt8(clé.asciiValue ?? 0)
         try? entrée?.write(contentsOf: Data([UInt8(ascii: "+"), octet]))
         try? entrée?.write(contentsOf: Data([UInt8(ascii: "-"), octet]))
+    }
+
+    // Le mixer natif : volume 0-100 (?V) et masque des quatre voix (?X).
+    func volume(_ v: Int) {
+        try? entrée?.write(contentsOf: Data([UInt8(ascii: "V"), UInt8(max(0, min(100, v)))]))
+    }
+
+    func voix(_ actives: [Bool]) {
+        var masque: UInt8 = 0
+        for (i, on) in actives.enumerated() where on { masque |= 1 << UInt8(i) }
+        try? entrée?.write(contentsOf: Data([UInt8(ascii: "X"), masque]))
     }
 
     func lance(rom: URL) {
@@ -207,10 +219,24 @@ final class VueÉcran: NSView {
         window?.contentAspectRatio = NSSize(width: LARGEUR, height: HAUTEUR)
         window?.isMovableByWindowBackground = true
         window?.makeFirstResponder(self)
+
+        // Les feux tricolores naissent effacés — ils n'apparaissent qu'au
+        // survol, comme la HUD.
+        for bouton in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window?.standardWindowButton(bouton)?.alphaValue = 0
+        }
     }
 
     override func keyDown(with event: NSEvent) {
         if event.isARepeat { return }
+
+        // Échap (ou m) : le panneau NATIF, pas le menu pixel du moteur —
+        // dans une app macOS, les réglages parlent SwiftUI.
+        if event.keyCode == 53 || event.charactersIgnoringModifiers?.lowercased() == "m" {
+            moteur?.panneau.toggle()
+            return
+        }
+
         if moteur?.touche(event, pressée: true) != true { super.keyDown(with: event) }
     }
 
@@ -253,18 +279,65 @@ struct BoutonHUD: View {
 }
 
 struct HUD: View {
-    let moteur: Moteur
+    @ObservedObject var moteur: Moteur
 
     var body: some View {
         HStack(spacing: 2) {
             BoutonHUD(symbole: "forward.fill", aide: "Turbo (Tab)") { moteur.tape("T") }
             BoutonHUD(symbole: "square.and.arrow.down", aide: "Sauver l'état (⌘S)") { moteur.tape("s") }
             BoutonHUD(symbole: "arrow.counterclockwise", aide: "Charger l'état (⌘R)") { moteur.tape("r") }
-            BoutonHUD(symbole: "list.bullet", aide: "Menu en jeu (Échap)") { moteur.tape("M") }
+            BoutonHUD(symbole: "slider.horizontal.3", aide: "Réglages (Échap)") { moteur.panneau.toggle() }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .modifier(Verre())
+    }
+}
+
+// Le panneau natif : ce que le menu pixel offre au terminal, en SwiftUI —
+// états, case, et le mixer avec un vrai slider.
+struct Panneau: View {
+    let moteur: Moteur
+    @State private var volume: Double = 100
+    @State private var voix = [true, true, true, true]
+    @State private var case_ = 1
+
+    init(moteur: Moteur) { self.moteur = moteur }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 10) {
+                Button("Sauver l'état") { moteur.tape("s") }
+                Button("Charger l'état") { moteur.tape("r") }
+
+                Picker("Case", selection: $case_) {
+                    ForEach(1...9, id: \.self) { Text("Case \($0)").tag($0) }
+                }
+                .frame(width: 110)
+                .onChange(of: case_) { moteur.tape(Character("\(case_)")) }
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.wave.2.fill")
+                Slider(value: $volume, in: 0...100, step: 10)
+                    .frame(width: 170)
+                    .onChange(of: volume) { moteur.volume(Int(volume)) }
+                Text("\(Int(volume))")
+                    .monospacedDigit()
+                    .frame(width: 32, alignment: .trailing)
+            }
+
+            HStack(spacing: 6) {
+                ForEach(Array(["PULSE 1", "PULSE 2", "WAVE", "BRUIT"].enumerated()), id: \.offset) { i, nom in
+                    Toggle(nom, isOn: $voix[i])
+                        .toggleStyle(.button)
+                        .font(.system(size: 11, weight: .medium))
+                        .onChange(of: voix[i]) { moteur.voix(voix) }
+                }
+            }
+        }
+        .padding(18)
+        .modifier(VerreRect())
     }
 }
 
@@ -279,8 +352,18 @@ struct Verre: ViewModifier {
     }
 }
 
+struct VerreRect: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22))
+        } else {
+            content.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+        }
+    }
+}
+
 struct Scène: View {
-    let moteur: Moteur
+    @ObservedObject var moteur: Moteur
     @State private var survol = false
 
     init(moteur: Moteur) { self.moteur = moteur }
@@ -292,10 +375,30 @@ struct Scène: View {
 
             HUD(moteur: moteur)
                 .padding(.bottom, 14)
-                .opacity(survol ? 1 : 0)
+                .opacity(survol && !moteur.panneau ? 1 : 0)
                 .animation(.easeOut(duration: 0.18), value: survol)
+
+            if moteur.panneau {
+                Panneau(moteur: moteur)
+                    .padding(.bottom, 14)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
         }
-        .onHover { survol = $0 }
+        .animation(.easeOut(duration: 0.15), value: moteur.panneau)
+        .onHover { dedans in
+            survol = dedans
+            feux(visibles: dedans)
+        }
+    }
+
+    // Les feux tricolores suivent la règle de la HUD : visibles au survol,
+    // effacés pendant le jeu — ils mordaient l'UI des combats.
+    private func feux(visibles: Bool) {
+        for fenêtre in NSApp.windows {
+            for bouton in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                fenêtre.standardWindowButton(bouton)?.animator().alphaValue = visibles ? 1 : 0
+            }
+        }
     }
 }
 
@@ -374,8 +477,9 @@ struct AtomboyApp: App {
 
                 Button("Turbo") { délégué.moteur.tape("T") }
                     .keyboardShortcut("t")
-                Button("Menu en jeu") { délégué.moteur.tape("M") }
+                Button("Réglages") { délégué.moteur.panneau.toggle() }
                     .keyboardShortcut("m")
+                Button("Menu rétro (dans le jeu)") { délégué.moteur.tape("M") }
             }
         }
     }

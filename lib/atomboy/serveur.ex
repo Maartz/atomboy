@@ -24,12 +24,17 @@ defmodule Atomboy.Serveur do
   `?A ?B` les boutons, `?S` Start, `?E` Select, `?M` le menu, `?W` le
   rembobinage (tenu), `?P` pause — et les actions directes pour la barre
   de menus native : `?s`/`?r` sauver/charger l'état, `?1`-`?9` la case.
-  La fin de l'entrée (coquille fermée) arrête la partie proprement —
-  sauvegarde écrite.
+  Deux opérations portent une valeur plutôt qu'une touche : `<<?V, v>>`
+  pose le volume du mixer (0-100), `<<?X, masque>>` les quatre voix
+  (bits 0-3) — le panneau natif de la coquille s'en sert. La fin de
+  l'entrée (coquille fermée) arrête la partie proprement — sauvegarde
+  écrite.
 
   Tout le reste est la machinerie habituelle : menu dans la frame, états,
   mixer, câble link (`--ecoute`/`--lien` marchent aussi en serveur).
   """
+
+  import Bitwise
 
   alias Atomboy.APU
   alias Atomboy.Joypad
@@ -249,6 +254,18 @@ defmodule Atomboy.Serveur do
 
   defp drain(ctx) do
     receive do
+      # Le mixer natif de la coquille : volume (?V, 0-100) et masque des
+      # quatre voix (?X, bits 0-3) — appliqués au même ram[:mixer] que le
+      # menu en jeu, replié par l'APU dans sa config par frame.
+      {:touche, ?V, volume} ->
+        drain(%{ctx | ram: mixer_maj(ctx.ram, :volume, min(volume, 100))})
+
+      {:touche, ?X, masque} ->
+        voix =
+          {(masque &&& 1) != 0, (masque &&& 2) != 0, (masque &&& 4) != 0, (masque &&& 8) != 0}
+
+        drain(%{ctx | ram: mixer_maj(ctx.ram, :voix, voix)})
+
       {:touche, op, key} ->
         case appuie(ctx, op, Map.get(@touches, key)) do
           :quit -> :quit
@@ -348,6 +365,11 @@ defmodule Atomboy.Serveur do
     else
       ctx.state_base <> ".case#{ctx.state_slot}.state"
     end
+  end
+
+  defp mixer_maj(ram, clé, valeur) do
+    mixer = Map.get(ram, :mixer, Menu.mixer_défaut())
+    Map.put(ram, :mixer, Map.put(mixer, clé, valeur))
   end
 
   # ── L'entrée ────────────────────────────────────────────────────────────────
