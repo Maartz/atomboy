@@ -56,6 +56,7 @@ defmodule Atomboy.Play do
 
   alias Atomboy.APU
   alias Atomboy.Joypad
+  alias Atomboy.Menu
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
   alias Atomboy.Link
@@ -146,6 +147,7 @@ defmodule Atomboy.Play do
           sav: sav,
           hold: %{},
           down: MapSet.new(),
+          menu: nil,
           kitty: false,
           audio: audio,
           son?: audio != nil,
@@ -244,6 +246,17 @@ defmodule Atomboy.Play do
       end
 
     cond do
+      ctx.menu != nil ->
+        # Menu ouvert : la machine dort, la dernière frame porte le menu
+        # en surimpression — le rendu habituel affiche sans rien savoir.
+        ctx =
+          if ctx.last_frame,
+            do: draw(ctx, Menu.render(ctx.menu, ctx.last_frame), ctx.ram, []),
+            else: ctx
+
+        Process.sleep(50)
+        loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
+
       ctx.paused ->
         # En pause, la machine dort — l'écran reste, le clavier veille.
         ctx = if ctx.last_frame, do: draw(ctx, ctx.last_frame, ctx.ram, []), else: ctx
@@ -416,6 +429,24 @@ defmodule Atomboy.Play do
 
   defp apply_event({:graphics, false}, ctx), do: ctx
 
+  # ── Le menu ─────────────────────────────────────────────────────────────────
+
+  # Échap ou m l'ouvre — les touches en cours se relâchent, la machine
+  # dormira tant qu'il est là.
+  defp apply_event({tag, :menu}, %{menu: nil} = ctx) when tag in [:key, :press],
+    do: %{ctx | menu: Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false)), down: MapSet.new(), hold: %{}}
+
+  # Ouvert, les touches Game Boy le pilotent (répétition comprise — tenir
+  # une flèche fait défiler les cases).
+  defp apply_event({tag, key}, %{menu: menu} = ctx)
+       when menu != nil and tag in [:key, :press, :repeat] and
+              key in [:up, :down, :left, :right, :a, :b, :menu] do
+    {menu, actions} = Menu.touche(ctx.menu, key)
+    Enum.reduce(actions, %{ctx | menu: menu}, &menu_action/2)
+  end
+
+  defp apply_event({_tag, :menu}, ctx), do: ctx
+
   # Les actions — au front montant seulement : presse ou frappe, jamais la
   # répétition (un p tenu ne doit pas faire clignoter la pause).
   defp apply_event({tag, :save_state}, ctx) when tag in [:key, :press] do
@@ -499,6 +530,16 @@ defmodule Atomboy.Play do
 
     %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
   end
+
+  # Les actions choisies au menu passent par les mêmes chemins que les
+  # raccourcis directs — le menu n'est qu'une autre façon d'appuyer.
+  defp menu_action(:save_state, ctx), do: apply_event({:key, :save_state}, ctx)
+  defp menu_action(:load_state, ctx), do: apply_event({:key, :load_state}, ctx)
+  defp menu_action({:slot, n}, ctx), do: apply_event({:key, {:slot, n}}, ctx)
+  defp menu_action({:palette, p}, ctx), do: %{ctx | palette: p}
+  # Quitter par le menu : le budget de frames tombe à zéro restant — la
+  # boucle conclut par le chemin normal (sauvegarde, terminal restauré).
+  defp menu_action(:quit, ctx), do: %{ctx | max_frames: ctx.frame}
 
   defp state_path(ctx) do
     if ctx.state_slot == 1 do

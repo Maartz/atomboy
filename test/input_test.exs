@@ -46,9 +46,9 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("\e[1;1:3B") == {[{:release, :down}], ""}
   end
 
-  test "le protocole kitty : quitter par q, Échap ou Ctrl-C" do
+  test "le protocole kitty : quitter par q ou Ctrl-C, le menu par Échap" do
     assert Input.decode("\e[113;1u") == {[{:press, :quit}], ""}
-    assert Input.decode("\e[27;1u") == {[{:press, :quit}], ""}
+    assert Input.decode("\e[27;1u") == {[{:press, :menu}], ""}
     assert Input.decode("\e[99;5u") == {[{:press, :quit}], ""}
   end
 

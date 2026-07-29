@@ -48,12 +48,17 @@ atomboy game.gbc --fenetre      # native window
 
 | Key | | Key | |
 |---|---|---|---|
-| Arrows | D-pad | `s` / `r` | save / load state |
-| `x` | A | `1`-`9` | pick state slot |
-| `c` | B | Backspace (hold) | rewind |
-| Enter | Start | Tab | turbo |
-| Space | Select | `p` | pause |
-| | | `q` / Esc | quit |
+| Arrows | D-pad | Esc / `m` | menu |
+| `x` | A | `s` / `r` | save / load state |
+| `c` | B | `1`-`9` | pick state slot |
+| Enter | Start | Backspace (hold) | rewind |
+| Space | Select | Tab | turbo |
+| `p` | pause | `q` | quit |
+
+Esc opens an in-game menu — drawn into the Game Boy frame itself, so it
+looks the same in the terminal and in the window: resume, save/load state,
+state slot, palette, quit. Navigate with the D-pad, confirm with A, close
+with B.
 
 Useful options:
 

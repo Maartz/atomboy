@@ -76,7 +76,9 @@ defmodule Atomboy.Play.Input do
     13 => :start,
     ?\s => :select,
     ?q => :quit,
-    27 => :quit,
+    # Échap ouvre le menu — quitter vit sur q et dans le menu.
+    27 => :menu,
+    ?m => :menu,
     ?s => :save_state,
     ?r => :load_state,
     9 => :turbo,
@@ -129,8 +131,11 @@ defmodule Atomboy.Play.Input do
   # Une séquence coupée en plein vol : attendre la suite.
   defp decode(<<?\e, o>>, events) when o in ~c"[O_", do: {Enum.reverse(events), <<?\e, o>>}
   defp decode(<<"\e">>, events), do: {Enum.reverse(events), "\e"}
-  # Échappement suivi d'autre chose : ignoré.
-  defp decode(<<"\e", _, rest::binary>>, events), do: decode(rest, events)
+  # SS3 sans flèche au bout : le préfixe s'avale, la suite se décode.
+  defp decode(<<?\e, ?O, rest::binary>>, events), do: decode(rest, events)
+  # Échappement qui n'ouvre pas de séquence : c'est la touche Échap — le
+  # menu. L'octet suivant se décode normalement derrière elle.
+  defp decode(<<"\e", rest::binary>>, events), do: decode(rest, [{:key, :menu} | events])
 
   defp decode(<<c, rest::binary>>, events) when c in [?x, ?X],
     do: decode(rest, [{:key, :a} | events])
@@ -156,6 +161,9 @@ defmodule Atomboy.Play.Input do
 
   defp decode(<<c, rest::binary>>, events) when c in [?p, ?P],
     do: decode(rest, [{:key, :pause} | events])
+
+  defp decode(<<c, rest::binary>>, events) when c in [?m, ?M],
+    do: decode(rest, [{:key, :menu} | events])
 
   defp decode(<<c, rest::binary>>, events) when c in [0x7F, 0x08],
     do: decode(rest, [{:key, :rewind} | events])
