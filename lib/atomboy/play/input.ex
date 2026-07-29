@@ -35,6 +35,7 @@ defmodule Atomboy.Play.Input do
       Entrée           Start
       Espace           Select
       s / r            sauver / reprendre l'état
+      Retour arrière   rembobiner (tenir)
       Tab              turbo (avance rapide)
       p                pause
       q, Échap (kitty) ou Ctrl-C    quitter
@@ -56,6 +57,7 @@ defmodule Atomboy.Play.Input do
           | :load_state
           | :turbo
           | :pause
+          | :rewind
   @type event ::
           {:key, key()}
           | {:press, key()}
@@ -77,7 +79,9 @@ defmodule Atomboy.Play.Input do
     ?s => :save_state,
     ?r => :load_state,
     9 => :turbo,
-    ?p => :pause
+    ?p => :pause,
+    127 => :rewind,
+    8 => :rewind
   }
 
   @doc """
@@ -142,6 +146,9 @@ defmodule Atomboy.Play.Input do
 
   defp decode(<<c, rest::binary>>, events) when c in [?p, ?P],
     do: decode(rest, [{:key, :pause} | events])
+
+  defp decode(<<c, rest::binary>>, events) when c in [0x7F, 0x08],
+    do: decode(rest, [{:key, :rewind} | events])
 
   # Tout le reste du clavier : silence.
   defp decode(<<_, rest::binary>>, events), do: decode(rest, events)

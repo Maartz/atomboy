@@ -46,6 +46,8 @@ defmodule Mix.Tasks.Atomboy.Play do
       `r` la ranime — sauver avant un boss, réessayer à l'infini.
     * `Tab` bascule l'avance rapide (rendu 1/4, son coupé) — les intros
       passent en secondes.
+    * `Retour arrière`, tenu, rembobine — jusqu'à quarante secondes en
+      arrière, dix frames par pas. Mort sur un boss ? Remonte le temps.
     * `p` met en pause.
 
   L'affichage demande 160 colonnes sur 73 lignes — réduire la police

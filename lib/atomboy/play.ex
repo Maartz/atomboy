@@ -58,6 +58,7 @@ defmodule Atomboy.Play do
   alias Atomboy.Joypad
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
+  alias Atomboy.PPU
   alias Atomboy.Save
   alias Atomboy.Screen
 
@@ -139,6 +140,7 @@ defmodule Atomboy.Play do
           size_ok: Keyword.has_key?(opts, :frames),
           turbo: false,
           paused: false,
+          history: [],
           note: nil,
           last_frame: nil,
           fps: 0.0,
@@ -216,18 +218,59 @@ defmodule Atomboy.Play do
         ctx
       end
 
-    (fn ->
-      if ctx.paused do
+    cond do
+      ctx.paused ->
         # En pause, la machine dort — l'écran reste, le clavier veille.
         ctx = if ctx.last_frame, do: draw(ctx, ctx.last_frame, ctx.ram, []), else: ctx
-
         Process.sleep(50)
         loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
-      else
+
+      rewinding?(ctx) ->
+        rewind_step(ctx)
+
+      true ->
         step(ctx)
-      end
-    end).()
+    end
   end
+
+  # Retour arrière tenu — au clavier kitty par l'état réel, au clavier
+  # classique par la répétition automatique qui entretient le maintien.
+  defp rewinding?(ctx) do
+    MapSet.member?(ctx.down, :rewind) or Map.has_key?(ctx.hold, :rewind)
+  end
+
+  # Un pas en arrière : dépiler un instantané (dix frames de jeu), le
+  # dessiner tel quel — la machine ne tourne pas, le temps recule. Le son se
+  # tait ; à la reprise, le flux asservi à l'horloge murale se recale seul.
+  defp rewind_step(ctx) do
+    ctx =
+      case ctx.history do
+        [{state, ram, apu} | rest] ->
+          %{ctx | state: state, ram: ram, apu: apu, history: rest}
+
+        [] ->
+          ctx
+      end
+
+    pixels = PPU.render_frame(ctx.ram)
+    ctx = draw(%{ctx | note: {"⏪", 30}}, pixels, ctx.ram, [])
+
+    now = System.monotonic_time(:microsecond)
+    deadline = max(ctx.deadline, now - 100_000)
+    if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+
+    hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
+    loop(%{ctx | hold: hold, last_frame: pixels, deadline: deadline + @frame_us})
+  end
+
+  # La mémoire du rembobinage : un instantané toutes les dix frames, un
+  # anneau de 240 — quarante secondes d'histoire, structurellement partagées
+  # (la map d'une frame à l'autre ne diffère que de ses écritures).
+  defp remember(%{frame: n} = ctx) when rem(n, 10) == 0 do
+    %{ctx | history: Enum.take([{ctx.state, ctx.ram, ctx.apu} | ctx.history], 240)}
+  end
+
+  defp remember(ctx), do: ctx
 
   defp step(ctx) do
     held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
@@ -288,7 +331,7 @@ defmodule Atomboy.Play do
         last_frame: if(render?, do: pixels, else: ctx.last_frame)
     }
 
-    loop(measure_fps(ctx))
+    loop(ctx |> remember() |> measure_fps())
   end
 
   # Deux chemins d'affichage. Demi-blocs : le texte, curseur en haut.

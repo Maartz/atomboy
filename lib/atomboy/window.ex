@@ -27,6 +27,7 @@ defmodule Atomboy.Window do
   alias Atomboy.Joypad
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
+  alias Atomboy.PPU
   alias Atomboy.Save
   alias Atomboy.Screen
 
@@ -49,7 +50,9 @@ defmodule Atomboy.Window do
     ?X => :a,
     ?C => :b,
     13 => :start,
-    ?\s => :select
+    ?\s => :select,
+    # WXK_BACK : Retour arrière — le rembobinage, tenu.
+    8 => :rewind
   }
   @actions %{?S => :save_state, ?R => :load_state, 9 => :turbo, ?P => :pause}
   @quits [?Q, 27]
@@ -92,6 +95,7 @@ defmodule Atomboy.Window do
       dump: Keyword.get(opts, :dump),
       turbo: false,
       paused: false,
+      history: [],
       note: nil,
       last_frame: nil,
       fps: 0.0,
@@ -120,9 +124,41 @@ defmodule Atomboy.Window do
     case drain(ctx) do
       :quit -> finish(ctx)
       ctx when ctx.paused -> idle(ctx)
-      ctx -> step(ctx)
+      ctx -> if MapSet.member?(ctx.down, :rewind), do: rewind_step(ctx), else: step(ctx)
     end
   end
+
+  # Un pas en arrière : dépiler un instantané (dix frames de jeu), le
+  # dessiner tel quel — la machine ne tourne pas, le temps recule.
+  defp rewind_step(ctx) do
+    ctx =
+      case ctx.history do
+        [{state, ram, apu} | rest] ->
+          %{ctx | state: state, ram: ram, apu: apu, history: rest}
+
+        [] ->
+          ctx
+      end
+
+    pixels = PPU.render_frame(ctx.ram)
+    :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette)})
+    :wxWindow.refresh(ctx.panel, eraseBackground: false)
+    :wxFrame.setTitle(ctx.window, ~c"atomboy — ⏪ rembobinage")
+
+    now = System.monotonic_time(:microsecond)
+    deadline = max(ctx.deadline, now - 100_000)
+    if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+
+    loop(%{ctx | last_frame: pixels, deadline: deadline + @frame_us})
+  end
+
+  # La mémoire du rembobinage : un instantané toutes les dix frames, un
+  # anneau de 240 — quarante secondes, structurellement partagées.
+  defp remember(%{frame: n} = ctx) when rem(n, 10) == 0 do
+    %{ctx | history: Enum.take([{ctx.state, ctx.ram, ctx.apu} | ctx.history], 240)}
+  end
+
+  defp remember(ctx), do: ctx
 
   defp idle(ctx) do
     Process.sleep(50)
@@ -167,7 +203,7 @@ defmodule Atomboy.Window do
         last_frame: if(render?, do: pixels, else: ctx.last_frame)
     }
 
-    loop(measure_fps(ctx))
+    loop(ctx |> remember() |> measure_fps())
   end
 
   # ── Les événements wx ───────────────────────────────────────────────────────
