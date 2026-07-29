@@ -55,6 +55,7 @@ defmodule Atomboy.Play do
   """
 
   alias Atomboy.APU
+  alias Atomboy.Codes
   alias Atomboy.Joypad
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
@@ -143,7 +144,8 @@ defmodule Atomboy.Play do
           ram:
             Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
             |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
-            |> Save.load(sav),
+            |> Save.load(sav)
+            |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, ""))),
           sav: sav,
           hold: %{},
           down: MapSet.new(),
@@ -313,6 +315,7 @@ defmodule Atomboy.Play do
   defp step(ctx) do
     held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
+    ram = Codes.applique(ram)
 
     # En turbo, une frame sur quatre s'affiche — le rendu est le coût.
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0

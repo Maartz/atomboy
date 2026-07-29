@@ -21,9 +21,18 @@ let FRAME_OCTETS = LARGEUR * HAUTEUR * 3
 
 // ── Le moteur ─────────────────────────────────────────────────────────────────
 
+// Un code GameShark tel que la fenêtre de réglages le garde : le texte
+// hexadécimal, et son interrupteur — persisté par jeu dans UserDefaults.
+struct CodeGS: Codable, Identifiable, Equatable {
+    var id: String { texte }
+    var texte: String
+    var actif: Bool
+}
+
 final class Moteur: ObservableObject {
     let couche = CALayer()
     @Published var panneau = false
+    @Published var jeu: String?
     var processusEnCours: Process? { processus }
     private var processus: Process?
     private var entrée: FileHandle?
@@ -88,7 +97,43 @@ final class Moteur: ObservableObject {
 
         entrée = versMoteur.fileHandleForWriting
         processus = p
+        jeu = rom.deletingPathExtension().lastPathComponent
         try? p.run()
+
+        // Les réglages persistés rattrapent le moteur fraîchement né.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            let défauts = UserDefaults.standard
+            volume(défauts.object(forKey: "reglages.volume") as? Int ?? 100)
+            let masque = défauts.object(forKey: "reglages.voixMasque") as? Int ?? 15
+            voix((0..<4).map { masque & (1 << $0) != 0 })
+            envoieCodesActifs()
+        }
+    }
+
+    // ── Les codes GameShark, persistés par jeu ───────────────────────────────
+
+    static func chargeCodes(_ jeu: String) -> [CodeGS] {
+        guard let data = UserDefaults.standard.data(forKey: "codes." + jeu),
+              let codes = try? JSONDecoder().decode([CodeGS].self, from: data)
+        else { return [] }
+        return codes
+    }
+
+    static func sauveCodes(_ codes: [CodeGS], jeu: String) {
+        if let data = try? JSONEncoder().encode(codes) {
+            UserDefaults.standard.set(data, forKey: "codes." + jeu)
+        }
+    }
+
+    // L'ensemble actif, envoyé en remplacement complet (?C + longueur).
+    func envoieCodesActifs() {
+        guard let jeu else { return }
+        let payload = Moteur.chargeCodes(jeu).filter(\.actif).map(\.texte).joined(separator: ",")
+        let octets = Array(payload.utf8.prefix(255))
+        var data = Data([UInt8(ascii: "C"), UInt8(octets.count)])
+        data.append(contentsOf: octets)
+        try? entrée?.write(contentsOf: data)
     }
 
     func arrête() {
@@ -294,50 +339,124 @@ struct HUD: View {
     }
 }
 
-// Le panneau natif : ce que le menu pixel offre au terminal, en SwiftUI —
-// états, case, et le mixer avec un vrai slider.
-struct Panneau: View {
+// ── Les Réglages (⌘,) : la convention macOS, persistée ───────────────────────
+
+struct RéglagesAudio: View {
     let moteur: Moteur
-    @State private var volume: Double = 100
-    @State private var voix = [true, true, true, true]
-    @State private var case_ = 1
+    @AppStorage("reglages.volume") private var volume = 100
+    @AppStorage("reglages.voixMasque") private var masque = 15
 
     init(moteur: Moteur) { self.moteur = moteur }
 
+    private func voixLiée(_ i: Int) -> Binding<Bool> {
+        Binding(
+            get: { masque & (1 << i) != 0 },
+            set: { on in
+                masque = on ? masque | (1 << i) : masque & ~(1 << i)
+                moteur.voix((0..<4).map { masque & (1 << $0) != 0 })
+            }
+        )
+    }
+
     var body: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 10) {
-                Button("Sauver l'état") { moteur.tape("s") }
-                Button("Charger l'état") { moteur.tape("r") }
-
-                Picker("Case", selection: $case_) {
-                    ForEach(1...9, id: \.self) { Text("Case \($0)").tag($0) }
-                }
-                .frame(width: 110)
-                .onChange(of: case_) { moteur.tape(Character("\(case_)")) }
-            }
-
-            HStack(spacing: 8) {
+        Form {
+            HStack {
                 Image(systemName: "speaker.wave.2.fill")
-                Slider(value: $volume, in: 0...100, step: 10)
-                    .frame(width: 170)
-                    .onChange(of: volume) { moteur.volume(Int(volume)) }
-                Text("\(Int(volume))")
-                    .monospacedDigit()
-                    .frame(width: 32, alignment: .trailing)
+                Slider(
+                    value: Binding(
+                        get: { Double(volume) },
+                        set: { volume = Int($0); moteur.volume(volume) }
+                    ), in: 0...100, step: 10)
+                Text("\(volume)").monospacedDigit().frame(width: 32, alignment: .trailing)
             }
 
-            HStack(spacing: 6) {
-                ForEach(Array(["PULSE 1", "PULSE 2", "WAVE", "BRUIT"].enumerated()), id: \.offset) { i, nom in
-                    Toggle(nom, isOn: $voix[i])
-                        .toggleStyle(.button)
-                        .font(.system(size: 11, weight: .medium))
-                        .onChange(of: voix[i]) { moteur.voix(voix) }
-                }
+            Section("Voix") {
+                Toggle("Pulse 1", isOn: voixLiée(0))
+                Toggle("Pulse 2", isOn: voixLiée(1))
+                Toggle("Wave", isOn: voixLiée(2))
+                Toggle("Bruit", isOn: voixLiée(3))
             }
         }
-        .padding(18)
-        .modifier(VerreRect())
+        .padding(20)
+    }
+}
+
+struct RéglagesCodes: View {
+    @ObservedObject var moteur: Moteur
+    @State private var codes: [CodeGS] = []
+    @State private var saisie = ""
+
+    init(moteur: Moteur) { self.moteur = moteur }
+
+    private var saisieValide: Bool {
+        saisie.count == 8 && saisie.lowercased().hasPrefix("01")
+            && saisie.allSatisfy(\.isHexDigit)
+    }
+
+    private func enregistre() {
+        guard let jeu = moteur.jeu else { return }
+        Moteur.sauveCodes(codes, jeu: jeu)
+        moteur.envoieCodesActifs()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let jeu = moteur.jeu {
+                Text(jeu).font(.headline)
+
+                List {
+                    ForEach($codes) { $code in
+                        HStack {
+                            Toggle("", isOn: $code.actif)
+                                .labelsHidden()
+                                .onChange(of: code.actif) { enregistre() }
+                            Text(code.texte.uppercased()).monospaced()
+                            Spacer()
+                            Button {
+                                codes.removeAll { $0.id == code.id }
+                                enregistre()
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(minHeight: 140)
+
+                HStack {
+                    TextField("01FF16D1", text: $saisie)
+                        .textFieldStyle(.roundedBorder)
+                        .monospaced()
+                        .onSubmit { ajoute() }
+                    Button("Ajouter") { ajoute() }
+                        .disabled(!saisieValide)
+                }
+
+                Text("Format GameShark : 01 + valeur + adresse (petit-boutiste).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Lance un jeu pour lui attacher des codes.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .onAppear { charge() }
+        .onChange(of: moteur.jeu) { charge() }
+    }
+
+    private func charge() {
+        codes = moteur.jeu.map(Moteur.chargeCodes) ?? []
+    }
+
+    private func ajoute() {
+        guard saisieValide, let _ = moteur.jeu else { return }
+        let texte = saisie.uppercased()
+        guard !codes.contains(where: { $0.texte == texte }) else { return }
+        codes.append(CodeGS(texte: texte, actif: true))
+        saisie = ""
+        enregistre()
     }
 }
 
@@ -352,19 +471,10 @@ struct Verre: ViewModifier {
     }
 }
 
-struct VerreRect: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22))
-        } else {
-            content.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
-        }
-    }
-}
-
 struct Scène: View {
     @ObservedObject var moteur: Moteur
     @State private var survol = false
+    @Environment(\.openSettings) private var ouvreRéglages
 
     init(moteur: Moteur) { self.moteur = moteur }
 
@@ -375,16 +485,17 @@ struct Scène: View {
 
             HUD(moteur: moteur)
                 .padding(.bottom, 14)
-                .opacity(survol && !moteur.panneau ? 1 : 0)
+                .opacity(survol ? 1 : 0)
                 .animation(.easeOut(duration: 0.18), value: survol)
-
+        }
+        // Échap et le bouton réglages de la HUD mènent à LA fenêtre de
+        // Réglages (⌘,) — la convention macOS, pas un panneau maison.
+        .onChange(of: moteur.panneau) {
             if moteur.panneau {
-                Panneau(moteur: moteur)
-                    .padding(.bottom, 14)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                ouvreRéglages()
+                moteur.panneau = false
             }
         }
-        .animation(.easeOut(duration: 0.15), value: moteur.panneau)
         .onHover { dedans in
             survol = dedans
             feux(visibles: dedans)
@@ -477,10 +588,20 @@ struct AtomboyApp: App {
 
                 Button("Turbo") { délégué.moteur.tape("T") }
                     .keyboardShortcut("t")
-                Button("Réglages") { délégué.moteur.panneau.toggle() }
-                    .keyboardShortcut("m")
                 Button("Menu rétro (dans le jeu)") { délégué.moteur.tape("M") }
             }
+        }
+
+        // ⌘, et « Réglages… » dans le menu de l'app — la convention, servie
+        // par SwiftUI : audio (mixer) et codes GameShark, persistés.
+        Settings {
+            TabView {
+                RéglagesAudio(moteur: délégué.moteur)
+                    .tabItem { Label("Audio", systemImage: "speaker.wave.2") }
+                RéglagesCodes(moteur: délégué.moteur)
+                    .tabItem { Label("Codes GameShark", systemImage: "wand.and.stars") }
+            }
+            .frame(width: 440)
         }
     }
 }

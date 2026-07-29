@@ -40,10 +40,12 @@ MBCs, link cable) is plain immutable Elixir on top of it.
 ## Playing
 
 On macOS, the nicest way is the native app — `bin/build --vite --app`
-produces `burrito_out/Atomboy.app`: a SwiftUI shell (Metal-sharp pixels,
-sound through AVAudioEngine — no ffplay needed) driving the BEAM engine
-over a pipe. Drag it to /Applications, double-click, pick a ROM — or open
-a `.gb`/`.gbc` file with it.
+produces `burrito_out/Atomboy.app`: a SwiftUI shell (full-bleed pixels
+under the window's rounded corners, a Liquid Glass hover HUD, sound
+through AVAudioEngine — no ffplay needed) driving the BEAM engine over a
+pipe. Drag it to /Applications, double-click, pick a ROM — or open a
+`.gb`/`.gbc` file with it. Cmd-, opens Settings: the sound mixer, and
+GameShark codes saved per game.
 
 Everywhere else (and for the terminal aficionados), the standalone binary:
 
@@ -75,6 +77,7 @@ Useful options:
 | `--dmg` | force original Game Boy mode for CGB-flagged ROMs |
 | `--sauvegarde <name>` | save profile — own `.sav`/`.state` per player |
 | `--son` / `--no-son` | force sound on/off |
+| `--codes 01FF16D1,…` | GameShark codes, applied every frame |
 
 Sound needs `ffplay` (ships with ffmpeg) on the PATH; without it the game
 plays silently.

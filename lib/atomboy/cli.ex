@@ -96,7 +96,8 @@ defmodule Atomboy.CLI do
           dmg: :boolean,
           ecoute: :integer,
           lien: :string,
-          sauvegarde: :string
+          sauvegarde: :string,
+          codes: :string
         ]
       )
 
@@ -146,6 +147,6 @@ defmodule Atomboy.CLI do
     {:error,
      "usage : atomboy <rom.gb> [--fenetre] [--dmg] [--ecoute [port]] " <>
        "[--lien hôte:port] [--sauvegarde nom] [--hold N] [--frames N] " <>
-       "[--dump f.pgm] [--no-son] [--palette dmg|gris]"}
+       "[--dump f.pgm] [--no-son] [--palette dmg|gris] [--codes 01VVLLHH,…]"}
   end
 end

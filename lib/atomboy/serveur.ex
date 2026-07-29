@@ -36,6 +36,7 @@ defmodule Atomboy.Serveur do
 
   import Bitwise
 
+  alias Atomboy.Codes
   alias Atomboy.APU
   alias Atomboy.Joypad
   alias Atomboy.Link
@@ -90,7 +91,8 @@ defmodule Atomboy.Serveur do
           ram:
             Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
             |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
-            |> Save.load(sav),
+            |> Save.load(sav)
+            |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, ""))),
           sav: sav,
           state_base: Path.rootname(sav),
           state_slot: 1,
@@ -151,6 +153,7 @@ defmodule Atomboy.Serveur do
   defp step(ctx) do
     held = MapSet.to_list(ctx.down)
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
+    ram = Codes.applique(ram)
 
     # En turbo : une frame émise sur quatre, pas de PCM, pas d'échéancier.
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
@@ -265,6 +268,9 @@ defmodule Atomboy.Serveur do
           {(masque &&& 1) != 0, (masque &&& 2) != 0, (masque &&& 4) != 0, (masque &&& 8) != 0}
 
         drain(%{ctx | ram: mixer_maj(ctx.ram, :voix, voix)})
+
+      {:codes, chaîne} ->
+        drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(chaîne))})
 
       {:touche, op, key} ->
         case appuie(ctx, op, Map.get(@touches, key)) do
@@ -385,6 +391,18 @@ defmodule Atomboy.Serveur do
 
   defp read_loop(parent, f) do
     case :file.read(f, 2) do
+      # ?C : les codes GameShark — longueur puis la liste ASCII, qui
+      # REMPLACE l'ensemble actif (une liste vide efface tout).
+      {:ok, <<?C, longueur>>} ->
+        chaîne =
+          case :file.read(f, longueur) do
+            {:ok, données} when longueur > 0 -> données
+            _ -> ""
+          end
+
+        send(parent, {:codes, chaîne})
+        read_loop(parent, f)
+
       {:ok, <<op, key>>} ->
         send(parent, {:touche, op, key})
         read_loop(parent, f)

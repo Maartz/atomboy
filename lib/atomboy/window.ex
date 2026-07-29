@@ -24,6 +24,7 @@ defmodule Atomboy.Window do
   """
 
   alias Atomboy.APU
+  alias Atomboy.Codes
   alias Atomboy.Joypad
   alias Atomboy.Link
   alias Atomboy.Menu
@@ -114,7 +115,8 @@ defmodule Atomboy.Window do
       ram:
         Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
         |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
-        |> Save.load(sav),
+        |> Save.load(sav)
+        |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, ""))),
       sav: sav,
       state_base: Path.rootname(sav),
       state_slot: 1,
@@ -219,6 +221,7 @@ defmodule Atomboy.Window do
   defp step(ctx) do
     held = MapSet.to_list(ctx.down)
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
+    ram = Codes.applique(ram)
 
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
 
