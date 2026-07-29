@@ -34,6 +34,7 @@ final class Moteur: ObservableObject {
     let couche = CALayer()
     @Published var panneau = false
     @Published var jeu: String?
+    @Published var récentes: [URL] = Moteur.chargeRécentes()
     var processusEnCours: Process? { processus }
     private var processus: Process?
     private var entrée: FileHandle?
@@ -182,6 +183,7 @@ final class Moteur: ObservableObject {
         entrée = versMoteur.fileHandleForWriting
         processus = p
         jeu = rom.deletingPathExtension().lastPathComponent
+        noteRécente(rom)
         try? p.run()
 
         // Les réglages persistés rattrapent le moteur fraîchement né.
@@ -193,6 +195,25 @@ final class Moteur: ObservableObject {
             voix((0..<4).map { masque & (1 << $0) != 0 })
             envoieCodesActifs()
         }
+    }
+
+    // ── Les ROMs récentes, persistées ────────────────────────────────────────
+
+    static func chargeRécentes() -> [URL] {
+        (UserDefaults.standard.stringArray(forKey: "recentes") ?? [])
+            .map(URL.init(fileURLWithPath:))
+    }
+
+    private func noteRécente(_ rom: URL) {
+        récentes.removeAll { $0.path == rom.path }
+        récentes.insert(rom, at: 0)
+        récentes = Array(récentes.prefix(8))
+        UserDefaults.standard.set(récentes.map(\.path), forKey: "recentes")
+    }
+
+    func effaceRécentes() {
+        récentes = []
+        UserDefaults.standard.removeObject(forKey: "recentes")
     }
 
     // ── Les codes GameShark, persistés par jeu ───────────────────────────────
@@ -425,6 +446,20 @@ struct HUD: View {
 
 // ── Les Réglages (⌘,) : la convention macOS, persistée ───────────────────────
 
+struct RéglagesGénéral: View {
+    @AppStorage("reglages.reprise") private var reprise = true
+
+    var body: some View {
+        Form {
+            Toggle("Reprendre le dernier jeu au lancement", isOn: $reprise)
+            Text("Sinon, l'app propose de choisir une ROM.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+    }
+}
+
 struct RéglagesAudio: View {
     let moteur: Moteur
     @AppStorage("reglages.volume") private var volume = 100
@@ -607,9 +642,21 @@ final class Délégué: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Lancé sans document (double-clic sur l'app) : proposer une ROM.
+        // Lancé sans document : reprendre le dernier jeu (débrayable dans
+        // les Réglages) — sinon, proposer une ROM.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
-            if moteur.estInactif { choisisROM() }
+            guard moteur.estInactif else { return }
+
+            let reprise = UserDefaults.standard.object(forKey: "reglages.reprise") == nil
+                || UserDefaults.standard.bool(forKey: "reglages.reprise")
+
+            if reprise, let dernière = moteur.récentes.first(where: {
+                FileManager.default.fileExists(atPath: $0.path)
+            }) {
+                moteur.lance(rom: dernière)
+            } else {
+                choisisROM()
+            }
         }
     }
 
@@ -633,6 +680,40 @@ extension Moteur {
     var estInactif: Bool { processusEnCours == nil }
 }
 
+// Le menu Fichier : ouvrir, et les ROMs récentes — observées, le menu se
+// met à jour quand la liste bouge.
+struct CommandesFichier: Commands {
+    let délégué: Délégué
+    @ObservedObject var moteur: Moteur
+
+    init(délégué: Délégué) {
+        self.délégué = délégué
+        self.moteur = délégué.moteur
+    }
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("Ouvrir une ROM…") { délégué.choisisROM() }
+                .keyboardShortcut("o")
+
+            Menu("ROMs récentes") {
+                ForEach(moteur.récentes, id: \.path) { rom in
+                    Button(rom.deletingPathExtension().lastPathComponent) {
+                        moteur.lance(rom: rom)
+                    }
+                }
+
+                if moteur.récentes.isEmpty {
+                    Button("(vide)") {}.disabled(true)
+                } else {
+                    Divider()
+                    Button("Effacer la liste") { moteur.effaceRécentes() }
+                }
+            }
+        }
+    }
+}
+
 @main
 struct AtomboyApp: App {
     @NSApplicationDelegateAdaptor(Délégué.self) var délégué
@@ -648,10 +729,7 @@ struct AtomboyApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: CGFloat(LARGEUR * 3), height: CGFloat(HAUTEUR * 3))
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Ouvrir une ROM…") { délégué.choisisROM() }
-                    .keyboardShortcut("o")
-            }
+            CommandesFichier(délégué: délégué)
 
             // L'idiome natif : les actions du jeu vivent aussi dans la
             // barre de menus — le menu en jeu (Échap) reste pour le style.
@@ -680,6 +758,8 @@ struct AtomboyApp: App {
         // par SwiftUI : audio (mixer) et codes GameShark, persistés.
         Settings {
             TabView {
+                RéglagesGénéral()
+                    .tabItem { Label("Général", systemImage: "gearshape") }
                 RéglagesAudio(moteur: délégué.moteur)
                     .tabItem { Label("Audio", systemImage: "speaker.wave.2") }
                 RéglagesCodes(moteur: délégué.moteur)
