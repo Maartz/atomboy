@@ -215,27 +215,71 @@ defmodule Atomboy.Link do
   # main : la sonde $01 d'un joueur, recyclée par l'autre, se lisait comme
   # « partenaire maître détecté » (vécu, à la trace). UNE horloge par
   # frame : la réponse à la suivante attend que l'ISR ait rechargé SB.
+  # Une horloge reçue pendant la fenêtre non armée est RETENUE quelques
+  # millisecondes : l'ISR de l'esclave — retardée par le handler vblank ou
+  # la sieste de fin de frame — va se réarmer, et l'octet ne doit pas se
+  # perdre (sur silicium la fenêtre dure ~50 cycles ; ici jusqu'à 8 ms —
+  # vécu : un octet sauté, « SILER », l'équipe d'en face décalée). Passé le
+  # délai, la ligne au repos répond 0xFF — la sémantique des sondes
+  # d'établissement face à un partenaire qui n'est pas en mode lien.
+  @retenue_ms 25
+
   defp pump(link, ram) do
+    case Map.get(ram, :link_held) do
+      {byte, depuis} -> serve_held(link, ram, byte, depuis)
+      nil -> pump_recv(link, ram)
+    end
+  end
+
+  defp pump_recv(link, ram) do
     case :gen_tcp.recv(link.socket, 2, 0) do
       {:ok, <<0, byte>>} ->
-        armé = Map.get(ram, :link_op) == :slave
-        réponse = if armé, do: Map.get(ram, @sb, 0xFF), else: 0xFF
+        if Map.get(ram, :link_op) == :slave do
+          serve(link, ram, byte)
+        else
+          trace(link, "E retient #{hex(byte)} (pas encore armé)")
+          {Map.put(ram, :link_held, {byte, System.monotonic_time(:millisecond)}), link}
+        end
 
-        case :gen_tcp.send(link.socket, <<1, réponse>>) do
+      {:ok, _autre} ->
+        pump_recv(link, ram)
+
+      {:error, :timeout} ->
+        {ram, link}
+
+      {:error, _} ->
+        unplugged(ram)
+    end
+  end
+
+  defp serve_held(link, ram, byte, depuis) do
+    cond do
+      Map.get(ram, :link_op) == :slave ->
+        serve(link, Map.delete(ram, :link_held), byte)
+
+      System.monotonic_time(:millisecond) - depuis > @retenue_ms ->
+        # Personne ne s'arme : la ligne au repos.
+        case :gen_tcp.send(link.socket, <<1, 0xFF>>) do
           :ok ->
-            trace(link, "E ← #{hex(byte)} → #{hex(réponse)}#{if armé, do: "", else: " (repos)"}")
-            ram = if armé, do: complete(ram, byte), else: ram
-            {ram, link}
+            trace(link, "E ← #{hex(byte)} → FF (repos, après retenue)")
+            {Map.delete(ram, :link_held), link}
 
           {:error, _} ->
             unplugged(ram)
         end
 
-      {:ok, _autre} ->
-        pump(link, ram)
-
-      {:error, :timeout} ->
+      true ->
         {ram, link}
+    end
+  end
+
+  defp serve(link, ram, byte) do
+    réponse = Map.get(ram, @sb, 0xFF)
+
+    case :gen_tcp.send(link.socket, <<1, réponse>>) do
+      :ok ->
+        trace(link, "E ← #{hex(byte)} → #{hex(réponse)}")
+        {complete(ram, byte), link}
 
       {:error, _} ->
         unplugged(ram)

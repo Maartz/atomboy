@@ -73,23 +73,47 @@ defmodule Atomboy.LinkTest do
     refute Map.has_key?(ram_d, :link_op)
   end
 
-  test "face à un partenaire non armé, la ligne lit 0xFF — SB intact" do
+  test "face à un partenaire durablement non armé, la ligne lit 0xFF" do
     {gauche, droite} = pair()
 
     ram_g = arme(%{link: true}, 0x11, 0x81)
     ram_d = %{:link => true, 0xFF01 => 0x77}
 
     {ram_g, gauche} = tick(gauche, ram_g)
+    # L'horloge est d'abord RETENUE (l'ISR pourrait se réarmer)…
+    {ram_d, droite} = tick(droite, ram_d)
+    assert {_byte, _depuis} = ram_d[:link_held]
+    # …puis, personne ne s'armant, la ligne au repos répond.
+    Process.sleep(30)
     {ram_d, _} = tick(droite, ram_d)
     {ram_g, _} = tick(gauche, ram_g)
 
-    # Le maître lit la ligne au repos ; le SB du non-armé ne bouge pas,
-    # aucune interruption — c'est le silicium : le registre ne se branche
-    # que transfert armé. (L'ancienne sémantique fabriquait de fausses
-    # poignées de main au Club Câble.)
     assert ram_g[0xFF01] == 0xFF
     assert ram_d[0xFF01] == 0x77
     assert (Map.get(ram_d, 0xFF0F, 0) &&& 0x08) == 0
+    refute Map.has_key?(ram_d, :link_held)
+  end
+
+  test "une horloge retenue se sert dès que l'esclave s'arme — aucun octet perdu" do
+    {gauche, droite} = pair()
+
+    # Le maître cadence 0x42 vers un esclave pas encore réarmé (ISR en
+    # retard) : l'octet est retenu.
+    ram_g = arme(%{link: true}, 0x42, 0x81)
+    ram_d = %{:link => true, 0xFF01 => 0x99}
+    {ram_g, gauche} = tick(gauche, ram_g)
+    {ram_d, droite} = tick(droite, ram_d)
+    assert {_, _} = ram_d[:link_held]
+
+    # L'ISR passe enfin : l'esclave s'arme — l'octet retenu se sert avec
+    # la réponse fraîche.
+    ram_d = ram_d |> Map.put(:link, true) |> arme(0x77, 0x80)
+    {ram_d, _} = tick(droite, ram_d)
+    {ram_g, _} = tick(gauche, ram_g)
+
+    assert ram_d[0xFF01] == 0x42
+    assert ram_g[0xFF01] == 0x77
+    refute Map.has_key?(ram_d, :link_held)
   end
 
   test "un maître sans réponse patiente sans renvoyer son horloge" do
