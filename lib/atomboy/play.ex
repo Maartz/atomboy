@@ -434,7 +434,7 @@ defmodule Atomboy.Play do
   # Échap ou m l'ouvre — les touches en cours se relâchent, la machine
   # dormira tant qu'il est là.
   defp apply_event({tag, :menu}, %{menu: nil} = ctx) when tag in [:key, :press],
-    do: %{ctx | menu: Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false)), down: MapSet.new(), hold: %{}}
+    do: %{ctx | menu: Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false), Map.get(ctx.ram, :mixer)), down: MapSet.new(), hold: %{}}
 
   # Ouvert, les touches Game Boy le pilotent (répétition comprise — tenir
   # une flèche fait défiler les cases).
@@ -537,6 +537,10 @@ defmodule Atomboy.Play do
   defp menu_action(:load_state, ctx), do: apply_event({:key, :load_state}, ctx)
   defp menu_action({:slot, n}, ctx), do: apply_event({:key, {:slot, n}}, ctx)
   defp menu_action({:palette, p}, ctx), do: %{ctx | palette: p}
+
+  # Le mixer vit dans la map mémoire : l'APU le replie dans sa config par
+  # frame, et il voyage avec les états sauvés.
+  defp menu_action({:mixer, m}, ctx), do: %{ctx | ram: Map.put(ctx.ram, :mixer, m)}
   # Quitter par le menu : le budget de frames tombe à zéro restant — la
   # boucle conclut par le chemin normal (sauvegarde, terminal restauré).
   defp menu_action(:quit, ctx), do: %{ctx | max_frames: ctx.frame}

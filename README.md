@@ -57,8 +57,8 @@ atomboy game.gbc --fenetre      # native window
 
 Esc opens an in-game menu — drawn into the Game Boy frame itself, so it
 looks the same in the terminal and in the window: resume, save/load state,
-state slot, palette, quit. Navigate with the D-pad, confirm with A, close
-with B.
+state slot, palette, a sound mixer (master volume plus each of the four
+voices), quit. Navigate with the D-pad, confirm with A, close with B.
 
 Useful options:
 

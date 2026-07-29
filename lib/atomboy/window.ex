@@ -349,7 +349,7 @@ defmodule Atomboy.Window do
   defp act(ctx, {:slot, n}), do: %{ctx | state_slot: n, note: {"case d'état #{n}", 120}}
 
   defp act(ctx, :menu),
-    do: %{ctx | menu: Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false)), down: MapSet.new()}
+    do: %{ctx | menu: Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false), Map.get(ctx.ram, :mixer)), down: MapSet.new()}
 
   defp act(ctx, :turbo) do
     if Map.has_key?(ctx.ram, :link) do
@@ -369,6 +369,7 @@ defmodule Atomboy.Window do
   defp menu_action(:load_state, ctx), do: act(ctx, :load_state)
   defp menu_action({:slot, n}, ctx), do: act(ctx, {:slot, n})
   defp menu_action({:palette, p}, ctx), do: %{ctx | palette: p}
+  defp menu_action({:mixer, m}, ctx), do: %{ctx | ram: Map.put(ctx.ram, :mixer, m)}
   defp menu_action(:quit, _ctx), do: :quit
 
   defp turbo_toggle(ctx) do

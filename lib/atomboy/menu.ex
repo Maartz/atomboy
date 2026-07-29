@@ -15,23 +15,47 @@ defmodule Atomboy.Menu do
 
   alias Atomboy.Menu.Police
 
-  defstruct curseur: 0, slot: 1, palette: :dmg, couleur: false
+  defstruct curseur: 0,
+            page: :principal,
+            slot: 1,
+            palette: :dmg,
+            couleur: false,
+            mixer: %{volume: 100, voix: {true, true, true, true}}
+
+  @type mixer :: %{volume: 0..100, voix: {boolean(), boolean(), boolean(), boolean()}}
 
   @type action ::
-          :resume | :save_state | :load_state | {:slot, 1..9} | {:palette, :dmg | :gris} | :quit
+          :resume
+          | :save_state
+          | :load_state
+          | {:slot, 1..9}
+          | {:palette, :dmg | :gris}
+          | {:mixer, mixer()}
+          | :quit
 
   @type t :: %__MODULE__{}
+
+  @doc "Le mixer neutre : plein volume, les quatre voix ouvertes."
+  @spec mixer_défaut() :: mixer()
+  def mixer_défaut, do: %{volume: 100, voix: {true, true, true, true}}
 
   @doc """
   Ouvre le menu sur l'état courant de la boucle hôte. `couleur` masque le
   choix de palette — elle ne teinte que les frames DMG.
   """
-  @spec open(1..9, :dmg | :gris, boolean()) :: t()
-  def open(slot, palette, couleur \\ false),
-    do: %__MODULE__{curseur: 0, slot: slot, palette: palette, couleur: couleur}
+  @spec open(1..9, :dmg | :gris, boolean(), mixer()) :: t()
+  def open(slot, palette, couleur \\ false, mixer \\ nil),
+    do: %__MODULE__{
+      curseur: 0,
+      slot: slot,
+      palette: palette,
+      couleur: couleur,
+      mixer: mixer || mixer_défaut()
+    }
 
-  defp items(%{couleur: true}), do: [:reprendre, :sauver, :charger, :case, :quitter]
-  defp items(_menu), do: [:reprendre, :sauver, :charger, :case, :palette, :quitter]
+  defp items(%{page: :mixer}), do: [:volume, :voix1, :voix2, :voix3, :voix4, :retour]
+  defp items(%{couleur: true}), do: [:reprendre, :sauver, :charger, :case, :mixer, :quitter]
+  defp items(_menu), do: [:reprendre, :sauver, :charger, :case, :palette, :mixer, :quitter]
 
   @doc """
   Une touche dans le menu. Rend `{menu, actions}` — `menu` à `nil` quand
@@ -56,9 +80,16 @@ defmodule Atomboy.Menu do
       :charger -> {nil, [:load_state]}
       :case -> ajuste(menu, 1)
       :palette -> ajuste(menu, 1)
+      :mixer -> {%{menu | page: :mixer, curseur: 0}, []}
+      :retour -> {%{menu | page: :principal, curseur: 0}, []}
       :quitter -> {nil, [:quit]}
+      _voix -> ajuste(menu, 1)
     end
   end
+
+  # B remonte d'une page ; à la racine, il ferme — comme Échap.
+  def touche(%{page: :mixer} = menu, key) when key in [:b, :menu],
+    do: {%{menu | page: :principal, curseur: 0}, []}
 
   def touche(_menu, key) when key in [:b, :menu], do: {nil, []}
   def touche(menu, _key), do: {menu, []}
@@ -80,6 +111,17 @@ defmodule Atomboy.Menu do
       :palette ->
         palette = if menu.palette == :dmg, do: :gris, else: :dmg
         {%{menu | palette: palette}, [{:palette, palette}]}
+
+      :volume ->
+        volume = min(100, max(0, menu.mixer.volume + sens * 10))
+        mixer = %{menu.mixer | volume: volume}
+        {%{menu | mixer: mixer}, [{:mixer, mixer}]}
+
+      voix when voix in [:voix1, :voix2, :voix3, :voix4] ->
+        i = %{voix1: 0, voix2: 1, voix3: 2, voix4: 3}[voix]
+        voies = put_elem(menu.mixer.voix, i, not elem(menu.mixer.voix, i))
+        mixer = %{menu.mixer | voix: voies}
+        {%{menu | mixer: mixer}, [{:mixer, mixer}]}
 
       _ ->
         {menu, []}
@@ -117,9 +159,18 @@ defmodule Atomboy.Menu do
       :charger -> "CHARGER L'ETAT"
       :case -> "CASE D'ETAT <#{menu.slot}>"
       :palette -> "PALETTE <#{if menu.palette == :dmg, do: "VERTE", else: "GRISE"}>"
+      :mixer -> "MIXER"
+      :volume -> "VOLUME <#{menu.mixer.volume}>"
+      :voix1 -> "PULSE 1 <#{on_off(menu, 0)}>"
+      :voix2 -> "PULSE 2 <#{on_off(menu, 1)}>"
+      :voix3 -> "WAVE <#{on_off(menu, 2)}>"
+      :voix4 -> "BRUIT <#{on_off(menu, 3)}>"
+      :retour -> "RETOUR"
       :quitter -> "QUITTER"
     end)
   end
+
+  defp on_off(menu, i), do: if(elem(menu.mixer.voix, i), do: "OUI", else: "NON")
 
   # Tous les pixels d'encre (bordure + texte + curseur) de la boîte.
   defp pixels_encre(menu, lignes, x0, y0) do

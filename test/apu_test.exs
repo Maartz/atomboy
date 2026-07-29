@@ -183,4 +183,29 @@ defmodule Atomboy.APUTest do
     assert Map.get(ram, :apu_triggers) == [2]
     assert Map.get(ram, 0xFF19) == 0x87
   end
+
+  # ── Le mixer de l'émulateur (ram[:mixer], posé par le menu) ────────────────
+
+  @audible %{0xFF16 => 0x80, 0xFF17 => 0xF0, 0xFF18 => 0x00, 0xFF19 => 0x04}
+
+  test "le volume maître module l'amplitude — 0 fait silence" do
+    {plein, _, _} = pulse2(@audible)
+    {moitié, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 50, voix: {true, true, true, true}}))
+    {muet, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 0, voix: {true, true, true, true}}))
+
+    max_plein = Enum.max(left_samples(plein))
+    max_moitié = Enum.max(left_samples(moitié))
+
+    assert max_plein > 0
+    assert_in_delta max_moitié / max_plein, 0.5, 0.05
+    assert Enum.all?(left_samples(muet), &(&1 == 0))
+  end
+
+  test "couper une voix la retire du mélange, les autres restent" do
+    {muet, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 100, voix: {true, false, true, true}}))
+    {intact, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 100, voix: {false, true, false, false}}))
+
+    assert Enum.all?(left_samples(muet), &(&1 == 0))
+    assert Enum.max(left_samples(intact)) > 0
+  end
 end

@@ -147,8 +147,17 @@ defmodule Atomboy.APU do
 
   # Les registres sont figés à l'échelle de la frame : tout se lit une fois
   # ici, la boucle interne (548 tours) ne touche plus jamais la map — c'est
-  # la condition pour tenir dans le budget des 16,7 ms.
+  # la condition pour tenir dans le budget des 16,7 ms. Le mixer de
+  # l'émulateur (ram[:mixer], posé par le menu) se replie ici aussi :
+  # volume maître dans les multiplicateurs, voix coupées dans les portes
+  # NR51 — coût par échantillon : zéro.
   defp config(ram) do
+    {volume, {v1?, v2?, v3?, v4?}} =
+      case Map.get(ram, :mixer) do
+        %{volume: v, voix: voix} -> {v, voix}
+        _ -> {100, {true, true, true, true}}
+      end
+
     nr10 = Map.get(ram, 0xFF10, 0)
     nr50 = Map.get(ram, 0xFF24, 0x77)
     nr51 = Map.get(ram, 0xFF25, 0xF3)
@@ -171,28 +180,28 @@ defmodule Atomboy.APU do
       p2: (2048 - reg_freq(ram, 0xFF18, 0xFF19)) * 4,
       len1: (Map.get(ram, 0xFF14, 0) &&& 0x40) != 0,
       len2: (Map.get(ram, 0xFF19, 0) &&& 0x40) != 0,
-      lmul: ((bsr(nr50, 4) &&& 0x07) + 1) * 60,
-      rmul: ((nr50 &&& 0x07) + 1) * 60,
-      l1: (nr51 &&& 0x10) != 0,
-      l2: (nr51 &&& 0x20) != 0,
-      r1: (nr51 &&& 0x01) != 0,
-      r2: (nr51 &&& 0x02) != 0,
+      lmul: div(((bsr(nr50, 4) &&& 0x07) + 1) * 60 * volume, 100),
+      rmul: div(((nr50 &&& 0x07) + 1) * 60 * volume, 100),
+      l1: (nr51 &&& 0x10) != 0 and v1?,
+      l2: (nr51 &&& 0x20) != 0 and v2?,
+      r1: (nr51 &&& 0x01) != 0 and v1?,
+      r2: (nr51 &&& 0x02) != 0 and v2?,
       # Canal wave : DAC, table figée en tuple, période d'un pas, volume.
       dac3: (Map.get(ram, 0xFF1A, 0) &&& 0x80) != 0,
       table3: wave_table(ram),
       p3: (2048 - reg_freq(ram, 0xFF1D, 0xFF1E)) * 2,
       shift3: elem({4, 0, 1, 2}, bsr(Map.get(ram, 0xFF1C, 0), 5) &&& 0x03),
       len3: (Map.get(ram, 0xFF1E, 0) &&& 0x40) != 0,
-      l3: (nr51 &&& 0x40) != 0,
-      r3: (nr51 &&& 0x04) != 0,
+      l3: (nr51 &&& 0x40) != 0 and v3?,
+      r3: (nr51 &&& 0x04) != 0 and v3?,
       # Canal bruit : enveloppe, période du LFSR, largeur.
       env4: env4,
       dac4: dac_on?(env4),
       p4: bsl(divisor, bsr(nr43, 4) &&& 0x0F),
       narrow4: (nr43 &&& 0x08) != 0,
       len4: (Map.get(ram, 0xFF23, 0) &&& 0x40) != 0,
-      l4: (nr51 &&& 0x80) != 0,
-      r4: (nr51 &&& 0x08) != 0
+      l4: (nr51 &&& 0x80) != 0 and v4?,
+      r4: (nr51 &&& 0x08) != 0 and v4?
     }
   end
 

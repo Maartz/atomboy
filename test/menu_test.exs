@@ -12,7 +12,7 @@ defmodule Atomboy.MenuTest do
 
     {menu, []} = Menu.touche(menu, :up)
     {menu, []} = Menu.touche(menu, :up)
-    assert menu.curseur == 5
+    assert menu.curseur == 6
 
     {menu, []} = Menu.touche(menu, :down)
     assert menu.curseur == 0
@@ -53,7 +53,7 @@ defmodule Atomboy.MenuTest do
   end
 
   test "QUITTER rend l'action quit" do
-    menu = %{Menu.open(1, :dmg) | curseur: 5}
+    menu = %{Menu.open(1, :dmg) | curseur: 6}
     assert {nil, [:quit]} = Menu.touche(menu, :a)
   end
 
@@ -61,13 +61,35 @@ defmodule Atomboy.MenuTest do
     menu = Menu.open(1, :dmg, true)
 
     {menu, []} = Menu.touche(menu, :up)
-    assert menu.curseur == 4
+    assert menu.curseur == 5
 
     assert {nil, [:quit]} = Menu.touche(menu, :a)
   end
 
-  # La géométrie de la boîte : 6 lignes de 11 px + 2×8 de marge = 82 de
-  # haut, centrée — coin haut-gauche en (24, 31).
+  test "la page MIXER : volume par pas de dix, borné, voix commutables" do
+    menu = %{Menu.open(1, :dmg) | curseur: 5}
+    {menu, []} = Menu.touche(menu, :a)
+    assert menu.page == :mixer
+
+    # VOLUME : gauche baisse, borné à zéro.
+    {menu, [{:mixer, %{volume: 90}}]} = Menu.touche(menu, :left)
+    menu = Enum.reduce(1..12, menu, fn _, m -> elem(Menu.touche(m, :left), 0) end)
+    assert menu.mixer.volume == 0
+    {menu, [{:mixer, %{volume: 10}}]} = Menu.touche(menu, :right)
+
+    # PULSE 1 se coupe et se rouvre.
+    {menu, []} = Menu.touche(menu, :down)
+    {menu, [{:mixer, %{voix: {false, true, true, true}}}]} = Menu.touche(menu, :a)
+    {menu, [{:mixer, %{voix: {true, true, true, true}}}]} = Menu.touche(menu, :a)
+
+    # B remonte à la racine ; RETOUR aussi.
+    {menu, []} = Menu.touche(menu, :b)
+    assert menu.page == :principal
+  end
+
+  # La géométrie de la boîte : 7 lignes de 11 px + 2×8 de marge = 93 de
+  # haut, centrée — coin haut-gauche en (24, 25). Le point « papier » vit à
+  # droite du texte de la première ligne, loin du curseur.
   test "rendu DMG : bordure encrée, papier clair, dehors intact" do
     frame = :binary.copy(<<1>>, 160 * 144)
     composée = Menu.render(Menu.open(1, :dmg), frame)
@@ -76,9 +98,9 @@ defmodule Atomboy.MenuTest do
     # Dehors : la teinte d'origine.
     assert :binary.at(composée, 0) == 1
     assert :binary.at(composée, 143 * 160 + 159) == 1
-    # La bordure est encrée, l'intérieur (sous la marge) est du papier.
-    assert :binary.at(composée, 31 * 160 + 24) == 3
-    assert :binary.at(composée, 35 * 160 + 30) == 0
+    # La bordure est encrée, l'intérieur est du papier.
+    assert :binary.at(composée, 25 * 160 + 24) == 3
+    assert :binary.at(composée, 34 * 160 + 105) == 0
   end
 
   test "rendu CGB : mêmes points en RGB555" do
@@ -87,8 +109,8 @@ defmodule Atomboy.MenuTest do
 
     assert byte_size(composée) == 2 * 160 * 144
     assert binary_part(composée, 0, 2) == <<0x33, 0x33>>
-    assert binary_part(composée, (31 * 160 + 24) * 2, 2) == <<0x00, 0x00>>
-    assert binary_part(composée, (35 * 160 + 30) * 2, 2) == <<0xFF, 0x7F>>
+    assert binary_part(composée, (25 * 160 + 24) * 2, 2) == <<0x00, 0x00>>
+    assert binary_part(composée, (34 * 160 + 105) * 2, 2) == <<0xFF, 0x7F>>
   end
 
   test "le curseur s'affiche devant la ligne choisie" do
