@@ -294,6 +294,13 @@ defmodule Atomboy.CPU.CartLoop do
     mem_read(rom, ram, addr - 0x2000)
   end
 
+  # HDMA5 : pendant un HDMA, les blocs restants moins un ; sinon la valeur
+  # rangée (0xFF une fois fini).
+  defp mem_read(_rom, ram, 0xFF55) when :erlang.is_map_key(:hdma, ram) do
+    {_src, _dst, blocks} = Map.get(ram, :hdma)
+    blocks - 1 &&& 0x7F
+  end
+
   # Relire BCPD/OCPD rend l'octet de palette pointé par l'index courant.
   defp mem_read(_rom, ram, 0xFF69) do
     Map.get(ram, 0x20000 + (Map.get(ram, 0xFF68, 0) &&& 0x3F), 0xFF)
@@ -471,6 +478,51 @@ defmodule Atomboy.CPU.CartLoop do
     ram_write(ram, addr - 0x2000, value)
   end
 
+  # KEY1 (0xFF4D) : la double vitesse du GBC. Le matériel exige « préparer
+  # (bit 0) puis STOP » ; ici la bascule se joue dès l'écriture — STOP reste
+  # le nop qu'il est, le jeu relit le bit 7 et le trouve levé. Le budget de
+  # cycles par scanline suit :speed dans Screen. CGB seulement.
+  defp ram_write(ram, 0xFF4D, value) when :erlang.is_map_key(:cgb, ram) do
+    if (value &&& 0x01) != 0 do
+      fast? = Map.get(ram, :speed, 1) == 2
+
+      ram
+      |> Map.put(:speed, if(fast?, do: 1, else: 2))
+      |> Map.put(0xFF4D, if(fast?, do: 0x00, else: 0x80))
+    else
+      ram
+    end
+  end
+
+  # HDMA5 (0xFF55) : les DMA vidéo du GBC. Bit 7 à zéro = transfert général
+  # (GDMA), différé à la frontière de scanline — la source peut être en ROM
+  # banquée, que seul Screen a sous la main. Bit 7 levé = un bloc de seize
+  # octets par HBlank ; écrire bit 7 à zéro pendant un HDMA l'annule.
+  defp ram_write(ram, 0xFF55, value) when :erlang.is_map_key(:cgb, ram) do
+    src =
+      (bsl(Map.get(ram, 0xFF51, 0), 8) ||| Map.get(ram, 0xFF52, 0)) &&& 0xFFF0
+
+    dst = 0x8000 + ((bsl(Map.get(ram, 0xFF53, 0), 8) ||| Map.get(ram, 0xFF54, 0)) &&& 0x1FF0)
+    blocks = (value &&& 0x7F) + 1
+
+    cond do
+      (value &&& 0x80) != 0 ->
+        Map.put(ram, :hdma, {src, dst, blocks})
+
+      Map.has_key?(ram, :hdma) ->
+        {_s, _d, restant} = Map.get(ram, :hdma)
+
+        ram
+        |> Map.delete(:hdma)
+        |> Map.put(0xFF55, 0x80 ||| (restant - 1 &&& 0x7F))
+
+      true ->
+        ram
+        |> Map.put(:gdma, {src, dst, blocks})
+        |> Map.put(0xFF55, 0xFF)
+    end
+  end
+
   # VBK (0xFF4F) : la banque de VRAM du GBC — 0 en clés nues, 1 décalée.
   defp ram_write(ram, 0xFF4F, value) do
     ram
@@ -495,6 +547,14 @@ defmodule Atomboy.CPU.CartLoop do
   defp ram_write(ram, 0xFF6B, value), do: cpal_write(ram, 0xFF6A, 0x20040, value)
 
   defp ram_write(ram, addr, value), do: Map.put(ram, addr, value)
+
+  @doc "Lit un octet avec la pleine sémantique cartouche — la voie des DMA."
+  @spec peek(rom(), ram(), 0..0xFFFF) :: 0..0xFF
+  def peek(rom, ram, addr), do: mem_read(rom, ram, addr)
+
+  @doc "Écrit un octet avec la pleine sémantique cartouche — banques comprises."
+  @spec poke(ram(), 0..0xFFFF, 0..0xFF) :: ram()
+  def poke(ram, addr, value), do: ram_write(ram, addr, value)
 
   # ── L'horloge temps réel du MBC3 ────────────────────────────────────────────
 

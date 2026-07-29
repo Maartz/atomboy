@@ -130,9 +130,56 @@ defmodule Atomboy.Screen do
   """
   @spec step_line(State.t(), binary(), map(), 0..153) :: {State.t(), map()}
   def step_line(state, rom, ram, ly) do
-    ram = ppu_line(ram, ly, band(Map.get(ram, 0xFF40, 0x91), 0x80) != 0)
-    {state, ram, cycles} = CartLoop.run(state, rom, ram, @line_cycles)
+    lcd_on? = band(Map.get(ram, 0xFF40, 0x91), 0x80) != 0
+    ram = ppu_line(ram, ly, lcd_on?)
+
+    # En double vitesse (KEY1, GBC), le CPU avale deux fois plus de cycles
+    # par scanline — le PPU, lui, garde son rythme.
+    budget = @line_cycles * Map.get(ram, :speed, 1)
+    {state, ram, cycles} = CartLoop.run(state, rom, ram, budget)
+
+    # Le GDMA posé pendant la ligne se consomme aussitôt la ligne finie —
+    # au pire 456 cycles de retard sur le matériel, qui copie sur-le-champ.
+    ram = gdma(rom, ram)
+    ram = hdma(rom, ram, ly, lcd_on?)
     {state, Atomboy.Timer.advance(ram, cycles)}
+  end
+
+  # Le transfert général (GDMA) : posé par l'écriture de HDMA5, exécuté ici
+  # — la source peut être en ROM banquée, que seule cette boucle a en main.
+  defp gdma(rom, ram) do
+    case Map.get(ram, :gdma) do
+      nil ->
+        ram
+
+      {src, dst, blocks} ->
+        ram = copy(rom, Map.delete(ram, :gdma), src, dst, blocks * 16)
+        ram
+    end
+  end
+
+  # Le HDMA : un bloc de seize octets par HBlank de ligne visible, écran
+  # allumé. Fini, HDMA5 relit 0xFF.
+  defp hdma(rom, ram, ly, lcd_on?) do
+    case Map.get(ram, :hdma) do
+      {src, dst, blocks} when lcd_on? and ly < @visible ->
+        ram = copy(rom, ram, src, dst, 16)
+
+        if blocks == 1 do
+          ram |> Map.delete(:hdma) |> Map.put(0xFF55, 0xFF)
+        else
+          Map.put(ram, :hdma, {src + 16, dst + 16, blocks - 1})
+        end
+
+      _ ->
+        ram
+    end
+  end
+
+  defp copy(rom, ram, src, dst, len) do
+    Enum.reduce(0..(len - 1), ram, fn i, ram ->
+      CartLoop.poke(ram, dst + i, CartLoop.peek(rom, ram, src + i))
+    end)
   end
 
   # Écran éteint : le PPU ne balaye plus. LY reste à zéro, aucun vblank, aucune
