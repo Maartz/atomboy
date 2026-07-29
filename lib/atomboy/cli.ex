@@ -76,7 +76,7 @@ defmodule Atomboy.CLI do
   @spec parse([String.t()]) :: {:ok, Path.t(), keyword()} | {:error, String.t()}
   def parse(args) do
     {opts, argv} =
-      OptionParser.parse!(args,
+      OptionParser.parse!(port_par_defaut(args),
         strict: [
           hold: :integer,
           frames: :integer,
@@ -98,6 +98,23 @@ defmodule Atomboy.CLI do
   rescue
     e in OptionParser.ParseError -> {:error, Exception.message(e)}
   end
+
+  # « --ecoute » nu : le port par défaut s'intercale — la doc le promet.
+  defp port_par_defaut(["--ecoute" | rest]) do
+    case rest do
+      [next | _] ->
+        case Integer.parse(next) do
+          {_, ""} -> ["--ecoute" | port_par_defaut(rest)]
+          _ -> ["--ecoute", "#{Atomboy.Link.default_port()}" | port_par_defaut(rest)]
+        end
+
+      [] ->
+        ["--ecoute", "#{Atomboy.Link.default_port()}"]
+    end
+  end
+
+  defp port_par_defaut([arg | rest]), do: [arg | port_par_defaut(rest)]
+  defp port_par_defaut([]), do: []
 
   defp palette(opts) do
     case Keyword.get(opts, :palette) do
