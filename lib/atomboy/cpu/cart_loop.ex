@@ -272,12 +272,35 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
+  # La VRAM, banquée sur GBC (VBK, 0xFF4F) : la banque 1 vit à
+  # addr + 0x10000 — la banque 0 garde ses clés nues, le PPU DMG et les
+  # frames en or ne voient rien changer.
+  defp mem_read(_rom, ram, addr) when addr >= 0x8000 and addr < 0xA000 do
+    Map.get(ram, addr + Map.get(ram, :vram_base, 0), 0xFF)
+  end
+
+  # La WRAM haute, banquée sur GBC (SVBK, 0xFF70) : banques 2-7 à
+  # addr + (banque-1) × 0x10000 — la banque 1, par défaut, clés nues.
+  defp mem_read(_rom, ram, addr) when addr >= 0xD000 and addr < 0xE000 do
+    Map.get(ram, addr + Map.get(ram, :wram_base, 0), 0xFF)
+  end
+
   # L'écho de la WRAM : sur le bus réel, 0xE000-0xFDFF recâble les lignes
   # d'adresse vers 0xC000-0xDDFF. Pokémon lit réellement par ce miroir —
   # sans lui, une table de sauts se lit en 0xFF et le PC part dans des
-  # données (opcode illégal E3, neuf minutes après le lancement).
-  defp mem_read(_rom, ram, addr) when addr >= 0xE000 and addr < 0xFE00 do
-    Map.get(ram, addr - 0x2000, 0xFF)
+  # données (opcode illégal E3, neuf minutes après le lancement). Récursif :
+  # le miroir de la WRAM haute traverse la banque choisie.
+  defp mem_read(rom, ram, addr) when addr >= 0xE000 and addr < 0xFE00 do
+    mem_read(rom, ram, addr - 0x2000)
+  end
+
+  # Relire BCPD/OCPD rend l'octet de palette pointé par l'index courant.
+  defp mem_read(_rom, ram, 0xFF69) do
+    Map.get(ram, 0x20000 + (Map.get(ram, 0xFF68, 0) &&& 0x3F), 0xFF)
+  end
+
+  defp mem_read(_rom, ram, 0xFF6B) do
+    Map.get(ram, 0x20040 + (Map.get(ram, 0xFF6A, 0) &&& 0x3F), 0xFF)
   end
 
   # Au-dessus de la cartouche, une adresse jamais écrite lit 0xFF — le bus
@@ -357,27 +380,51 @@ defmodule Atomboy.CPU.CartLoop do
 
   # 0x2000-0x3FFF : la sélection de banque ROM — cinq bits sur MBC1 (les
   # 512 Ko de Link's Awakening), sept sur MBC3 (les 2 Mo de Pokémon). Zéro
-  # vaut un, masqués par le nombre de banques réelles. La base précalculée
-  # évite toute arithmétique au fetch.
+  # vaut un, masqués par le nombre de banques réelles. Sur MBC5 : huit bits
+  # bas à 0x2000-0x2FFF, neuvième bit à 0x3000-0x3FFF — et la banque zéro
+  # est permise, c'est le seul MBC qui l'autorise dans la fenêtre haute.
+  # La base précalculée évite toute arithmétique au fetch.
   defp ram_write(ram, addr, value) when addr < 0x4000 do
     banks = Map.get(ram, :rom_banks, 2)
-    mask = if Map.get(ram, :mbc) == :mbc3, do: 0x7F, else: 0x1F
-    bank = max(value &&& mask, 1) &&& banks - 1
-    Map.put(ram, :rom_bank_base, max(bank, 1) * 0x4000)
+
+    bank =
+      case Map.get(ram, :mbc) do
+        :mbc5 ->
+          current = div(Map.get(ram, :rom_bank_base, 0x4000), 0x4000)
+
+          if addr < 0x3000 do
+            (current &&& 0x100) ||| value
+          else
+            bsl(value &&& 1, 8) ||| (current &&& 0xFF)
+          end
+
+        :mbc3 ->
+          max(value &&& 0x7F, 1)
+
+        _ ->
+          max(max(value &&& 0x1F, 1) &&& banks - 1, 1)
+      end
+
+    Map.put(ram, :rom_bank_base, (bank &&& banks - 1) * 0x4000)
   end
 
   # 0x4000-0x5FFF : sur MBC3, la banque de RAM cartouche (0-3) ou un
-  # registre RTC (0x08-0x0C). Sur MBC1, bits hauts et mode — ignorés tant
-  # qu'aucune ROM MBC1 ne dépasse les 512 Ko des cinq bits bas.
+  # registre RTC (0x08-0x0C) ; sur MBC5, la banque 0-15. Sur MBC1, bits
+  # hauts et mode — ignorés tant qu'aucune ROM MBC1 ne dépasse les 512 Ko.
   defp ram_write(ram, addr, value) when addr < 0x6000 do
-    if Map.get(ram, :mbc) == :mbc3 do
-      cond do
-        value <= 0x03 -> Map.put(ram, :cram_bank, value)
-        value in 0x08..0x0C -> Map.put(ram, :cram_bank, {:rtc, value})
-        true -> ram
-      end
-    else
-      ram
+    case Map.get(ram, :mbc) do
+      :mbc3 ->
+        cond do
+          value <= 0x03 -> Map.put(ram, :cram_bank, value)
+          value in 0x08..0x0C -> Map.put(ram, :cram_bank, {:rtc, value})
+          true -> ram
+        end
+
+      :mbc5 ->
+        Map.put(ram, :cram_bank, value &&& 0x0F)
+
+      _ ->
+        ram
     end
   end
 
@@ -409,10 +456,43 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # L'écho en écriture : même recâblage, la donnée vit à sa vraie adresse.
-  defp ram_write(ram, addr, value) when addr >= 0xE000 and addr < 0xFE00 do
-    Map.put(ram, addr - 0x2000, value)
+  # La VRAM et la WRAM haute, banquées en écriture comme en lecture.
+  defp ram_write(ram, addr, value) when addr >= 0x8000 and addr < 0xA000 do
+    Map.put(ram, addr + Map.get(ram, :vram_base, 0), value)
   end
+
+  defp ram_write(ram, addr, value) when addr >= 0xD000 and addr < 0xE000 do
+    Map.put(ram, addr + Map.get(ram, :wram_base, 0), value)
+  end
+
+  # L'écho en écriture : même recâblage, récursif — la donnée vit à sa
+  # vraie adresse, banque comprise.
+  defp ram_write(ram, addr, value) when addr >= 0xE000 and addr < 0xFE00 do
+    ram_write(ram, addr - 0x2000, value)
+  end
+
+  # VBK (0xFF4F) : la banque de VRAM du GBC — 0 en clés nues, 1 décalée.
+  defp ram_write(ram, 0xFF4F, value) do
+    ram
+    |> Map.put(0xFF4F, value &&& 1)
+    |> Map.put(:vram_base, (value &&& 1) * 0x10000)
+  end
+
+  # SVBK (0xFF70) : la banque de WRAM haute — 1 à 7, zéro vaut un.
+  defp ram_write(ram, 0xFF70, value) do
+    bank = max(value &&& 0x07, 1)
+
+    ram
+    |> Map.put(0xFF70, bank)
+    |> Map.put(:wram_base, (bank - 1) * 0x10000)
+  end
+
+  # Les palettes couleur : BCPS/OCPS portent l'index (bit 7 : auto-
+  # incrément), BCPD/OCPD écrivent l'octet — rangé hors bus, à
+  # 0x20000 + index (fond) et 0x20040 + index (sprites), où le PPU
+  # couleur viendra le lire.
+  defp ram_write(ram, 0xFF69, value), do: cpal_write(ram, 0xFF68, 0x20000, value)
+  defp ram_write(ram, 0xFF6B, value), do: cpal_write(ram, 0xFF6A, 0x20040, value)
 
   defp ram_write(ram, addr, value), do: Map.put(ram, addr, value)
 
@@ -420,6 +500,18 @@ defmodule Atomboy.CPU.CartLoop do
 
   # Secondes, minutes, heures, jours (9 bits) — servis depuis l'heure du
   # Mac : le cycle jour/nuit de Pokémon suit ta fenêtre.
+  defp cpal_write(ram, spec_addr, base, value) do
+    spec = Map.get(ram, spec_addr, 0)
+    index = spec &&& 0x3F
+    ram = Map.put(ram, base + index, value)
+
+    if (spec &&& 0x80) != 0 do
+      Map.put(ram, spec_addr, 0x80 ||| (index + 1 &&& 0x3F))
+    else
+      ram
+    end
+  end
+
   defp rtc_read(ram, reg) do
     ram |> Map.get(:rtc_latch, rtc_now()) |> Map.get(reg, 0)
   end

@@ -116,7 +116,7 @@ defmodule Atomboy.Play do
 
       try do
         loop(%{
-          state: Screen.boot_state(),
+          state: Screen.boot_state(rom),
           rom: rom,
           ram: Save.load(Screen.boot_ram(rom), sav),
           sav: sav,

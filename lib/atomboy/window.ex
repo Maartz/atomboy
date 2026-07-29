@@ -77,7 +77,7 @@ defmodule Atomboy.Window do
     audio = if Keyword.get(opts, :son, true), do: Audio.open()
 
     ctx = %{
-      state: Screen.boot_state(),
+      state: Screen.boot_state(rom),
       rom: rom,
       ram: Save.load(Screen.boot_ram(rom), sav),
       sav: sav,

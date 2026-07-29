@@ -32,7 +32,7 @@ defmodule Atomboy.Screen do
   @spec run(Path.t(), pos_integer()) :: {PPU.frame(), State.t(), map()}
   def run(rom_path, frames) do
     rom = load(rom_path)
-    state = boot_state()
+    state = boot_state(rom)
     ram = boot_ram(rom)
 
     Enum.reduce(1..frames, {<<>>, state, ram}, fn frame_index, {_frame, state, ram} ->
@@ -62,14 +62,34 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  La map mémoire de départ : nombre de banques et famille de MBC, lus dans
-  l'en-tête cartouche (0x147). MBC3 pour les types 0x0F-0x13 — Pokémon et
-  sa génération 2 Mo — MBC1 pour le reste.
+  La map mémoire de départ : nombre de banques, famille de MBC (en-tête
+  0x147 : MBC3 pour 0x0F-0x13, MBC5 pour 0x19-0x1E, MBC1 sinon) et mode
+  couleur (0x143 : 0x80 « enhanced », 0xC0 « only »).
   """
   @spec boot_ram(binary()) :: map()
   def boot_ram(rom) do
-    mbc = if :binary.at(rom, 0x147) in 0x0F..0x13, do: :mbc3, else: :mbc1
-    %{rom_banks: div(byte_size(rom), 0x4000), mbc: mbc}
+    mbc =
+      case :binary.at(rom, 0x147) do
+        t when t in 0x0F..0x13 -> :mbc3
+        t when t in 0x19..0x1E -> :mbc5
+        _ -> :mbc1
+      end
+
+    base = %{rom_banks: div(byte_size(rom), 0x4000), mbc: mbc}
+    if :binary.at(rom, 0x143) in [0x80, 0xC0], do: Map.put(base, :cgb, true), else: base
+  end
+
+  @doc """
+  L'état de boot selon la cartouche : A vaut 0x11 sur Game Boy Color —
+  c'est ainsi que les jeux « enhanced » choisissent leurs couleurs.
+  """
+  @spec boot_state(binary()) :: State.t()
+  def boot_state(rom) do
+    if :binary.at(rom, 0x143) in [0x80, 0xC0] do
+      %{boot_state() | a: 0x11}
+    else
+      boot_state()
+    end
   end
 
   @doc """
