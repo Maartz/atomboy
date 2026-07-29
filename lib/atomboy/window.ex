@@ -56,13 +56,14 @@ defmodule Atomboy.Window do
     8 => :rewind
   }
   @actions %{?S => :save_state, ?R => :load_state, 9 => :turbo, ?P => :pause}
+             |> Map.merge(for n <- 1..9, into: %{}, do: {?0 + n, {:slot, n}})
   @quits [?Q, 27]
 
   @doc "Joue `rom_path` dans une fenêtre. Mêmes options que le terminal."
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path)
+    sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
 
     link =
       cond do
@@ -112,7 +113,8 @@ defmodule Atomboy.Window do
         |> then(&if(link, do: Map.put(&1, :link, true), else: &1))
         |> Save.load(sav),
       sav: sav,
-      state_path: Path.rootname(sav) <> ".state",
+      state_base: Path.rootname(sav),
+      state_slot: 1,
       palette: Keyword.get(opts, :palette, :dmg),
       down: MapSet.new(),
       audio: audio,
@@ -279,19 +281,21 @@ defmodule Atomboy.Window do
   end
 
   defp act(ctx, :save_state) do
-    Save.write_state(ctx.state_path, {ctx.state, ctx.ram, ctx.apu})
-    %{ctx | note: {"état sauvé", 120}}
+    Save.write_state(state_path(ctx), {ctx.state, ctx.ram, ctx.apu})
+    %{ctx | note: {"état sauvé (case #{ctx.state_slot})", 120}}
   end
 
   defp act(ctx, :load_state) do
-    case Save.read_state(ctx.state_path) do
+    case Save.read_state(state_path(ctx)) do
       {:ok, {state, ram, apu}} ->
-        %{ctx | state: state, ram: ram, apu: apu, note: {"état repris", 120}}
+        %{ctx | state: state, ram: ram, apu: apu, note: {"état repris (case #{ctx.state_slot})", 120}}
 
       :error ->
-        %{ctx | note: {"aucun état à reprendre", 120}}
+        %{ctx | note: {"case #{ctx.state_slot} vide", 120}}
     end
   end
+
+  defp act(ctx, {:slot, n}), do: %{ctx | state_slot: n, note: {"case d'état #{n}", 120}}
 
   defp act(ctx, :turbo) do
     turbo = not ctx.turbo
@@ -308,6 +312,15 @@ defmodule Atomboy.Window do
   end
 
   defp act(ctx, :pause), do: %{ctx | paused: not ctx.paused}
+
+  defp state_path(ctx) do
+    if ctx.state_slot == 1 do
+      ctx.state_base <> ".state"
+    else
+      ctx.state_base <> ".case#{ctx.state_slot}.state"
+    end
+  end
+
 
   # ── Le rendu ────────────────────────────────────────────────────────────────
 

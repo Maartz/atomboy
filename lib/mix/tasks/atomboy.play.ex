@@ -39,6 +39,11 @@ defmodule Mix.Tasks.Atomboy.Play do
     * `--palette dmg|gris` — le vert de la dalle d'origine (défaut) ou les
       gris neutres.
     * `--dump f.pgm` — écrire la dernière frame en image à la sortie.
+    * `--sauvegarde nom` — un profil de sauvegarde : `.sav` et `.state`
+      deviennent `rom.nom.sav`/`rom.nom.state`. Indispensable pour relier
+      deux instances du même jeu sur la même machine — deux joueurs, deux
+      parties. Et en jeu, les touches `1`-`9` choisissent la case d'état
+      courante pour s/r — neuf instantanés par partie.
     * `--ecoute [port]` / `--lien hôte:port` — le câble link en TCP : un
       côté écoute (7373 par défaut), l'autre appelle, et les deux consoles
       échangent leurs octets série comme par le vrai câble — échanges

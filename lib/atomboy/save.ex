@@ -23,9 +23,15 @@ defmodule Atomboy.Save do
   @sram_base 0xA000
   @sram_size 0x2000
 
-  @doc "Le chemin du .sav d'une ROM : même nom, extension .sav."
-  @spec path(Path.t()) :: Path.t()
-  def path(rom_path), do: Path.rootname(rom_path) <> ".sav"
+  @doc """
+  Le chemin du .sav d'une ROM : même nom, extension .sav. Avec un profil —
+  deux joueurs, deux parties, un seul fichier ROM — le nom s'intercale :
+  `zelda.joueur1.sav`.
+  """
+  @spec path(Path.t(), String.t() | nil) :: Path.t()
+  def path(rom_path, profil \\ nil)
+  def path(rom_path, nil), do: Path.rootname(rom_path) <> ".sav"
+  def path(rom_path, profil), do: Path.rootname(rom_path) <> ".#{profil}.sav"
 
   @doc "Recharge un .sav dans la map mémoire — sans fichier, la map telle quelle."
   @spec load(map(), Path.t()) :: map()
@@ -72,9 +78,16 @@ defmodule Atomboy.Save do
 
   # ── Les instantanés de machine ──────────────────────────────────────────────
 
-  @doc "Le chemin de l'instantané d'une ROM : même nom, extension .state."
-  @spec state_path(Path.t()) :: Path.t()
-  def state_path(rom_path), do: Path.rootname(rom_path) <> ".state"
+  @doc """
+  Le chemin d'un instantané : la case 1 est le fichier historique
+  (`zelda.state`), les cases 2-9 s'y ajoutent (`zelda.case3.state`) —
+  et le profil s'intercale comme pour le .sav.
+  """
+  @spec state_path(Path.t(), String.t() | nil, 1..9) :: Path.t()
+  def state_path(rom_path, profil \\ nil, case_ \\ 1) do
+    base = Path.rootname(path(rom_path, profil))
+    if case_ == 1, do: base <> ".state", else: base <> ".case#{case_}.state"
+  end
 
   @doc """
   Fige la machine entière — CPU, mémoire, son — dans un fichier. Tout est

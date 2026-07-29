@@ -58,6 +58,7 @@ defmodule Atomboy.Play.Input do
           | :turbo
           | :pause
           | :rewind
+          | {:slot, 1..9}
   @type event ::
           {:key, key()}
           | {:press, key()}
@@ -81,7 +82,16 @@ defmodule Atomboy.Play.Input do
     9 => :turbo,
     ?p => :pause,
     127 => :rewind,
-    8 => :rewind
+    8 => :rewind,
+    ?1 => {:slot, 1},
+    ?2 => {:slot, 2},
+    ?3 => {:slot, 3},
+    ?4 => {:slot, 4},
+    ?5 => {:slot, 5},
+    ?6 => {:slot, 6},
+    ?7 => {:slot, 7},
+    ?8 => {:slot, 8},
+    ?9 => {:slot, 9}
   }
 
   @doc """
@@ -149,6 +159,9 @@ defmodule Atomboy.Play.Input do
 
   defp decode(<<c, rest::binary>>, events) when c in [0x7F, 0x08],
     do: decode(rest, [{:key, :rewind} | events])
+
+  defp decode(<<c, rest::binary>>, events) when c in ?1..?9,
+    do: decode(rest, [{:key, {:slot, c - ?0}} | events])
 
   # Tout le reste du clavier : silence.
   defp decode(<<_, rest::binary>>, events), do: decode(rest, events)

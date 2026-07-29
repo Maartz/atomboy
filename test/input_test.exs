@@ -66,8 +66,13 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("\e[9;1u") == {[{:press, :turbo}], ""}
   end
 
+  test "les chiffres choisissent la case d'état" do
+    assert Input.decode("3") == {[{:key, {:slot, 3}}], ""}
+    assert Input.decode("\e[57;1u") == {[{:press, {:slot, 9}}], ""}
+  end
+
   test "les séquences inconnues s'ignorent" do
-    assert Input.decode("\e[5~zk9") == {[], ""}
+    assert Input.decode("\e[5~zk") == {[], ""}
     assert Input.decode("\e[121;1u") == {[], ""}
     assert Input.decode("\eOx") == {[{:key, :a}], ""}
   end

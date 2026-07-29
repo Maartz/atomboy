@@ -76,7 +76,7 @@ defmodule Atomboy.Play do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path)
+    sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
     tty = pty_path()
 
     with :ok <- ensure_sole_reader(tty),
@@ -155,7 +155,8 @@ defmodule Atomboy.Play do
           max_frames: Keyword.get(opts, :frames, :infinity),
           hold_frames: Keyword.get(opts, :hold, @default_hold),
           dump: Keyword.get(opts, :dump),
-          state_path: Path.rootname(sav) <> ".state",
+          state_base: Path.rootname(sav),
+          state_slot: 1,
           palette: Keyword.get(opts, :palette, :dmg),
           gfx: false,
           gfx_id: 1,
@@ -414,19 +415,26 @@ defmodule Atomboy.Play do
   # Les actions — au front montant seulement : presse ou frappe, jamais la
   # répétition (un p tenu ne doit pas faire clignoter la pause).
   defp apply_event({tag, :save_state}, ctx) when tag in [:key, :press] do
-    Save.write_state(ctx.state_path, {ctx.state, ctx.ram, ctx.apu})
-    %{ctx | note: {"état sauvé", 120}}
+    Save.write_state(state_path(ctx), {ctx.state, ctx.ram, ctx.apu})
+    %{ctx | note: {"état sauvé (case #{ctx.state_slot})", 120}}
   end
 
   defp apply_event({tag, :load_state}, ctx) when tag in [:key, :press] do
-    case Save.read_state(ctx.state_path) do
+    case Save.read_state(state_path(ctx)) do
       {:ok, {state, ram, apu}} ->
-        %{ctx | state: state, ram: ram, apu: apu, note: {"état repris", 120}}
+        %{ctx | state: state, ram: ram, apu: apu, note: {"état repris (case #{ctx.state_slot})", 120}}
 
       :error ->
-        %{ctx | note: {"aucun état à reprendre", 120}}
+        %{ctx | note: {"case #{ctx.state_slot} vide", 120}}
     end
   end
+
+  # Les chiffres choisissent la case d'état courante — neuf instantanés par
+  # partie, la case 1 étant le fichier historique.
+  defp apply_event({tag, {:slot, n}}, ctx) when tag in [:key, :press],
+    do: %{ctx | state_slot: n, note: {"case d'état #{n}", 120}}
+
+  defp apply_event({_tag, {:slot, _n}}, ctx), do: ctx
 
   # Le turbo affame tout lecteur audio (production stoppée, consommation
   # continue) : on ferme ffplay à l'entrée, on en rouvre un neuf à la
@@ -469,6 +477,15 @@ defmodule Atomboy.Play do
 
   # Relâchement sans protocole confirmé : ignoré.
   defp apply_event(_event, ctx), do: ctx
+
+  defp state_path(ctx) do
+    if ctx.state_slot == 1 do
+      ctx.state_base <> ".state"
+    else
+      ctx.state_base <> ".case#{ctx.state_slot}.state"
+    end
+  end
+
 
   # Le \r explicite avant chaque \n : inoffensif quand opost traduit déjà,
   # salvateur si un environnement l'a éteint — l'affichage ne dépend ainsi

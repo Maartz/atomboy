@@ -11,6 +11,14 @@ defmodule Atomboy.SaveTest do
     assert Save.path("roms/zelda.gb") == "roms/zelda.sav"
   end
 
+  test "le profil s'intercale — deux joueurs, une ROM" do
+    assert Save.path("roms/argent.gbc", "j1") == "roms/argent.j1.sav"
+    assert Save.state_path("roms/argent.gbc", "j1") == "roms/argent.j1.state"
+    assert Save.state_path("roms/argent.gbc", "j1", 3) == "roms/argent.j1.case3.state"
+    assert Save.state_path("roms/argent.gbc", nil, 1) == "roms/argent.state"
+    assert Save.state_path("roms/argent.gbc", nil, 7) == "roms/argent.case7.state"
+  end
+
   test "aller-retour : ce que le jeu écrit se recharge à l'identique", %{tmp_dir: dir} do
     sav = Path.join(dir, "partie.sav")
 
