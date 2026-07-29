@@ -363,6 +363,18 @@ defmodule Atomboy.CPU.CartLoop do
   # cpu_instrs, qui ignorent le protocole mémoire de leurs cadettes ; la
   # capture doit se faire à l'écriture, les caractères partent à quelques
   # dizaines de cycles d'écart et un échantillonnage les perdrait.
+  # Câble link branché : le transfert reste en cours (bit 7 levé) et
+  # l'échange se joue à la frontière de frame, où vit la socket
+  # (Atomboy.Link.tick/2). Maître si l'horloge est interne (bit 0).
+  defp ram_write(ram, 0xFF02, value)
+       when (value &&& 0x80) != 0 and :erlang.is_map_key(:link, ram) do
+    op = if (value &&& 0x01) != 0, do: :master, else: :slave
+
+    ram
+    |> Map.put(0xFF02, value)
+    |> Map.put(:link_op, op)
+  end
+
   defp ram_write(ram, 0xFF02, value) when (value &&& 0x80) != 0 do
     char = Map.get(ram, 0xFF01, 0)
 

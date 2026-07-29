@@ -39,6 +39,10 @@ defmodule Mix.Tasks.Atomboy.Play do
     * `--palette dmg|gris` — le vert de la dalle d'origine (défaut) ou les
       gris neutres.
     * `--dump f.pgm` — écrire la dernière frame en image à la sortie.
+    * `--ecoute [port]` / `--lien hôte:port` — le câble link en TCP : un
+      côté écoute (7373 par défaut), l'autre appelle, et les deux consoles
+      échangent leurs octets série comme par le vrai câble — échanges
+      Pokémon compris. ⇄ au statut.
 
   ## En jeu
 

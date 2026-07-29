@@ -25,6 +25,7 @@ defmodule Atomboy.Window do
 
   alias Atomboy.APU
   alias Atomboy.Joypad
+  alias Atomboy.Link
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
   alias Atomboy.PPU
@@ -58,10 +59,34 @@ defmodule Atomboy.Window do
   @quits [?Q, 27]
 
   @doc "Joue `rom_path` dans une fenêtre. Mêmes options que le terminal."
-  @spec run(Path.t(), keyword()) :: :ok
+  @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
     sav = Save.path(rom_path)
+
+    link =
+      cond do
+        port = Keyword.get(opts, :ecoute) ->
+          case Link.listen(port) do
+            {:ok, l} -> l
+            {:error, m} -> throw({:lien, m})
+          end
+
+        lien = Keyword.get(opts, :lien) ->
+          {host, port} =
+            case String.split(lien, ":") do
+              [h, p] -> {h, String.to_integer(p)}
+              [h] -> {h, Link.default_port()}
+            end
+
+          case Link.connect(host, port) do
+            {:ok, l} -> l
+            {:error, m} -> throw({:lien, m})
+          end
+
+        true ->
+          nil
+      end
 
     :wx.new()
     {width, height} = Atomboy.PPU.dimensions()
@@ -82,7 +107,10 @@ defmodule Atomboy.Window do
     ctx = %{
       state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
       rom: rom,
-      ram: Save.load(Screen.boot_ram(rom, Keyword.get(opts, :dmg, false)), sav),
+      ram:
+        Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
+        |> then(&if(link, do: Map.put(&1, :link, true), else: &1))
+        |> Save.load(sav),
       sav: sav,
       state_path: Path.rootname(sav) <> ".state",
       palette: Keyword.get(opts, :palette, :dmg),
@@ -96,6 +124,7 @@ defmodule Atomboy.Window do
       turbo: false,
       paused: false,
       history: [],
+      link: link,
       note: nil,
       last_frame: nil,
       fps: 0.0,
@@ -109,11 +138,14 @@ defmodule Atomboy.Window do
     try do
       loop(ctx)
     after
+      Link.close(link)
       Audio.close(audio)
       :wx.destroy()
     end
 
     :ok
+  catch
+    {:lien, message} -> {:error, message}
   end
 
   # ── La boucle ───────────────────────────────────────────────────────────────
@@ -171,6 +203,7 @@ defmodule Atomboy.Window do
 
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
     {pixels, state, ram} = Screen.frame(ctx.state, ctx.rom, ram, render?)
+    {ram, link} = Link.tick(ctx.link, ram)
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     if render? do
@@ -197,6 +230,7 @@ defmodule Atomboy.Window do
         ram: ram,
         apu: apu,
         audio: audio,
+        link: link,
         frame: ctx.frame + 1,
         deadline: deadline,
         note: fade(ctx.note),
@@ -310,6 +344,7 @@ defmodule Atomboy.Window do
         if(ctx.turbo, do: "»»"),
         if(ctx.paused, do: "⏸"),
         if(ctx.audio, do: "♪"),
+        if(ctx.link, do: "⇄"),
         case ctx.note do
           {text, _} -> text
           nil -> nil

@@ -58,6 +58,7 @@ defmodule Atomboy.Play do
   alias Atomboy.Joypad
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
+  alias Atomboy.Link
   alias Atomboy.PPU
   alias Atomboy.Save
   alias Atomboy.Screen
@@ -78,14 +79,33 @@ defmodule Atomboy.Play do
     sav = Save.path(rom_path)
     tty = pty_path()
 
-    with :ok <- ensure_sole_reader(tty) do
+    with :ok <- ensure_sole_reader(tty),
+         {:ok, link} <- link_up(opts) do
       saved = terminal_setup(tty)
 
       try do
-        play(rom, sav, tty, opts)
+        play(rom, sav, tty, link, opts)
       after
+        Link.close(link)
         terminal_restore(tty, saved)
       end
+    end
+  end
+
+  # Le câble s'établit avant l'écran alternatif : le message d'attente doit
+  # se voir. Sans option, pas de câble.
+  defp link_up(opts) do
+    cond do
+      port = Keyword.get(opts, :ecoute) -> Link.listen(port)
+      lien = Keyword.get(opts, :lien) -> connect(lien)
+      true -> {:ok, nil}
+    end
+  end
+
+  defp connect(lien) do
+    case String.split(lien, ":") do
+      [host, port] -> Link.connect(host, String.to_integer(port))
+      [host] -> Link.connect(host, Link.default_port())
     end
   end
 
@@ -105,7 +125,7 @@ defmodule Atomboy.Play do
     end
   end
 
-  defp play(rom, sav, tty, opts) do
+  defp play(rom, sav, tty, link, opts) do
     (fn ->
       parent = self()
       input = tty || "/dev/fd/0"
@@ -119,7 +139,10 @@ defmodule Atomboy.Play do
         loop(%{
           state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
           rom: rom,
-          ram: Save.load(Screen.boot_ram(rom, Keyword.get(opts, :dmg, false)), sav),
+          ram:
+            Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
+            |> then(&if(link, do: Map.put(&1, :link, true), else: &1))
+            |> Save.load(sav),
           sav: sav,
           hold: %{},
           down: MapSet.new(),
@@ -141,6 +164,7 @@ defmodule Atomboy.Play do
           turbo: false,
           paused: false,
           history: [],
+          link: link,
           note: nil,
           last_frame: nil,
           fps: 0.0,
@@ -292,6 +316,7 @@ defmodule Atomboy.Play do
 
     # Pendant le turbo le port audio est fermé : sound/3 jette les
     # déclenchements sans rien pousser.
+    {ram, link} = Link.tick(ctx.link, ram)
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     ctx = if render?, do: draw(ctx, pixels, ram, held), else: ctx
@@ -325,6 +350,7 @@ defmodule Atomboy.Play do
         hold: hold,
         apu: apu,
         audio: audio,
+        link: link,
         frame: ctx.frame + 1,
         deadline: deadline,
         note: fade(ctx.note),
@@ -493,6 +519,7 @@ defmodule Atomboy.Play do
       "\e[0m ✚ flèches · x A · c B · ⏎ Start · ␣ Select · s/r état · ⇥ turbo · p pause · q quitte   ",
       :io_lib.format(~c"~5.1f fps · banque ~2..0B", [ctx.fps, bank]),
       if(ctx.audio, do: " · ♪", else: ""),
+      if(ctx.link, do: " · ⇄", else: ""),
       if(ctx.turbo, do: " · »»", else: ""),
       if(ctx.paused, do: " · ⏸ pause", else: ""),
       note,
