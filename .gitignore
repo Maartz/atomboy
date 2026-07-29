@@ -28,3 +28,5 @@ atomboy-*.tar
 *.sav
 *.state
 burrito_out/
+atomboy-crash.log
+erl_crash.dump

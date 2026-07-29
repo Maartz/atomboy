@@ -25,6 +25,12 @@ defmodule Atomboy.CLI do
   # partie dans le start de l'application, on halte avant qu'il ne parle.
   @impl true
   def start(_type, _args) do
+    # Charger d'avance les modules de formatage d'erreurs : le BEAM les
+    # charge à la demande, et si le cache d'extraction disparaît en cours de
+    # partie, un crash deviendrait illisible (« DEFAULT FORMATTER CRASHED »,
+    # vécu) — le vrai rapport mangé par la mort du formateur.
+    Enum.each([:io_lib_pretty, :io_lib_format, :erl_pp], &:code.ensure_loaded/1)
+
     args = :init.get_plain_arguments() |> Enum.map(&List.to_string/1)
     System.halt(main(args))
   end
@@ -37,13 +43,24 @@ defmodule Atomboy.CLI do
         {fenetre, opts} = Keyword.pop(opts, :fenetre, false)
         runner = if fenetre, do: Atomboy.Window, else: Atomboy.Play
 
-        case runner.run(rom, opts) do
-          :ok ->
-            0
+        try do
+          case runner.run(rom, opts) do
+            :ok ->
+              0
 
-          {:error, message} ->
-            IO.puts(:stderr, message)
-            1
+            {:error, message} ->
+              IO.puts(:stderr, message)
+              1
+          end
+        rescue
+          e ->
+            # Le rapport de crash ne dépend de personne : formaté par nos
+            # soins, écrit dans un fichier ET sur stderr — jamais confié au
+            # contrôleur d'applications, dont le formateur peut mourir.
+            report = Exception.format(:error, e, __STACKTRACE__)
+            File.write("atomboy-crash.log", report)
+            IO.puts(:stderr, "\natomboy a planté — rapport dans atomboy-crash.log :\n\n" <> report)
+            70
         end
 
       {:error, message} ->

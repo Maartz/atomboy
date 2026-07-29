@@ -4,6 +4,7 @@
 #     bin/build              tests puis binaires dans burrito_out/
 #     bin/build --vite       sans les tests
 #     bin/build --install    + copie vers ~/.local/bin/atomboy
+#     bin/build --menage     purge les caches d'extraction (jeu fermé !)
 #
 # Sous le capot : Burrito exige zig 0.16.0 (mise l'installe au besoin),
 # la release se construit en prod, et les vieux caches d'extraction
@@ -16,10 +17,12 @@ cd "$(dirname "$0")/.."
 ZIG=zig@0.16.0
 vite=false
 install=false
+menage=false
 for arg in "$@"; do
   case "$arg" in
     --vite) vite=true ;;
     --install) install=true ;;
+    --menage) menage=true ;;
     *) echo "option inconnue : $arg" >&2; exit 2 ;;
   esac
 done
@@ -37,9 +40,13 @@ echo "── release ──"
 rm -rf burrito_out
 MIX_ENV=prod mise exec "$ZIG" -- mix release --overwrite
 
-echo "── caches ──"
-rm -rf "$HOME/Library/Application Support/.burrito/atomboy_"*
-echo "caches d'extraction purgés (ils renaissent au premier lancement)"
+if $menage; then
+  # Jamais par défaut : purger le cache d'une partie EN COURS arrache ses
+  # fichiers au BEAM — modules introuvables, crash illisible (vécu).
+  echo "── ménage ──"
+  rm -rf "$HOME/Library/Application Support/.burrito/atomboy_"*
+  echo "caches d'extraction purgés (ils renaissent au premier lancement)"
+fi
 
 echo "── binaires ──"
 ls -lh burrito_out/ | awk 'NR > 1 {print "  " $NF " (" $5 ")"}'
