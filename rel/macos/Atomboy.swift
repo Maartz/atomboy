@@ -122,9 +122,17 @@ final class Moteur: ObservableObject {
         let turbo = pad.rightShoulder.isPressed || pad.rightTrigger.isPressed
         if turbo && !turboTenu { tape("T") }
         turboTenu = turbo
+
+        // X sauve, Y recharge — le réflexe console, au front montant.
+        if pad.buttonX.isPressed && !sauveTenu { tape("s") }
+        sauveTenu = pad.buttonX.isPressed
+        if pad.buttonY.isPressed && !chargeTenu { tape("r") }
+        chargeTenu = pad.buttonY.isPressed
     }
 
     private var turboTenu = false
+    private var sauveTenu = false
+    private var chargeTenu = false
 
     // Un appui bref « depuis la barre de menus » : presse puis relâche.
     func tape(_ clé: Character) {
