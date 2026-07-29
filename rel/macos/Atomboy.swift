@@ -174,6 +174,7 @@ final class Moteur: ObservableObject {
         case 49: return UInt8(ascii: "E")  // Espace = Select
         case 53: return UInt8(ascii: "M")  // Échap = menu
         case 51: return UInt8(ascii: "W")  // Retour arrière = rembobinage
+        case 48: return UInt8(ascii: "T")  // Tab = turbo
         default: break
         }
 
@@ -300,6 +301,8 @@ struct AtomboyApp: App {
 
                 Divider()
 
+                Button("Turbo") { délégué.moteur.tape("T") }
+                    .keyboardShortcut("t")
                 Button("Menu en jeu") { délégué.moteur.tape("M") }
                     .keyboardShortcut("m")
             }

@@ -55,6 +55,7 @@ defmodule Atomboy.Serveur do
                 ?M => :menu,
                 ?W => :rewind,
                 ?P => :pause,
+                ?T => :turbo,
                 # Les actions directes — la barre de menus native s'en sert.
                 ?s => :save_state,
                 ?r => :load_state
@@ -97,6 +98,7 @@ defmodule Atomboy.Serveur do
           max_frames: Keyword.get(opts, :frames, :infinity),
           history: [],
           last_frame: nil,
+          turbo: false,
           deadline: System.monotonic_time(:microsecond) + @frame_us
         })
       after
@@ -145,21 +147,39 @@ defmodule Atomboy.Serveur do
     held = MapSet.to_list(ctx.down)
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
 
+    # En turbo : une frame émise sur quatre, pas de PCM, pas d'échéancier.
+    render? = not ctx.turbo or rem(ctx.frame, 4) == 0
+
     {pixels, state, ram} =
       try do
-        Screen.frame(ctx.state, ctx.rom, ram, true)
+        Screen.frame(ctx.state, ctx.rom, ram, render?)
       rescue
         e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
           Save.flush(ram, ctx.sav)
           reraise e, __STACKTRACE__
       end
 
-    {ram, apu, audio} = son(ram, ctx.apu, ctx.audio)
-    émet_frame(pixels, ctx.palette)
+    {ram, apu, audio} =
+      if ctx.turbo do
+        # Les déclenchements se consomment quand même — l'état de l'APU
+        # reste cohérent, seul le PCM se tait.
+        {_, ram, apu} = APU.samples(ram, ctx.apu, 0)
+        {ram, apu, ctx.audio}
+      else
+        son(ram, ctx.apu, ctx.audio)
+      end
 
-    now = System.monotonic_time(:microsecond)
-    deadline = max(ctx.deadline, now - 100_000)
-    if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+    if render?, do: émet_frame(pixels, ctx.palette)
+
+    deadline =
+      if ctx.turbo do
+        ctx.deadline
+      else
+        now = System.monotonic_time(:microsecond)
+        deadline = max(ctx.deadline, now - 100_000)
+        if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+        deadline + @frame_us
+      end
 
     ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
 
@@ -170,8 +190,8 @@ defmodule Atomboy.Serveur do
         apu: apu,
         audio: audio,
         frame: ctx.frame + 1,
-        deadline: deadline + @frame_us,
-        last_frame: pixels
+        deadline: deadline,
+        last_frame: if(render?, do: pixels, else: ctx.last_frame)
     }
     |> remember()
     |> loop()
@@ -266,6 +286,27 @@ defmodule Atomboy.Serveur do
     }
 
   defp appuie(ctx, ?+, :pause), do: appuie(ctx, ?+, :menu)
+
+  # Le turbo : indisponible câble branché (le protocole série exige le
+  # tempo) ; à la sortie, la cadence audio repart de zéro — pas de rafale
+  # de rattrapage héritée du sprint.
+  defp appuie(ctx, ?+, :turbo) do
+    cond do
+      Map.has_key?(ctx.ram, :link) ->
+        ctx
+
+      ctx.turbo ->
+        %{
+          ctx
+          | turbo: false,
+            audio: %{t0: System.monotonic_time(:microsecond), sent: 0},
+            deadline: System.monotonic_time(:microsecond) + @frame_us
+        }
+
+      true ->
+        %{ctx | turbo: true}
+    end
+  end
   defp appuie(ctx, ?+, :save_state), do: menu_action(:save_state, ctx)
   defp appuie(ctx, ?+, :load_state), do: menu_action(:load_state, ctx)
   defp appuie(ctx, ?+, {:slot, n}), do: %{ctx | state_slot: n}
