@@ -215,6 +215,37 @@ defmodule Atomboy.LinkTest do
     assert {:ok, <<1, 0xBB>>} = :gen_tcp.recv(gauche.socket, 2, 200)
   end
 
+  test "lien actif : la retenue devient patiente — le menu peut réfléchir" do
+    {gauche, droite} = pair()
+
+    # Un premier échange armé établit le lien (link_active).
+    ram_g = arme(%{link: true}, 0x42, 0x81)
+    ram_d = arme(%{link: true}, 0x55, 0x80)
+    {ram_g, gauche} = tick(gauche, ram_g)
+    {ram_d, droite} = tick(droite, ram_d)
+    {ram_g, gauche} = tick(gauche, ram_g)
+    assert ram_d[:link_active] == true
+
+    # Le maître cadence pendant que l'esclave navigue ses menus (pas armé).
+    ram_g = ram_g |> Map.put(:link, true) |> arme(0x70, 0x81)
+    {ram_g, gauche} = tick(gauche, ram_g)
+    {ram_d, droite} = tick(droite, ram_d)
+    assert {_, _} = ram_d[:link_held]
+
+    # 30 ms plus tard — au-delà de l'ancienne patience — l'octet est
+    # TOUJOURS retenu : pas de FF fantôme pris pour un refus d'échange.
+    Process.sleep(30)
+    {ram_d, droite} = tick(droite, ram_d)
+    assert {_, _} = ram_d[:link_held]
+
+    # L'esclave sort du menu et s'arme : l'octet retenu se sert.
+    ram_d = ram_d |> Map.put(:link, true) |> arme(0x71, 0x80)
+    {ram_d, _} = tick(droite, ram_d)
+    {ram_g, _} = tick(gauche, ram_g)
+    assert ram_d[0xFF01] == 0x70
+    assert ram_g[0xFF01] == 0x71
+  end
+
   test "sans câble, la capture série de blargg reste intacte" do
     ram = arme(%{}, ?A, 0x81)
     assert IO.iodata_to_binary(Map.get(ram, :serial)) == "A"

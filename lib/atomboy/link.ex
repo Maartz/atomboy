@@ -215,14 +215,20 @@ defmodule Atomboy.Link do
   # main : la sonde $01 d'un joueur, recyclée par l'autre, se lisait comme
   # « partenaire maître détecté » (vécu, à la trace). UNE horloge par
   # frame : la réponse à la suivante attend que l'ISR ait rechargé SB.
-  # Une horloge reçue pendant la fenêtre non armée est RETENUE quelques
-  # millisecondes : l'ISR de l'esclave — retardée par le handler vblank ou
-  # la sieste de fin de frame — va se réarmer, et l'octet ne doit pas se
-  # perdre (sur silicium la fenêtre dure ~50 cycles ; ici jusqu'à 8 ms —
-  # vécu : un octet sauté, « SILER », l'équipe d'en face décalée). Passé le
-  # délai, la ligne au repos répond 0xFF — la sémantique des sondes
-  # d'établissement face à un partenaire qui n'est pas en mode lien.
+  # Une horloge reçue pendant la fenêtre non armée est RETENUE : l'ISR de
+  # l'esclave — retardée par le handler vblank ou la sieste de fin de
+  # frame — va se réarmer, et l'octet ne doit pas se perdre (vécu : un
+  # octet sauté, « SILER », l'équipe d'en face décalée). Passé le délai,
+  # la ligne au repos répond 0xFF — la sémantique des sondes
+  # d'établissement face à un partenaire hors mode lien.
+  #
+  # Deux patiences : courte avant l'établissement (les sondes doivent lire
+  # 0xFF vite), longue après (:link_active) — en phase de menus le jeu ne
+  # réarme que toutes les deux ou trois frames, et le vrai matériel, ISR
+  # toujours armée, ne produirait jamais de FF là (vécu : « Dommage !
+  # L'échange est annulé » pendant que le partenaire hésitait au menu).
   @retenue_ms 25
+  @retenue_active_ms 400
 
   defp pump(link, ram) do
     case Map.get(ram, :link_held) do
@@ -257,7 +263,8 @@ defmodule Atomboy.Link do
       Map.get(ram, :link_op) == :slave ->
         serve(link, Map.delete(ram, :link_held), byte)
 
-      System.monotonic_time(:millisecond) - depuis > @retenue_ms ->
+      System.monotonic_time(:millisecond) - depuis >
+          if(Map.get(ram, :link_active), do: @retenue_active_ms, else: @retenue_ms) ->
         # Personne ne s'arme : la ligne au repos.
         case :gen_tcp.send(link.socket, <<1, 0xFF>>) do
           :ok ->
@@ -293,6 +300,7 @@ defmodule Atomboy.Link do
     |> Map.put(@sb, byte)
     |> Map.put(@sc, Map.get(ram, @sc, 0) &&& 0x7F)
     |> Map.update(@if_addr, 0x08, &(&1 ||| 0x08))
+    |> Map.put(:link_active, true)
     |> Map.delete(:link_op)
   end
 
