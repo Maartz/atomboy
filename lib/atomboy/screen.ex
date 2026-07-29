@@ -29,11 +29,12 @@ defmodule Atomboy.Screen do
 
   Renvoie `{frame, state, ram}`.
   """
-  @spec run(Path.t(), pos_integer()) :: {PPU.frame(), State.t(), map()}
-  def run(rom_path, frames) do
+  @spec run(Path.t(), pos_integer(), keyword()) :: {PPU.frame(), State.t(), map()}
+  def run(rom_path, frames, opts \\ []) do
     rom = load(rom_path)
-    state = boot_state(rom)
-    ram = boot_ram(rom)
+    dmg? = Keyword.get(opts, :dmg, false)
+    state = boot_state(rom, dmg?)
+    ram = boot_ram(rom, dmg?)
 
     Enum.reduce(1..frames, {<<>>, state, ram}, fn frame_index, {_frame, state, ram} ->
       render? = frame_index == frames
@@ -65,9 +66,12 @@ defmodule Atomboy.Screen do
   La map mémoire de départ : nombre de banques, famille de MBC (en-tête
   0x147 : MBC3 pour 0x0F-0x13, MBC5 pour 0x19-0x1E, MBC1 sinon) et mode
   couleur (0x143 : 0x80 « enhanced », 0xC0 « only »).
+
+  `dmg?` force la machine monochrome — l'équivalent de glisser la
+  cartouche dans une vraie DMG.
   """
-  @spec boot_ram(binary()) :: map()
-  def boot_ram(rom) do
+  @spec boot_ram(binary(), boolean()) :: map()
+  def boot_ram(rom, dmg? \\ false) do
     mbc =
       case :binary.at(rom, 0x147) do
         t when t in 0x0F..0x13 -> :mbc3
@@ -76,16 +80,21 @@ defmodule Atomboy.Screen do
       end
 
     base = %{rom_banks: div(byte_size(rom), 0x4000), mbc: mbc}
-    if :binary.at(rom, 0x143) in [0x80, 0xC0], do: Map.put(base, :cgb, true), else: base
+
+    if not dmg? and :binary.at(rom, 0x143) in [0x80, 0xC0] do
+      Map.put(base, :cgb, true)
+    else
+      base
+    end
   end
 
   @doc """
   L'état de boot selon la cartouche : A vaut 0x11 sur Game Boy Color —
   c'est ainsi que les jeux « enhanced » choisissent leurs couleurs.
   """
-  @spec boot_state(binary()) :: State.t()
-  def boot_state(rom) do
-    if :binary.at(rom, 0x143) in [0x80, 0xC0] do
+  @spec boot_state(binary(), boolean()) :: State.t()
+  def boot_state(rom, dmg? \\ false) do
+    if not dmg? and :binary.at(rom, 0x143) in [0x80, 0xC0] do
       %{boot_state() | a: 0x11}
     else
       boot_state()
@@ -199,7 +208,38 @@ defmodule Atomboy.Screen do
   qui laisse un terminal suivre 60 frames par seconde.
   """
   @spec to_text(PPU.frame(), :gris | :dmg) :: String.t()
-  def to_text(frame, palette \\ :gris) do
+  def to_text(frame, palette \\ :gris)
+
+  # La frame couleur : demi-blocs en truecolor, via le RGB des palettes du jeu.
+  def to_text(frame, palette) when byte_size(frame) == 2 * 160 * 144 do
+    rgb = to_rgb(frame, palette)
+    {width, height} = PPU.dimensions()
+
+    rows =
+      for row <- 0..(div(height, 2) - 1) do
+        top = :binary.part(rgb, row * 2 * width * 3, width * 3)
+        bottom = :binary.part(rgb, (row * 2 + 1) * width * 3, width * 3)
+
+        {cells, _} =
+          Enum.map_reduce(0..(width - 1), nil, fn x, prev ->
+            <<r1, g1, b1>> = :binary.part(top, x * 3, 3)
+            <<r2, g2, b2>> = :binary.part(bottom, x * 3, 3)
+            pair = {r1, g1, b1, r2, g2, b2}
+
+            if pair == prev do
+              {"▀", prev}
+            else
+              {"\e[38;2;#{r1};#{g1};#{b1};48;2;#{r2};#{g2};#{b2}m▀", pair}
+            end
+          end)
+
+        [cells, "\e[0m\n"]
+      end
+
+    IO.iodata_to_binary(rows)
+  end
+
+  def to_text(frame, palette) do
     {width, height} = PPU.dimensions()
     colors = colors(palette)
 
@@ -268,12 +308,25 @@ defmodule Atomboy.Screen do
     end
   end
 
-  @doc "La frame en RGB 24 bits — trois octets par pixel, selon la palette."
+  @doc """
+  La frame en RGB 24 bits — trois octets par pixel. Une frame DMG (un octet
+  par pixel) passe par la palette choisie ; une frame couleur (RGB555, deux
+  octets par pixel) s'étend en RGB888, la palette du jeu faisant foi.
+  """
   @spec to_rgb(PPU.frame(), :gris | :dmg) :: binary()
-  def to_rgb(frame, palette) do
+  def to_rgb(frame, palette) when byte_size(frame) == 160 * 144 do
     rgb = rgb_palette(palette)
     for <<shade <- frame>>, into: <<>>, do: elem(rgb, shade)
   end
+
+  def to_rgb(frame, _palette) do
+    for <<c::16-little <- frame>>, into: <<>> do
+      <<x8(c &&& 0x1F), x8(bsr(c, 5) &&& 0x1F), x8(bsr(c, 10) &&& 0x1F)>>
+    end
+  end
+
+  # 5 bits étendus à 8 : les bits hauts recopiés en bas, l'échelle exacte.
+  defp x8(v), do: bsl(v, 3) ||| bsr(v, 2)
 
   # Le protocole plafonne les tronçons de charge utile à 4096 octets.
   defp chunks(<<chunk::binary-size(4096), rest::binary>>), do: [chunk | chunks(rest)]
@@ -290,10 +343,16 @@ defmodule Atomboy.Screen do
   La frame en PGM binaire (P5) — lisible par tout visionneur d'images.
   """
   @spec to_pgm(PPU.frame()) :: binary()
-  def to_pgm(frame) do
+  def to_pgm(frame) when byte_size(frame) == 160 * 144 do
     {width, height} = PPU.dimensions()
     shades = {0xFF, 0xAA, 0x55, 0x00}
     pixels = for <<shade <- frame>>, into: <<>>, do: <<elem(shades, shade)>>
     "P5\n#{width} #{height}\n255\n" <> pixels
+  end
+
+  # La frame couleur en PPM (P6) — la vraie couleur, lisible partout.
+  def to_pgm(frame) do
+    {width, height} = PPU.dimensions()
+    "P6\n#{width} #{height}\n255\n" <> to_rgb(frame, :dmg)
   end
 end

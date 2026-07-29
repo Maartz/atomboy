@@ -25,7 +25,9 @@ defmodule Atomboy.ScreenTest do
   @golden_crc 0xF8C8FA9B
 
   test "l'écran de 06-ld r,r affiche son verdict, au pixel près" do
-    {frame, _state, _ram} = Atomboy.Screen.run(@rom, 900)
+    # dmg: true — le golden est celui d'une machine monochrome ; la ROM
+    # blargg se dit CGB-compatible et basculerait en couleur sinon.
+    {frame, _state, _ram} = Atomboy.Screen.run(@rom, 900, dmg: true)
 
     assert byte_size(frame) == 160 * 144
     assert :erlang.crc32(frame) == @golden_crc
@@ -42,8 +44,22 @@ defmodule Atomboy.ScreenTest do
     assert :erlang.crc32(frame) == @acid2_crc
   end
 
+  @cgb_acid2 "test/fixtures/cgb-acid2.gbc"
+  @cgb_acid2_crc 0x36574FC1
+
+  test "cgb-acid2 dessine son visage en couleurs, au pixel près" do
+    # Le test d'acceptance des PPU couleur : vérifié à zéro pixel d'écart
+    # contre la référence officielle (img/reference.png, tolérance d'arrondi
+    # 5→8 bits) le jour où ce CRC a été figé. Attributs de tuiles en banque
+    # 1, huit palettes RGB555, priorités GBC, sprites à l'indice OAM —
+    # chaque trait du visage en nomme un.
+    {frame, _state, _ram} = Atomboy.Screen.run(@cgb_acid2, 120)
+    assert byte_size(frame) == 2 * 160 * 144
+    assert :erlang.crc32(frame) == @cgb_acid2_crc
+  end
+
   test "une frame rendue ne contient que des teintes DMG" do
-    {frame, _state, _ram} = Atomboy.Screen.run(@rom, 60)
+    {frame, _state, _ram} = Atomboy.Screen.run(@rom, 60, dmg: true)
     assert for(<<shade <- frame>>, shade > 3, do: shade) == []
   end
 end

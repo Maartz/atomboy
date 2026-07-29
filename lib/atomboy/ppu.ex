@@ -52,10 +52,22 @@ defmodule Atomboy.PPU do
   ligne interne de la fenêtre. Renvoie `{scanline, compteur}` — le compteur
   n'avance que si la fenêtre s'est affichée sur cette ligne.
 
-  L'écran éteint rend la teinte 0 partout.
+  En mode DMG, un octet par pixel : la teinte 0..3. En mode couleur
+  (`:cgb` posé par `Screen.boot_ram/1`), deux octets par pixel : le RGB555
+  little-endian sorti des palettes du jeu.
+
+  L'écran éteint rend la teinte 0 — ou du blanc — partout.
   """
   @spec render_line(map(), 0..143, non_neg_integer()) :: {line(), non_neg_integer()}
   def render_line(ram, ly, window_line) do
+    if Map.get(ram, :cgb, false) do
+      render_line_cgb(ram, ly, window_line)
+    else
+      render_line_dmg(ram, ly, window_line)
+    end
+  end
+
+  defp render_line_dmg(ram, ly, window_line) do
     lcdc = Map.get(ram, 0xFF40, 0x91)
 
     if band(lcdc, 0x80) == 0 do
@@ -77,6 +89,161 @@ defmodule Atomboy.PPU do
 
       {line, window_line}
     end
+  end
+
+  # ── Le mode couleur ─────────────────────────────────────────────────────────
+  #
+  # Les attributs de chaque tuile vivent en banque 1 de VRAM (clés +0x10000) :
+  # palette 0-7, miroirs, banque du motif, priorité. Les couleurs sortent de
+  # la RAM de palettes (0x20000 fond, 0x20040 sprites) : 8 palettes × 4
+  # couleurs × RGB555. La priorité est celle du GBC : LCDC bit 0 à zéro =
+  # les sprites gagnent toujours ; sinon l'attribut de tuile ou le drapeau
+  # « derrière » du sprite cèdent aux couleurs 1-3 du fond. Les sprites se
+  # départagent à l'indice OAM seul — pas au X, contrairement à la DMG.
+
+  defp render_line_cgb(ram, ly, window_line) do
+    lcdc = Map.get(ram, 0xFF40, 0x91)
+
+    if band(lcdc, 0x80) == 0 do
+      {:binary.copy(<<0xFF, 0x7F>>, @width), window_line}
+    else
+      {bg, window_line} = background_cgb(ram, lcdc, ly, window_line)
+      sprites = if band(lcdc, 0x02) != 0, do: sprite_pixels_cgb(ram, lcdc, ly), else: %{}
+      master = band(lcdc, 0x01) != 0
+
+      line =
+        for x <- 0..(@width - 1), into: <<>> do
+          {bg_color, bg_prio, bg_rgb} = elem(bg, x)
+
+          case sprites do
+            %{^x => {rgb, behind?}} ->
+              sprite_hidden = master and bg_color != 0 and (bg_prio or behind?)
+              if sprite_hidden, do: <<bg_rgb::16-little>>, else: <<rgb::16-little>>
+
+            _ ->
+              <<bg_rgb::16-little>>
+          end
+        end
+
+      {line, window_line}
+    end
+  end
+
+  defp background_cgb(ram, lcdc, ly, window_line) do
+    scy = Map.get(ram, 0xFF42, 0)
+    scx = Map.get(ram, 0xFF43, 0)
+    wy = Map.get(ram, 0xFF4A, 0)
+    wx = Map.get(ram, 0xFF4B, 0) - 7
+    window? = band(lcdc, 0x20) != 0 and ly >= wy and wx < @width
+
+    bg_map = if band(lcdc, 0x08) == 0, do: 0x9800, else: 0x9C00
+    win_map = if band(lcdc, 0x40) == 0, do: 0x9800, else: 0x9C00
+    signed? = band(lcdc, 0x10) == 0
+
+    y = band(ly + scy, 0xFF)
+    bg_row = bg_map + bsr(y, 3) * 32
+    bg_line = band(y, 7)
+
+    win_row = win_map + bsr(window_line, 3) * 32
+    win_line = band(window_line, 7)
+
+    pixels =
+      for x <- 0..(@width - 1) do
+        if window? and x >= wx do
+          cgb_tile_pixel(ram, win_row + bsr(x - wx, 3), win_line, band(x - wx, 7), signed?)
+        else
+          xx = band(x + scx, 0xFF)
+          cgb_tile_pixel(ram, bg_row + bsr(xx, 3), bg_line, band(xx, 7), signed?)
+        end
+      end
+
+    {List.to_tuple(pixels), if(window?, do: window_line + 1, else: window_line)}
+  end
+
+  # Un pixel de fond : {couleur brute 0-3, priorité de tuile, RGB555}.
+  defp cgb_tile_pixel(ram, map_addr, tile_line, pixel, signed?) do
+    tile = Map.get(ram, map_addr, 0)
+    attr = Map.get(ram, map_addr + 0x10000, 0)
+
+    tile_line = if band(attr, 0x40) != 0, do: 7 - tile_line, else: tile_line
+    bank = band(bsr(attr, 3), 1) * 0x10000
+
+    tile_addr =
+      if signed? do
+        0x9000 + (tile - bsl(bsr(tile, 7), 8)) * 16
+      else
+        0x8000 + tile * 16
+      end
+
+    low = Map.get(ram, tile_addr + bank + tile_line * 2, 0)
+    high = Map.get(ram, tile_addr + bank + tile_line * 2 + 1, 0)
+    bit = if band(attr, 0x20) != 0, do: pixel, else: 7 - pixel
+    color = bsl(band(bsr(high, bit), 1), 1) ||| band(bsr(low, bit), 1)
+
+    {color, band(attr, 0x80) != 0, cgb_color(ram, 0x20000, band(attr, 0x07), color)}
+  end
+
+  # La couleur RGB555 de la palette n : deux octets little-endian dans la
+  # RAM de palettes.
+  defp cgb_color(ram, base, palette, color) do
+    at = base + palette * 8 + color * 2
+    Map.get(ram, at, 0xFF) ||| bsl(Map.get(ram, at + 1, 0x7F), 8)
+  end
+
+  defp sprite_pixels_cgb(ram, lcdc, ly) do
+    height = if band(lcdc, 0x04) == 0, do: 8, else: 16
+
+    selected =
+      for index <- 0..39,
+          base = @oam + index * 4,
+          y = Map.get(ram, base, 0) - 16,
+          ly >= y and ly < y + height,
+          do: {index, y, base}
+
+    # Dix par ligne, priorité au plus petit indice OAM — rendu du moins
+    # prioritaire au plus prioritaire, qui écrase.
+    selected
+    |> Enum.take(10)
+    |> Enum.sort_by(fn {index, _y, _base} -> -index end)
+    |> Enum.reduce(%{}, fn {_index, y, base}, acc ->
+      draw_sprite_cgb(ram, acc, ly, y, base, height)
+    end)
+  end
+
+  defp draw_sprite_cgb(ram, acc, ly, y, base, height) do
+    x = Map.get(ram, base + 1, 0) - 8
+    tile = Map.get(ram, base + 2, 0)
+    flags = Map.get(ram, base + 3, 0)
+
+    row = ly - y
+    row = if band(flags, 0x40) != 0, do: height - 1 - row, else: row
+    tile = if height == 16, do: band(tile, 0xFE), else: tile
+
+    bank = band(bsr(flags, 3), 1) * 0x10000
+    tile_addr = 0x8000 + bank + tile * 16 + row * 2
+    low = Map.get(ram, tile_addr, 0)
+    high = Map.get(ram, tile_addr + 1, 0)
+
+    palette = band(flags, 0x07)
+    behind? = band(flags, 0x80) != 0
+    x_flip? = band(flags, 0x20) != 0
+
+    Enum.reduce(0..7, acc, fn i, acc ->
+      px = x + i
+
+      if px < 0 or px >= @width do
+        acc
+      else
+        bit = if x_flip?, do: i, else: 7 - i
+        color = bsl(band(bsr(high, bit), 1), 1) ||| band(bsr(low, bit), 1)
+
+        if color == 0 do
+          acc
+        else
+          Map.put(acc, px, {cgb_color(ram, 0x20040, palette, color), behind?})
+        end
+      end
+    end)
   end
 
   @doc "Rend les 144 scanlines d'une frame."

@@ -66,7 +66,8 @@ defmodule Atomboy.CLI do
           dump: :string,
           son: :boolean,
           palette: :string,
-          fenetre: :boolean
+          fenetre: :boolean,
+          dmg: :boolean
         ]
       )
 
@@ -97,7 +98,7 @@ defmodule Atomboy.CLI do
 
   defp rom(_argv) do
     {:error,
-     "usage : atomboy <rom.gb> [--fenetre] [--hold N] [--frames N] " <>
+     "usage : atomboy <rom.gb> [--fenetre] [--dmg] [--hold N] [--frames N] " <>
        "[--dump f.pgm] [--no-son] [--palette dmg|gris]"}
   end
 end
