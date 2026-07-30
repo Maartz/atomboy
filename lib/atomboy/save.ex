@@ -1,39 +1,37 @@
 defmodule Atomboy.Save do
   @moduledoc """
-  La pile de la cartouche : la RAM 0xA000-0xBFFF, persistée en `.sav`.
+  The cartridge's battery: the RAM at 0xA000-0xBFFF, persisted as a `.sav`.
 
-  Sur la vraie cartouche, une pile bouton garde la SRAM en vie — c'est là
-  que Zelda range tes fichiers de partie. Ici, le même octet pour le même
-  octet dans un fichier `.sav` à côté de la ROM, la convention que les
-  émulateurs partagent : un fichier venu d'ailleurs se charge, le nôtre se
-  lit ailleurs.
+  On the real cartridge a coin cell keeps the SRAM alive — that is where
+  Zelda files your saved games. Here, the same byte for the same byte in a
+  `.sav` file next to the ROM, the convention emulators share: a file from
+  elsewhere loads here, ours reads elsewhere.
 
-  Le cycle : `load/2` recharge le fichier au lancement (tout entier — un
-  octet à zéro chargé doit se lire zéro, pas « bus ouvert ») ; les
-  écritures du jeu marquent la map `:cram_dirty` (CartLoop) ; `flush/2`
-  n'écrit le fichier que si la marque est là, puis l'efface — l'autosauve
-  périodique et la sortie l'appellent sans jamais écrire pour rien.
+  The cycle: `load/2` reloads the file at startup (all of it — a zero byte
+  that was loaded must read zero, not "open bus"); the game's writes mark the
+  map `:cram_dirty` (CartLoop); `flush/2` only writes the file if the mark is
+  there, then erases it — the periodic autosave and the exit path both call
+  it without ever writing for nothing.
 
-  8 Ko sur MBC1 (Link's Awakening), 32 Ko en quatre banques sur MBC3
-  (Pokémon) — les banques se suivent dans le fichier, comme partout, et
-  dans la map chaque banque vit à `addr + banque × 0x10000` (la banque 0
-  garde ses clés nues).
+  8 KB on MBC1 (Link's Awakening), 32 KB in four banks on MBC3 (Pokémon) —
+  the banks follow one another in the file, as everywhere, and in the map
+  each bank lives at `addr + bank × 0x10000` (bank 0 keeps its bare keys).
   """
 
   @sram_base 0xA000
   @sram_size 0x2000
 
   @doc """
-  Le chemin du .sav d'une ROM : même nom, extension .sav. Avec un profil —
-  deux joueurs, deux parties, un seul fichier ROM — le nom s'intercale :
-  `zelda.joueur1.sav`.
+  The .sav path of a ROM: same name, .sav extension. With a profile — two
+  players, two saved games, a single ROM file — the name slots in:
+  `zelda.player1.sav`.
   """
   @spec path(Path.t(), String.t() | nil) :: Path.t()
-  def path(rom_path, profil \\ nil)
+  def path(rom_path, profile \\ nil)
   def path(rom_path, nil), do: Path.rootname(rom_path) <> ".sav"
-  def path(rom_path, profil), do: Path.rootname(rom_path) <> ".#{profil}.sav"
+  def path(rom_path, profile), do: Path.rootname(rom_path) <> ".#{profile}.sav"
 
-  @doc "Recharge un .sav dans la map mémoire — sans fichier, la map telle quelle."
+  @doc "Reloads a .sav into the memory map — with no file, the map as it is."
   @spec load(map(), Path.t()) :: map()
   def load(ram, sav_path) do
     case File.read(sav_path) do
@@ -52,8 +50,8 @@ defmodule Atomboy.Save do
   end
 
   @doc """
-  Écrit le .sav si la SRAM a changé depuis la dernière fois, et efface la
-  marque. Sans changement, ne touche à rien.
+  Writes the .sav if the SRAM has changed since last time, and erases the
+  mark. With no change, touches nothing.
   """
   @spec flush(map(), Path.t()) :: map()
   def flush(ram, sav_path) do
@@ -71,34 +69,35 @@ defmodule Atomboy.Save do
     end
   end
 
-  # L'octet i du fichier vit en banque div(i, 8 Ko) — clés nues en banque 0.
+  # Byte i of the file lives in bank div(i, 8 KB) — bare keys in bank 0.
   defp key(i), do: @sram_base + rem(i, @sram_size) + div(i, @sram_size) * 0x10000
 
   defp banks(ram), do: if(Map.get(ram, :mbc) == :mbc3, do: 4, else: 1)
 
-  # ── Les instantanés de machine ──────────────────────────────────────────────
+  # ── Machine snapshots ───────────────────────────────────────────────────────
 
   @doc """
-  Le chemin d'un instantané : la case 1 est le fichier historique
-  (`zelda.state`), les cases 2-9 s'y ajoutent (`zelda.case3.state`) —
-  et le profil s'intercale comme pour le .sav.
+  The path of a snapshot: slot 1 is the historical file (`zelda.state`), slots
+  2-9 add themselves alongside it (`zelda.case3.state` — the `case` in the
+  name is kept as it is so that snapshots already on disk keep loading) — and
+  the profile slots in as it does for the .sav.
   """
   @spec state_path(Path.t(), String.t() | nil, 1..9) :: Path.t()
-  def state_path(rom_path, profil \\ nil, case_ \\ 1) do
-    base = Path.rootname(path(rom_path, profil))
-    if case_ == 1, do: base <> ".state", else: base <> ".case#{case_}.state"
+  def state_path(rom_path, profile \\ nil, slot \\ 1) do
+    base = Path.rootname(path(rom_path, profile))
+    if slot == 1, do: base <> ".state", else: base <> ".case#{slot}.state"
   end
 
   @doc """
-  Fige la machine entière — CPU, mémoire, son — dans un fichier. Tout est
-  immuable : trois valeurs suffisent, term_to_binary fait le reste.
+  Freezes the whole machine — CPU, memory, sound — into a file. Everything is
+  immutable: three values are enough, term_to_binary does the rest.
   """
   @spec write_state(Path.t(), {struct(), map(), struct()}) :: :ok
   def write_state(path, {state, ram, apu}) do
     File.write!(path, :erlang.term_to_binary({:atomboy_state, 1, state, ram, apu}, [:compressed]))
   end
 
-  @doc "Ranime un instantané. `:error` sans fichier ou d'un autre format."
+  @doc "Revives a snapshot. `:error` with no file, or a file of another format."
   @spec read_state(Path.t()) :: {:ok, {struct(), map(), struct()}} | :error
   def read_state(path) do
     with {:ok, data} <- File.read(path),

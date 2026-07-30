@@ -1,62 +1,62 @@
 defmodule Atomboy.PPU do
   @moduledoc """
-  Le rendu d'image de la DMG, en BEAM : fond, fenêtre, sprites.
+  The DMG's picture rendering, in BEAM: background, window, sprites.
 
-  C'est la phase « le jeu s'affiche » du brief, côté Mac : le PPU lit la VRAM
-  et l'OAM que le CPU a écrites et en tire des pixels, scanline par scanline.
-  La version C/NIF de la phase 3 fera pareil dans un framebuffer DMA ;
-  celle-ci rend depuis la map des écritures de `Atomboy.CPU.CartLoop`, et lui
-  servira d'oracle.
+  This is the brief's "the game shows up on screen" phase, on the Mac side:
+  the PPU reads the VRAM and the OAM the CPU wrote and draws pixels out of
+  them, scanline by scanline. The C/NIF version of phase 3 will do the same
+  into a DMA framebuffer; this one renders from `Atomboy.CPU.CartLoop`'s map
+  of writes, and will serve as that version's oracle.
 
-  ## Les trois couches
+  ## The three layers
 
-    * **Fond** — la grille 32×32, défilée par SCX/SCY, palette BGP.
-    * **Fenêtre** — la seconde grille, ancrée à (WX-7, WY), par-dessus le
-      fond. Son compteur de ligne interne n'avance que sur les scanlines où
-      elle s'est réellement affichée — le quirk que dmg-acid2 vérifie en la
-      basculant en cours de frame, et que l'approximation `ly - WY` casse.
-    * **Sprites** — 40 entrées d'OAM, 10 au plus par scanline (l'ordre OAM
-      décide, comme le matériel), 8×8 ou 8×16, miroirs, palettes OBP0/OBP1,
-      couleur 0 transparente. La priorité entre sprites : le X le plus petit
-      gagne, l'entrée OAM la plus basse départage. Le drapeau « derrière le
-      fond » cède aux couleurs 1-3 du fond — d'où le rendu du fond en couleur
-      *brute*, la palette n'étant appliquée qu'au moment de trancher.
+    * **Background** — the 32×32 grid, scrolled by SCX/SCY, BGP palette.
+    * **Window** — the second grid, anchored at (WX-7, WY), on top of the
+      background. Its internal line counter only advances on the scanlines
+      where it actually showed up — the quirk dmg-acid2 checks by toggling it
+      mid-frame, and that the `ly - WY` approximation gets wrong.
+    * **Sprites** — 40 OAM entries, 10 at most per scanline (OAM order
+      decides, as on hardware), 8×8 or 8×16, mirroring, OBP0/OBP1 palettes,
+      colour 0 transparent. Priority between sprites: the smallest X wins,
+      the lowest OAM entry breaks the tie. The "behind the background" flag
+      yields to background colours 1-3 — hence rendering the background in
+      *raw* colour, the palette being applied only at the moment of choosing.
 
-  ## Registres consultés
+  ## Registers consulted
 
       0xFF40  LCDC     0xFF42/43  SCY/SCX    0xFF47  BGP
       0xFF48  OBP0     0xFF49     OBP1       0xFF4A/4B  WY/WX
       OAM     0xFE00-0xFE9F
 
-  Une teinte rendue est un octet 0..3 — 0 le plus clair, comme la dalle.
+  A rendered shade is a byte 0..3 — 0 the lightest, as on the panel.
   """
 
   import Bitwise
 
-  @typedoc "Une scanline rendue : 160 teintes 0..3."
+  @typedoc "One rendered scanline: 160 shades 0..3."
   @type line :: binary()
 
-  @typedoc "Une frame rendue : 144 scanlines concaténées, 23 040 teintes."
+  @typedoc "One rendered frame: 144 scanlines concatenated, 23,040 shades."
   @type frame :: binary()
 
   @width 160
   @height 144
   @oam 0xFE00
 
-  @doc "Largeur et hauteur de l'écran DMG."
+  @doc "Width and height of the DMG screen."
   @spec dimensions() :: {160, 144}
   def dimensions, do: {@width, @height}
 
   @doc """
-  Rend la scanline `ly` depuis l'état mémoire du CPU, avec le compteur de
-  ligne interne de la fenêtre. Renvoie `{scanline, compteur}` — le compteur
-  n'avance que si la fenêtre s'est affichée sur cette ligne.
+  Renders scanline `ly` from the CPU's memory state, along with the window's
+  internal line counter. Returns `{scanline, counter}` — the counter only
+  advances if the window showed up on that line.
 
-  En mode DMG, un octet par pixel : la teinte 0..3. En mode couleur
-  (`:cgb` posé par `Screen.boot_ram/1`), deux octets par pixel : le RGB555
-  little-endian sorti des palettes du jeu.
+  In DMG mode, one byte per pixel: the shade 0..3. In colour mode (`:cgb`,
+  set by `Screen.boot_ram/1`), two bytes per pixel: the little-endian RGB555
+  drawn from the game's palettes.
 
-  L'écran éteint rend la teinte 0 — ou du blanc — partout.
+  A screen that is off renders shade 0 — or white — everywhere.
   """
   @spec render_line(map(), 0..143, non_neg_integer()) :: {line(), non_neg_integer()}
   def render_line(ram, ly, window_line) do
@@ -91,15 +91,15 @@ defmodule Atomboy.PPU do
     end
   end
 
-  # ── Le mode couleur ─────────────────────────────────────────────────────────
+  # ── Colour mode ─────────────────────────────────────────────────────────────
   #
-  # Les attributs de chaque tuile vivent en banque 1 de VRAM (clés +0x10000) :
-  # palette 0-7, miroirs, banque du motif, priorité. Les couleurs sortent de
-  # la RAM de palettes (0x20000 fond, 0x20040 sprites) : 8 palettes × 4
-  # couleurs × RGB555. La priorité est celle du GBC : LCDC bit 0 à zéro =
-  # les sprites gagnent toujours ; sinon l'attribut de tuile ou le drapeau
-  # « derrière » du sprite cèdent aux couleurs 1-3 du fond. Les sprites se
-  # départagent à l'indice OAM seul — pas au X, contrairement à la DMG.
+  # Each tile's attributes live in VRAM bank 1 (keys +0x10000): palette 0-7,
+  # mirroring, pattern bank, priority. The colours come out of the palette
+  # RAM (0x20000 background, 0x20040 sprites): 8 palettes × 4 colours ×
+  # RGB555. Priority is the GBC's: LCDC bit 0 at zero = sprites always win;
+  # otherwise the tile attribute or the sprite's "behind" flag yields to
+  # background colours 1-3. Sprites break ties on the OAM index alone — not
+  # on X, unlike the DMG.
 
   defp render_line_cgb(ram, ly, window_line) do
     lcdc = Map.get(ram, 0xFF40, 0x91)
@@ -160,7 +160,7 @@ defmodule Atomboy.PPU do
     {List.to_tuple(pixels), if(window?, do: window_line + 1, else: window_line)}
   end
 
-  # Un pixel de fond : {couleur brute 0-3, priorité de tuile, RGB555}.
+  # One background pixel: {raw colour 0-3, tile priority, RGB555}.
   defp cgb_tile_pixel(ram, map_addr, tile_line, pixel, signed?) do
     tile = Map.get(ram, map_addr, 0)
     attr = Map.get(ram, map_addr + 0x10000, 0)
@@ -183,8 +183,8 @@ defmodule Atomboy.PPU do
     {color, band(attr, 0x80) != 0, cgb_color(ram, 0x20000, band(attr, 0x07), color)}
   end
 
-  # La couleur RGB555 de la palette n : deux octets little-endian dans la
-  # RAM de palettes.
+  # The RGB555 colour of palette n: two little-endian bytes in the palette
+  # RAM.
   defp cgb_color(ram, base, palette, color) do
     at = base + palette * 8 + color * 2
     Map.get(ram, at, 0xFF) ||| bsl(Map.get(ram, at + 1, 0x7F), 8)
@@ -200,8 +200,8 @@ defmodule Atomboy.PPU do
           ly >= y and ly < y + height,
           do: {index, y, base}
 
-    # Dix par ligne, priorité au plus petit indice OAM — rendu du moins
-    # prioritaire au plus prioritaire, qui écrase.
+    # Ten per line, priority to the smallest OAM index — rendered from the
+    # lowest priority to the highest, which overwrites.
     selected
     |> Enum.take(10)
     |> Enum.sort_by(fn {index, _y, _base} -> -index end)
@@ -246,7 +246,7 @@ defmodule Atomboy.PPU do
     end)
   end
 
-  @doc "Rend les 144 scanlines d'une frame."
+  @doc "Renders the 144 scanlines of a frame."
   @spec render_frame(map()) :: frame()
   def render_frame(ram) do
     {frame, _window_line} =
@@ -258,7 +258,7 @@ defmodule Atomboy.PPU do
     frame
   end
 
-  # ── Fond et fenêtre — couleurs brutes, avant palette ────────────────────────
+  # ── Background and window — raw colours, before the palette ─────────────────
 
   defp background_raw(ram, lcdc, ly, window_line) do
     if band(lcdc, 0x01) == 0 do
@@ -313,7 +313,7 @@ defmodule Atomboy.PPU do
 
   # ── Sprites ─────────────────────────────────────────────────────────────────
 
-  # La map x → {teinte, derrière?} des pixels de sprites de la scanline.
+  # The x → {shade, behind?} map of the scanline's sprite pixels.
   defp sprite_pixels(ram, lcdc, ly) do
     height = if band(lcdc, 0x04) == 0, do: 8, else: 16
 
@@ -324,9 +324,9 @@ defmodule Atomboy.PPU do
           ly >= y and ly < y + height,
           do: {index, y, base}
 
-    # Le matériel retient les dix premières entrées d'OAM de la ligne.
-    # Priorité d'affichage : X le plus petit gagne, OAM le plus bas départage —
-    # donc rendu du moins prioritaire au plus prioritaire, qui écrase.
+    # The hardware keeps the line's first ten OAM entries. Display priority:
+    # the smallest X wins, the lowest OAM breaks the tie — so rendered from
+    # the lowest priority to the highest, which overwrites.
     selected
     |> Enum.take(10)
     |> Enum.sort_by(fn {index, _y, base} -> {-Map.get(ram, base + 1, 0), -index} end)
@@ -342,7 +342,7 @@ defmodule Atomboy.PPU do
 
     row = ly - y
     row = if band(flags, 0x40) != 0, do: height - 1 - row, else: row
-    # En 8×16, le bit 0 de l'indice est ignoré : deux tuiles empilées.
+    # In 8×16, bit 0 of the index is ignored: two tiles stacked.
     tile = if height == 16, do: band(tile, 0xFE), else: tile
 
     tile_addr = 0x8000 + tile * 16 + row * 2
@@ -362,7 +362,7 @@ defmodule Atomboy.PPU do
         bit = if x_flip?, do: i, else: 7 - i
         color = bsl(band(bsr(high, bit), 1), 1) ||| band(bsr(low, bit), 1)
 
-        # La couleur 0 d'un sprite est transparente, quelle que soit la palette.
+        # A sprite's colour 0 is transparent, whatever the palette says.
         if color == 0 do
           acc
         else

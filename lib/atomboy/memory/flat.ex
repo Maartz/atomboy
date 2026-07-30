@@ -1,14 +1,14 @@
 defmodule Atomboy.Memory.Flat do
   @moduledoc """
-  Espace d'adressage 64 Ko creux, porté par une map. Backend de la phase 1.
+  A sparse 64 KB address space, carried by a map. The phase 1 backend.
 
-  Les adresses jamais écrites lisent 0. C'est exactement l'hypothèse des
-  vecteurs SingleStepTests, qui énumèrent chaque adresse touchée.
+  Addresses that were never written read 0. That is exactly the assumption the
+  SingleStepTests vectors make, since they enumerate every address touched.
 
-  Ce backend n'est **pas** destiné à faire tourner une ROM : une map veut dire
-  un hash par accès et de l'allocation à chaque écriture. Il existe pour que le
-  harnais de test CPU n'ait aucune dépendance sur le modèle mémoire définitif,
-  qui lui est segmenté (ROM en binary, régions mutables à part).
+  This backend is **not** meant to run a ROM: a map means one hash per access
+  and an allocation on every write. It exists so that the CPU test harness has
+  no dependency at all on the definitive memory model, which is segmented (ROM
+  as a binary, mutable regions apart).
   """
 
   @behaviour Atomboy.Memory
@@ -18,7 +18,7 @@ defmodule Atomboy.Memory.Flat do
   @type t :: %{Atomboy.Memory.addr() => Atomboy.Memory.value()}
 
   @doc """
-  Construit une mémoire à partir d'une liste de paires `{adresse, octet}`.
+  Builds a memory out of a list of `{address, byte}` pairs.
   """
   @spec new(Enumerable.t()) :: t()
   def new(pairs \\ []), do: Map.new(pairs)
