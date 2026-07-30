@@ -67,7 +67,7 @@ if $app; then
   # « atomboy » écraserait la coquille « Atomboy » (vécu).
   cp burrito_out/atomboy_macos_arm "$contenu/MacOS/atomboy-moteur"
   swiftc -O -parse-as-library -target arm64-apple-macos14.0 -o "$contenu/MacOS/Atomboy" rel/macos/Atomboy.swift 2> /dev/null
-  python3 rel/macos/icone.py "$contenu/Resources/Atomboy.icns"
+  python3 rel/macos/icon.py "$contenu/Resources/Atomboy.icns"
   sed "s/VERSION_ATOMBOY/$version/g" rel/macos/Info.plist > "$contenu/Info.plist"
   xattr -cr /tmp/Atomboy.app
   codesign --force --deep --sign - /tmp/Atomboy.app 2> /dev/null
