@@ -1,34 +1,33 @@
 defmodule Atomboy.CPU.State do
   @moduledoc """
-  L'état du CPU SM83.
+  The SM83 CPU's state.
 
-  Les huit registres 8 bits, les deux registres 16 bits, et l'état
-  d'interruption — en un seul terme nommé.
+  The eight 8-bit registers, the two 16-bit registers, and the interrupt state —
+  in a single named term.
 
-  ## Registres
+  ## Registers
 
-  `a` et `f` (accumulateur et drapeaux), `b`, `c`, `d`, `e`, `h`, `l`, plus `sp`
-  (pointeur de pile) et `pc` (compteur ordinal). Le SM83 les apparie en 16 bits
-  — `AF`, `BC`, `DE`, `HL` — mais l'accès 8 bits est de loin le plus fréquent,
-  donc ils sont stockés séparés et recomposés au besoin.
+  `a` and `f` (accumulator and flags), `b`, `c`, `d`, `e`, `h`, `l`, plus `sp`
+  (stack pointer) and `pc` (program counter). The SM83 pairs them into 16-bit
+  registers — `AF`, `BC`, `DE`, `HL` — but 8-bit access is by far the most
+  frequent, so they are stored separately and recombined when needed.
 
-  ## Interruptions
+  ## Interrupts
 
-  `ime` est le drapeau maître d'autorisation ; `ie` est en réalité le registre
-  mémoire 0xFFFF, dupliqué ici parce que les vecteurs SingleStepTests le
-  fournissent à part. `halted` retient l'effet de `HALT`.
+  `ime` is the master enable flag; `ie` is really the memory register 0xFFFF,
+  duplicated here because the SingleStepTests vectors supply it separately.
+  `halted` holds the effect of `HALT`.
 
-  ## Le registre F
+  ## The F register
 
-  Les drapeaux sont conservés **compactés** dans l'octet `f` — Z en bit 7, N en
-  6, H en 5, C en 4, les quatre bits de poids faible toujours à zéro. C'est la
-  représentation du matériel, celle des vecteurs de test, et celle qu'exigent
-  `PUSH AF` / `POP AF`.
+  The flags are kept **packed** in the `f` byte — Z in bit 7, N in 6, H in 5, C
+  in 4, the four low bits always zero. That is the hardware's representation, the
+  test vectors' representation, and the one `PUSH AF` / `POP AF` demand.
 
-  Les garder dépliés en quatre booléens irait plus vite sur le code
-  arithmétique, mais imposerait un recompactage à chaque accès à `AF` et un
-  écart permanent entre l'état interne et ce que les vecteurs affirment. À
-  revoir si le profil le réclame ; pas avant.
+  Keeping them unpacked as four booleans would be faster on arithmetic code, but
+  would force a repack on every access to `AF` and a permanent gap between the
+  internal state and what the vectors assert. Worth revisiting if the profile
+  calls for it; not before.
   """
 
   @type t :: %__MODULE__{
@@ -68,12 +67,12 @@ defmodule Atomboy.CPU.State do
   @flags [z: 0x80, n: 0x40, h: 0x20, c: 0x10]
 
   @doc """
-  Les drapeaux positionnés, sous forme de liste d'atomes.
+  The flags that are set, as a list of atoms.
 
       iex> Atomboy.CPU.State.flags(%Atomboy.CPU.State{f: 0xB0})
       [:z, :h, :c]
 
-  Pour l'inspection et les messages d'erreur : `f: 176` n'apprend rien.
+  For inspection and error messages: `f: 176` teaches you nothing.
   """
   @spec flags(t()) :: [:z | :n | :h | :c]
   def flags(%__MODULE__{f: f}) do
@@ -81,7 +80,7 @@ defmodule Atomboy.CPU.State do
   end
 
   @doc """
-  Les drapeaux épelés, un caractère par bit dans l'ordre Z N H C.
+  The flags spelled out, one character per bit in Z N H C order.
 
       iex> Atomboy.CPU.State.flag_string(%Atomboy.CPU.State{f: 0xB0})
       "Z-HC"
@@ -98,8 +97,7 @@ defmodule Atomboy.CPU.State do
   end
 
   @doc """
-  La paire 16 bits `HL`, l'adresse indirecte la plus utilisée du jeu
-  d'instructions.
+  The 16-bit pair `HL`, the most used indirect address in the instruction set.
   """
   @spec hl(t()) :: 0..0xFFFF
   def hl(%__MODULE__{h: h, l: l}), do: bsl(h, 8) ||| l

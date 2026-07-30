@@ -1,22 +1,21 @@
 defmodule Atomboy.SingleStep do
   @moduledoc """
-  Rejoue les vecteurs SingleStepTests/sm83 contre `Atomboy.CPU`.
+  Replays the SingleStepTests/sm83 vectors against `Atomboy.CPU`.
 
-  Chaque vecteur donne un état machine complet avant et après **une** seule
-  instruction : les dix registres, IME, IE, et la liste des adresses mémoire
-  touchées avec leur contenu. Le harnais reconstruit cet état, exécute un
-  `step/3`, et compare champ par champ.
+  Each vector gives a complete machine state before and after **one** single
+  instruction: the ten registers, IME, IE, and the list of memory addresses
+  touched along with their contents. The harness rebuilds that state, runs one
+  `step/3`, and compares field by field.
 
-  ## Ce qui est vérifié, et ce qui ne l'est pas
+  ## What is checked, and what is not
 
-  Vérifiés : les registres, les drapeaux, IME, la mémoire finale sur chaque
-  adresse listée, et le **nombre** de cycles.
+  Checked: the registers, the flags, IME, the final memory at each listed address,
+  and the **number** of cycles.
 
-  Pas vérifié : le journal d'accès bus (`cycles`), qui indique pour chaque
-  M-cycle l'adresse touchée et le sens. C'est de la précision cycle-exacte, un
-  non-objectif déclaré du projet — mais la donnée est là, et l'assertion tiendra
-  en quelques lignes le jour où le PPU exigera de savoir *quand* dans
-  l'instruction un accès tombe.
+  Not checked: the bus access log (`cycles`), which gives, for each M-cycle, the
+  address touched and the direction. That is cycle-accuracy, a declared non-goal of
+  the project — but the data is there, and the assertion will fit in a few lines the
+  day the PPU demands to know *when* within the instruction an access falls.
   """
 
   import Bitwise
@@ -25,22 +24,22 @@ defmodule Atomboy.SingleStep do
   alias Atomboy.Memory.Flat
   alias Mix.Tasks.Atomboy.Corpus
 
-  @typedoc "Un échec : le vecteur fautif et les champs qui divergent."
+  @typedoc "A failure: the offending vector and the fields that diverge."
   @type failure :: %{name: String.t(), diffs: [{atom(), term(), term()}]}
 
-  @doc "Le corpus est-il installé ?"
+  @doc "Is the corpus installed?"
   @spec corpus?() :: boolean()
   defdelegate corpus?(), to: Corpus, as: :available?
 
-  @doc "Les opcodes dont le corpus fournit un fichier."
+  @doc "The opcodes for which the corpus supplies a file."
   @spec available_opcodes() :: MapSet.t({Atomboy.CPU.prefix(), 0..0xFF})
   defdelegate available_opcodes(), to: Corpus, as: :opcodes
 
   @doc """
-  Rejoue tous les vecteurs d'un opcode.
+  Replays every vector of one opcode.
 
-  Renvoie `{nombre_de_vecteurs, echecs}`. Un opcode juste donne une liste
-  d'échecs vide.
+  Returns `{vector_count, failures}`. A correct opcode yields an empty list of
+  failures.
   """
   @spec run(Atomboy.CPU.prefix(), 0..0xFF) :: {non_neg_integer(), [failure()]}
   def run(prefix, opcode) do
@@ -48,7 +47,7 @@ defmodule Atomboy.SingleStep do
     {length(vectors), Enum.flat_map(vectors, &check/1)}
   end
 
-  @doc "Charge et décode le fichier de vecteurs d'un opcode."
+  @doc "Loads and decodes an opcode's vector file."
   @spec load(Atomboy.CPU.prefix(), 0..0xFF) :: [map()]
   def load(prefix, opcode) do
     Corpus.dir()
@@ -58,20 +57,19 @@ defmodule Atomboy.SingleStep do
   end
 
   @doc """
-  Le nom de fichier d'un opcode. Les opcodes préfixés portent une espace :
-  `cb 40.json`.
+  An opcode's file name. Prefixed opcodes carry a space: `cb 40.json`.
   """
   @spec file_name(Atomboy.CPU.prefix(), 0..0xFF) :: String.t()
   def file_name(nil, opcode), do: hex(opcode)
   def file_name(:cb, opcode), do: "cb " <> hex(opcode)
 
   @doc """
-  Met en forme un échec pour le rapport de test.
+  Formats a failure for the test report.
 
-  Le message vise l'usage réel : on regarde ça après avoir écrit une famille
-  d'opcodes, avec des dizaines d'échecs corrélés. D'où le comptage global, le
-  détail sur un seul vecteur, et les drapeaux épelés — `f: 176 au lieu de 144`
-  ne dit rien, `Z-HC au lieu de Z-H-` désigne le bit.
+  The message aims at real use: you look at this after writing a family of opcodes,
+  with dozens of correlated failures. Hence the overall count, the detail on a
+  single vector, and the flags spelled out — `f: 176 instead of 144` says nothing,
+  `Z-HC instead of Z-H-` names the bit.
   """
   @spec format_failures(Atomboy.CPU.prefix(), 0..0xFF, non_neg_integer(), [failure()]) ::
           String.t()
@@ -80,18 +78,18 @@ defmodule Atomboy.SingleStep do
 
     diffs =
       Enum.map_join(first.diffs, "\n", fn {field, expected, got} ->
-        "      #{field}: attendu #{show(field, expected)}, obtenu #{show(field, got)}"
+        "      #{field}: expected #{show(field, expected)}, got #{show(field, got)}"
       end)
 
     """
-    opcode #{file_name(prefix, opcode)} : #{length(failures)}/#{total} vecteurs en échec
+    opcode #{file_name(prefix, opcode)}: #{length(failures)}/#{total} vectors failing
 
-      premier échec — vecteur "#{first.name}"
+      first failure — vector "#{first.name}"
     #{diffs}
     """
   end
 
-  # ── Interne ─────────────────────────────────────────────────────────────────
+  # ── Internals ───────────────────────────────────────────────────────────────
 
   defp check(%{"initial" => initial, "final" => final, "cycles" => cycles} = vector) do
     mem = Flat.new(for [addr, value] <- initial["ram"], do: {addr, value})
@@ -126,8 +124,8 @@ defmodule Atomboy.SingleStep do
 
     register_diffs =
       for {field, actual} <- got,
-          # `ie` et parfois `ime` sont absents de l'état final de certains
-          # vecteurs : ce qui n'est pas affirmé n'est pas comparé.
+          # `ie`, and sometimes `ime`, are absent from some vectors' final state:
+          # what is not asserted is not compared.
           Map.has_key?(final, Atom.to_string(field)),
           expected = final[Atom.to_string(field)],
           expected != actual,
@@ -139,7 +137,7 @@ defmodule Atomboy.SingleStep do
           actual != expected,
           do: {:"mem[#{hex16(addr)}]", expected, actual}
 
-    # Un M-cycle du bus vaut 4 T-cycles.
+    # One bus M-cycle is worth 4 T-cycles.
     expected_cycles = length(cycles) * 4
 
     cycle_diffs =
@@ -154,8 +152,8 @@ defmodule Atomboy.SingleStep do
   defp hex16(value),
     do: "0x" <> (value |> Integer.to_string(16) |> String.upcase() |> String.pad_leading(4, "0"))
 
-  # Le registre F mérite un traitement à part : c'est le champ qui casse le plus
-  # souvent, et sa valeur numérique n'apprend rien.
+  # The F register deserves separate treatment: it is the field that breaks most
+  # often, and its numeric value teaches you nothing.
   defp show(:f, value) do
     flags =
       [{0x80, "Z"}, {0x40, "N"}, {0x20, "H"}, {0x10, "C"}]

@@ -1,12 +1,11 @@
 defmodule Atomboy.CPU.TableTest do
   @moduledoc """
-  Cohérence interne de la table d'instructions.
+  Internal consistency of the instruction table.
 
-  Ces invariants ne testent pas l'émulation — les vecteurs SM83 s'en chargent —
-  mais des fautes que les vecteurs ne peuvent pas voir. Un opcode décrit deux
-  fois donne une clause morte que le compilateur signale au mieux par un
-  avertissement noyé dans la sortie ; les vecteurs, eux, passeraient sans rien
-  dire puisque la première clause gagne.
+  These invariants do not test the emulation — the SM83 vectors take care of that
+  — but the kinds of mistake the vectors cannot see. An opcode described twice
+  yields a dead clause, which the compiler reports at best as a warning drowned in
+  the output; the vectors would pass without a word, since the first clause wins.
   """
 
   use ExUnit.Case, async: true
@@ -14,7 +13,7 @@ defmodule Atomboy.CPU.TableTest do
   alias Atomboy.CPU.Insn
   alias Atomboy.CPU.Table
 
-  test "aucun opcode n'est décrit deux fois" do
+  test "no opcode is described twice" do
     duplicates =
       Table.all()
       |> Enum.frequencies_by(&{&1.prefix, &1.opcode})
@@ -23,40 +22,40 @@ defmodule Atomboy.CPU.TableTest do
     assert duplicates == []
   end
 
-  test "les cycles sont des M-cycles entiers" do
-    # Le SM83 n'a pas d'instruction plus courte qu'un M-cycle, et le bus ne se
-    # divise pas : toute durée est un multiple de 4 T-cycles.
+  test "cycle counts are whole M-cycles" do
+    # The SM83 has no instruction shorter than an M-cycle, and the bus does not
+    # subdivide: every duration is a multiple of 4 T-cycles.
     bad =
       Enum.reject(Table.all(), fn insn ->
         insn.cycles > 0 and rem(insn.cycles, 4) == 0
       end)
 
-    assert bad == [], "cycles invalides : #{inspect(Enum.map(bad, &{&1.opcode, &1.cycles}))}"
+    assert bad == [], "invalid cycles: #{inspect(Enum.map(bad, &{&1.opcode, &1.cycles}))}"
   end
 
-  test "les opcodes tiennent sur un octet" do
+  test "opcodes fit in one byte" do
     assert Enum.all?(Table.all(), &(&1.opcode in 0..0xFF))
   end
 
-  test "0x76 est HALT, pas LD (HL), (HL)" do
-    # « LD (HL), (HL) » tomberait naturellement ici si la compréhension du bloc
-    # LD oubliait son exclusion — le doublon serait attrapé par le test
-    # d'unicité, mais celui-ci nomme la cause.
+  test "0x76 is HALT, not LD (HL), (HL)" do
+    # "LD (HL), (HL)" would land here naturally if the LD block's comprehension
+    # forgot its exclusion — the duplicate would be caught by the uniqueness test,
+    # but this one names the cause.
     assert [%Insn{mnemonic: :halt}] = Enum.filter(Table.base(), &(&1.opcode == 0x76))
   end
 
-  test "chaque instruction a un nom lisible" do
+  test "every instruction has a readable name" do
     for insn <- Table.all() do
       assert is_binary(Insn.label(insn))
       refute Insn.label(insn) == ""
     end
   end
 
-  test "la table et le décodeur décrivent le même ensemble" do
+  test "the table and the decoder describe the same set" do
     described = MapSet.new(Table.all(), &{&1.prefix, &1.opcode})
 
-    # Le dispatcher 0xCB est implémenté sans figurer dans la table : c'est un
-    # préfixe, pas une instruction — il n'a ni cycles ni sémantique propres.
+    # The 0xCB dispatcher is implemented without appearing in the table: it is a
+    # prefix, not an instruction — it has neither cycles nor semantics of its own.
     compiled =
       Atomboy.CPU.implemented()
       |> MapSet.new()

@@ -1,29 +1,27 @@
 defmodule Atomboy.CPU.CartLoop do
   @moduledoc """
-  La boucle rapide en sémantique cartouche : la région ROM est en lecture
-  seule.
+  The fast loop with cartridge semantics: the ROM region is read-only.
 
-  Même squelette et mêmes clauses générées que `Atomboy.CPU.Loop` — seuls les
-  accès mémoire diffèrent :
+  Same skeleton and same generated clauses as `Atomboy.CPU.Loop` — only the
+  memory accesses differ:
 
-    * **Écrire sous 0x8000 ne fait rien.** Sur une vraie cartouche, ces
-      écritures parlent au contrôleur de banque (MBC) ; sur une ROM de 32 Ko
-      sans banking, elles se perdent. Dans le modèle plat de `Loop`, elles
-      masqueraient la ROM — blargg écrit l'activation de sa RAM cartouche à
-      0x0000 et son numéro de banque à 0x2000, et exécuterait ensuite ces
-      octets-là.
-    * **Lire sous 0x8000 va droit dans la binary**, sans consulter la map des
-      écritures : le fetch en région ROM — l'écrasante majorité — économise le
-      test de map. C'est le découpage par région promis depuis le premier test
-      d'équivalence.
+    * **Writing below 0x8000 does nothing.** On a real cartridge, those writes
+      talk to the bank controller (MBC); on a 32 KB ROM without banking, they are
+      lost. In `Loop`'s flat model they would mask the ROM — blargg writes its
+      cartridge RAM enable at 0x0000 and its bank number at 0x2000, and would
+      then go on to execute those very bytes.
+    * **Reading below 0x8000 goes straight into the binary**, without consulting
+      the writes map: fetching in the ROM region — the overwhelming majority —
+      skips the map lookup. This is the split by region promised ever since the
+      first equivalence test.
 
-  `Loop` garde sa sémantique plate : c'est elle que les vecteurs SM83 et le
-  test d'équivalence exigent — ils écrivent et exécutent partout. Les deux
-  modules sortent du même générateur ; ils ne divergent que par quatre lignes
-  de helpers mémoire.
+  `Loop` keeps its flat semantics: that is what the SM83 vectors and the
+  equivalence test require — they write and execute everywhere. Both modules come
+  out of the same generator; they diverge by four lines of memory helpers and
+  nothing else.
 
-  Le jour du vrai MMU (banking MBC, VRAM en resource NIF), c'est ce module qui
-  grandit — région par région, toujours dans les helpers, jamais dans les
+  The day the real MMU lands (MBC banking, VRAM as a NIF resource), this is the
+  module that grows — region by region, always in the helpers, never in the
   clauses.
   """
 
@@ -35,15 +33,15 @@ defmodule Atomboy.CPU.CartLoop do
 
   require Gen
 
-  @typedoc "La ROM : 64 Ko, les 32 premiers adressables en exécution directe."
+  @typedoc "The ROM: 64 KB, the first 32 addressable for direct execution."
   @type rom :: binary()
 
-  @typedoc "Les écritures, au-dessus de 0x8000 seulement."
+  @typedoc "The writes, above 0x8000 only."
   @type ram :: %{optional(0x8000..0xFFFF) => 0..0xFF}
 
   @doc """
-  Exécute depuis `state` jusqu'à `budget` T-cycles. Renvoie
-  `{state, ram, cycles_consommés}`.
+  Runs from `state` for up to `budget` T-cycles. Returns
+  `{state, ram, cycles_consumed}`.
   """
   @spec run(State.t(), rom(), ram(), pos_integer()) :: {State.t(), ram(), non_neg_integer()}
   def run(%State{} = st, rom, ram, budget)
@@ -87,7 +85,7 @@ defmodule Atomboy.CPU.CartLoop do
      }, ram, cycles}
   end
 
-  # ── Fetch — identique à Loop ────────────────────────────────────────────────
+  # ── Fetch — identical to Loop ───────────────────────────────────────────────
 
   defp fetch(_rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending)
        when cycles >= budget do
@@ -98,12 +96,12 @@ defmodule Atomboy.CPU.CartLoop do
     fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, 1, halted, 0)
   end
 
-  # IF et IE se lisent ici dans la map seule, défaut 0 : le matériel démarre
-  # ces registres à zéro — pas au remplissage 0xFF de la ROM étendue, qui
-  # déclencherait des interruptions fantômes dès le premier EI.
-  # HALT : le processeur dort par pas de 4 T tant que rien n'est en attente —
-  # même granularité que le tick de l'oracle, l'équivalence en dépend. Le
-  # réveil est gratuit, le service éventuel se joue à la passe suivante.
+  # IF and IE are read from the map alone here, defaulting to 0: the hardware
+  # starts these registers at zero — not at the 0xFF padding of an extended ROM,
+  # which would fire phantom interrupts on the very first EI.
+  # HALT: the processor sleeps in 4 T steps as long as nothing is pending — the
+  # same granularity as the oracle's tick, and the equivalence depends on it.
+  # Waking up is free; any servicing happens on the next pass.
   defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, true, pending) do
     if (Map.get(ram, 0xFF0F, 0) &&& Map.get(ram, 0xFFFF, 0) &&& 0x1F) == 0 do
       fetch(rom, ram, budget, cycles + 4, a, f, b, c, d, e, h, l, sp, pc, ime, true, pending)
@@ -112,8 +110,8 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # IME actif : une source en attente détourne l'exécution — IME retombe, le
-  # bit d'IF s'efface, PC part sur la pile, le vecteur prend la main. 20 T.
+  # IME set: a pending source diverts execution — IME drops, the IF bit clears,
+  # PC goes onto the stack, the vector takes over. 20 T.
   defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, 1, halted, pending) do
     irq = Map.get(ram, 0xFF0F, 0) &&& Map.get(ram, 0xFFFF, 0) &&& 0x1F
 
@@ -156,11 +154,29 @@ defmodule Atomboy.CPU.CartLoop do
     dispatch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending)
   end
 
-  # Aucun jeu n'exécute la VRAM : un PC qui y entre a déraillé en amont
-  # (table de sauts hors bornes, pile écrasée). L'opcode invalide qui
-  # surgirait des décombres arrive trop tard pour comprendre — arrêter à
-  # l'entrée, photographier registres et haut de pile.
-  defp dispatch(rom, ram, _budget, _cycles, a, f, b, c, d, e, h, l, sp, pc, _ime, _halted, _pending)
+  # No game executes VRAM: a PC that enters it derailed further upstream (a jump
+  # table out of bounds, a smashed stack). The invalid opcode that would surface
+  # from the wreckage comes too late to explain anything — stop at the entry,
+  # photograph the registers and the top of the stack.
+  defp dispatch(
+         rom,
+         ram,
+         _budget,
+         _cycles,
+         a,
+         f,
+         b,
+         c,
+         d,
+         e,
+         h,
+         l,
+         sp,
+         pc,
+         _ime,
+         _halted,
+         _pending
+       )
        when pc >= 0x8000 and pc < 0xA000 do
     stack =
       for i <- 0..7 do
@@ -224,11 +240,11 @@ defmodule Atomboy.CPU.CartLoop do
   defp irq_index(0x08), do: 3
   defp irq_index(0x10), do: 4
 
-  # ── Le dispatch ─────────────────────────────────────────────────────────────
+  # ── The dispatch ────────────────────────────────────────────────────────────
   #
-  # Un arbre à deux étages émis par Gen — voir son commentaire sur le
-  # select_val linéaire du JIT. 0xCB fetch le second octet et redispatche vers
-  # exec_cb, même arbre sur la table étendue.
+  # A two-level tree emitted by Gen — see its comment on the JIT's linear
+  # select_val. 0xCB fetches the second byte and dispatches again into exec_cb,
+  # the same tree over the extended table.
 
   defp exec(unquote_splicing(Gen.head_args(:loop))) do
     unquote(
@@ -244,8 +260,8 @@ defmodule Atomboy.CPU.CartLoop do
     unquote(Gen.loop_dispatch(Table.extended(), [], Gen.unimplemented_at(:unimplemented_cb)))
   end
 
-  # PC a déjà dépassé l'opcode d'un cran ; la banque vient de la map — le
-  # rapport de crash montre l'adresse réelle et la banque ROM en jeu.
+  # PC has already moved one step past the opcode; the bank comes from the map —
+  # the crash report shows the real address and the ROM bank in play.
   defp unimplemented_base(opcode, pc, ram) do
     raise Atomboy.CPU.Unimplemented,
       opcode: opcode,
@@ -262,24 +278,24 @@ defmodule Atomboy.CPU.CartLoop do
       bank: div(Map.get(ram, :rom_bank_base, 0x4000), 0x4000)
   end
 
-  # ── Mémoire — la seule différence avec Loop ─────────────────────────────────
+  # ── Memory — the only difference from Loop ──────────────────────────────────
 
   @compile {:inline, mem_read: 3, ram_write: 3}
 
-  # La région ROM lit droit dans la binary — pas de map sur le chemin du
-  # fetch. La banque 0 est fixe ; la fenêtre 0x4000-0x7FFF regarde la banque
-  # choisie via le MBC1, dont la base précalculée vit dans la map.
+  # The ROM region reads straight from the binary — no map on the fetch path.
+  # Bank 0 is fixed; the 0x4000-0x7FFF window looks at whichever bank the MBC1
+  # selected, whose precomputed base lives in the map.
   defp mem_read(rom, _ram, addr) when addr < 0x4000, do: :binary.at(rom, addr)
 
   defp mem_read(rom, ram, addr) when addr < 0x8000 do
     :binary.at(rom, Map.get(ram, :rom_bank_base, 0x4000) + addr - 0x4000)
   end
 
-  # La RAM cartouche est derrière le verrou d'activation du MBC : désactivée,
-  # elle lit 0xFF — le bus ouvert. Ce n'est pas du zèle : la détection SRAM de
-  # blargg écrit puis relit *verrou fermé*, et conclut « pas de vraie SRAM » si
-  # la valeur revient. Sans ce comportement, ses tests se rabattent sur la
-  # sortie série et le protocole mémoire reste muet.
+  # Cartridge RAM sits behind the MBC's enable latch: disabled, it reads 0xFF —
+  # the open bus. This is not over-engineering: blargg's SRAM detection writes
+  # then reads back *with the latch closed*, and concludes "no real SRAM" if the
+  # value comes back. Without this behaviour its tests fall back to serial output
+  # and the memory protocol stays silent.
   defp mem_read(_rom, ram, addr) when addr >= 0xA000 and addr < 0xC000 do
     case ram do
       %{cram_enabled: true} ->
@@ -293,36 +309,35 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # La VRAM, banquée sur GBC (VBK, 0xFF4F) : la banque 1 vit à
-  # addr + 0x10000 — la banque 0 garde ses clés nues, le PPU DMG et les
-  # frames en or ne voient rien changer.
+  # VRAM, banked on GBC (VBK, 0xFF4F): bank 1 lives at addr + 0x10000 — bank 0
+  # keeps its bare keys, so the DMG PPU and the golden frames see nothing change.
   defp mem_read(_rom, ram, addr) when addr >= 0x8000 and addr < 0xA000 do
     Map.get(ram, addr + Map.get(ram, :vram_base, 0), 0xFF)
   end
 
-  # La WRAM haute, banquée sur GBC (SVBK, 0xFF70) : banques 2-7 à
-  # addr + (banque-1) × 0x10000 — la banque 1, par défaut, clés nues.
+  # High WRAM, banked on GBC (SVBK, 0xFF70): banks 2-7 at
+  # addr + (bank-1) × 0x10000 — bank 1, the default, keeps bare keys.
   defp mem_read(_rom, ram, addr) when addr >= 0xD000 and addr < 0xE000 do
     Map.get(ram, addr + Map.get(ram, :wram_base, 0), 0xFF)
   end
 
-  # L'écho de la WRAM : sur le bus réel, 0xE000-0xFDFF recâble les lignes
-  # d'adresse vers 0xC000-0xDDFF. Pokémon lit réellement par ce miroir —
-  # sans lui, une table de sauts se lit en 0xFF et le PC part dans des
-  # données (opcode illégal E3, neuf minutes après le lancement). Récursif :
-  # le miroir de la WRAM haute traverse la banque choisie.
+  # The WRAM echo: on the real bus, 0xE000-0xFDFF rewires the address lines to
+  # 0xC000-0xDDFF. Pokémon genuinely reads through this mirror — without it, a
+  # jump table reads as 0xFF and PC wanders off into data (illegal opcode E3,
+  # nine minutes after launch). Recursive: the high WRAM mirror goes through
+  # whichever bank is selected.
   defp mem_read(rom, ram, addr) when addr >= 0xE000 and addr < 0xFE00 do
     mem_read(rom, ram, addr - 0x2000)
   end
 
-  # HDMA5 : pendant un HDMA, les blocs restants moins un ; sinon la valeur
-  # rangée (0xFF une fois fini).
+  # HDMA5: during an HDMA, the remaining blocks minus one; otherwise the stored
+  # value (0xFF once finished).
   defp mem_read(_rom, ram, 0xFF55) when :erlang.is_map_key(:hdma, ram) do
     {_src, _dst, blocks} = Map.get(ram, :hdma)
     blocks - 1 &&& 0x7F
   end
 
-  # Relire BCPD/OCPD rend l'octet de palette pointé par l'index courant.
+  # Reading BCPD/OCPD back yields the palette byte the current index points at.
   defp mem_read(_rom, ram, 0xFF69) do
     Map.get(ram, 0x20000 + (Map.get(ram, 0xFF68, 0) &&& 0x3F), 0xFF)
   end
@@ -331,9 +346,9 @@ defmodule Atomboy.CPU.CartLoop do
     Map.get(ram, 0x20040 + (Map.get(ram, 0xFF6A, 0) &&& 0x3F), 0xFF)
   end
 
-  # Au-dessus de la cartouche, une adresse jamais écrite lit 0xFF — le bus
-  # ouvert. Plus de repli sur la binary : avec une ROM à banques, l'octet
-  # 0x8000 de la binary est du contenu de banque 2, pas de la VRAM.
+  # Above the cartridge, an address never written reads 0xFF — the open bus. No
+  # more falling back to the binary: with a banked ROM, the binary's byte at
+  # 0x8000 is bank 2 content, not VRAM.
   defp mem_read(_rom, ram, addr) do
     case ram do
       %{^addr => value} -> value
@@ -341,28 +356,28 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # 0x0000-0x1FFF : le registre d'activation de la RAM cartouche (0x0A active).
-  # L'état vit dans la map des écritures sous une clé hors adresse — le seul
-  # état du MBC, aucune raison d'élargir la boucle pour lui.
+  # 0x0000-0x1FFF: the cartridge RAM enable register (0x0A enables). The state
+  # lives in the writes map under a non-address key — the MBC's only state, and
+  # no reason to widen the loop for it.
   defp ram_write(ram, addr, value) when addr < 0x2000 do
     Map.put(ram, :cram_enabled, (value &&& 0x0F) == 0x0A)
   end
 
-  # 0xFF00 : le joypad. Le jeu écrit les bits de sélection (5-4) et relit les
-  # lignes de touches dans le quartet bas — actives à zéro. Renvoyer l'octet
-  # écrit tel quel, quartet bas à zéro, simule quatre boutons enfoncés en
-  # permanence : Tetris y voit A+B+Start+Select, son combo de reset logiciel,
-  # et reboote pour l'éternité, écran blanc. Les vraies lignes vivent dans
-  # Atomboy.Joypad — le clavier les pose via Joypad.set/3 entre deux frames.
+  # 0xFF00: the joypad. The game writes the select bits (5-4) and reads the key
+  # lines back in the low nibble — active low. Returning the written byte as-is,
+  # low nibble at zero, simulates four buttons held down forever: Tetris sees
+  # A+B+Start+Select there, its soft-reset combo, and reboots for eternity, white
+  # screen. The real lines live in Atomboy.Joypad — the keyboard sets them through
+  # Joypad.set/3 between frames.
   defp ram_write(ram, 0xFF00, value) do
     Atomboy.Joypad.write(ram, value)
   end
 
-  # 0xFF46 : l'OAM DMA — la page source, copiée d'un bloc vers l'OAM. C'est
-  # ainsi que les jeux réels placent leurs sprites : un tampon en WRAM,
-  # recopié à chaque vblank. Sans cette interception, l'OAM reste vide et
-  # tous les personnages sont invisibles. Source en ROM non gérée — les jeux
-  # transfèrent depuis la WRAM, le tampon doit être modifiable.
+  # 0xFF46: the OAM DMA — the source page, copied wholesale into OAM. This is how
+  # real games place their sprites: a buffer in WRAM, copied over on every vblank.
+  # Without this interception, OAM stays empty and every character is invisible.
+  # A source in ROM is not handled — games transfer from WRAM, since the buffer
+  # has to be writable.
   defp ram_write(ram, 0xFF46, value) when value >= 0x80 do
     base = bsl(value, 8)
 
@@ -371,27 +386,27 @@ defmodule Atomboy.CPU.CartLoop do
     end)
   end
 
-  # Écrire DIV — n'importe quelle valeur — le remet à zéro, sous-compteur
-  # compris. C'est le comportement du matériel, et blargg s'en sert pour
-  # synchroniser ses mesures de timer.
+  # Writing DIV — any value at all — resets it to zero, sub-counter included.
+  # That is the hardware's behaviour, and blargg uses it to synchronise its timer
+  # measurements.
   defp ram_write(ram, 0xFF04, _value) do
     ram |> Map.put(0xFF04, 0) |> Map.put(:div_acc, 0)
   end
 
-  # 0xFF02, bit 7 : départ d'un transfert série. L'octet chargé dans 0xFF01
-  # part dans le tampon :serial, et le transfert se conclut dans l'instant —
-  # bit 7 retombé. C'est le canal de sortie des ROMs blargg de la génération
-  # cpu_instrs, qui ignorent le protocole mémoire de leurs cadettes ; la
-  # capture doit se faire à l'écriture, les caractères partent à quelques
-  # dizaines de cycles d'écart et un échantillonnage les perdrait.
-  # Câble link branché : le transfert reste en cours (bit 7 levé) et
-  # l'échange se joue à la scanline, où vit la socket (Atomboy.Link.line/1).
-  # Maître si l'horloge est interne (bit 0). Réécrire SC pendant qu'une
-  # horloge maître est déjà en vol relance le MÊME transfert — un seul
-  # octet sur le fil, comme le silicium : les boucles de sonde des jeux
-  # réécrivent SC chaque frame, et en faire des horloges neuves inondait
-  # le fil (deux horloges par réponse, la réponse décisive purgée en
-  # orpheline — vécu, à la trace).
+  # 0xFF02, bit 7: the start of a serial transfer. The byte loaded into 0xFF01
+  # goes into the :serial buffer, and the transfer concludes on the spot — bit 7
+  # back down. This is the output channel of the cpu_instrs-generation blargg
+  # ROMs, which know nothing of the memory protocol their younger siblings use;
+  # the capture has to happen on the write, because the characters leave a few
+  # dozen cycles apart and sampling would lose them.
+  # With a link cable plugged in: the transfer stays in flight (bit 7 up) and the
+  # exchange happens at the scanline, where the socket lives
+  # (Atomboy.Link.line/1). Master if the clock is internal (bit 0). Rewriting SC
+  # while a master clock is already in flight restarts the SAME transfer — one
+  # byte on the wire, just like the silicon: games' polling loops rewrite SC every
+  # frame, and turning those into fresh clocks flooded the wire (two clocks per
+  # reply, the decisive reply purged as an orphan — lived through it, trace in
+  # hand).
   defp ram_write(ram, 0xFF02, value)
        when (value &&& 0x80) != 0 and :erlang.is_map_key(:link, ram) do
     op =
@@ -414,11 +429,10 @@ defmodule Atomboy.CPU.CartLoop do
     |> Map.put(0xFF02, value &&& 0x7F)
   end
 
-  # NRx4, bit 7 : le déclenchement d'un canal son. L'événement doit être
-  # capturé à l'écriture — recharge de longueur, d'enveloppe, de sweep —
-  # l'APU le consomme à la frame suivante. La valeur reste lisible telle
-  # quelle, comme sur le matériel (le bit 7 n'y est jamais relisible, mais
-  # aucun jeu ne le relit).
+  # NRx4, bit 7: triggering a sound channel. The event has to be captured on the
+  # write — length, envelope and sweep reload — and the APU consumes it on the
+  # next frame. The value stays readable as written, as on the hardware (where bit
+  # 7 is never readable, but no game reads it back).
   defp ram_write(ram, addr, value)
        when addr in [0xFF14, 0xFF19, 0xFF1E, 0xFF23] and (value &&& 0x80) != 0 do
     channel = div(addr - 0xFF14, 5) + 1
@@ -428,12 +442,12 @@ defmodule Atomboy.CPU.CartLoop do
     |> Map.update(:apu_triggers, [channel], &[channel | &1])
   end
 
-  # 0x2000-0x3FFF : la sélection de banque ROM — cinq bits sur MBC1 (les
-  # 512 Ko de Link's Awakening), sept sur MBC3 (les 2 Mo de Pokémon). Zéro
-  # vaut un, masqués par le nombre de banques réelles. Sur MBC5 : huit bits
-  # bas à 0x2000-0x2FFF, neuvième bit à 0x3000-0x3FFF — et la banque zéro
-  # est permise, c'est le seul MBC qui l'autorise dans la fenêtre haute.
-  # La base précalculée évite toute arithmétique au fetch.
+  # 0x2000-0x3FFF: ROM bank selection — five bits on MBC1 (Link's Awakening's
+  # 512 KB), seven on MBC3 (Pokémon's 2 MB). Zero counts as one, both masked by
+  # the real bank count. On MBC5: the low eight bits at 0x2000-0x2FFF, the ninth
+  # bit at 0x3000-0x3FFF — and bank zero is allowed, the only MBC that permits it
+  # in the high window. The precomputed base keeps all arithmetic out of the
+  # fetch.
   defp ram_write(ram, addr, value) when addr < 0x4000 do
     banks = Map.get(ram, :rom_banks, 2)
 
@@ -458,9 +472,9 @@ defmodule Atomboy.CPU.CartLoop do
     Map.put(ram, :rom_bank_base, (bank &&& banks - 1) * 0x4000)
   end
 
-  # 0x4000-0x5FFF : sur MBC3, la banque de RAM cartouche (0-3) ou un
-  # registre RTC (0x08-0x0C) ; sur MBC5, la banque 0-15. Sur MBC1, bits
-  # hauts et mode — ignorés tant qu'aucune ROM MBC1 ne dépasse les 512 Ko.
+  # 0x4000-0x5FFF: on MBC3, the cartridge RAM bank (0-3) or an RTC register
+  # (0x08-0x0C); on MBC5, bank 0-15. On MBC1, the high bits and the mode —
+  # ignored as long as no MBC1 ROM goes past 512 KB.
   defp ram_write(ram, addr, value) when addr < 0x6000 do
     case Map.get(ram, :mbc) do
       :mbc3 ->
@@ -478,8 +492,8 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # 0x6000-0x7FFF : sur MBC3, écrire 0x01 fige l'horloge dans les registres
-  # latchés — les jeux écrivent 0 puis 1 et lisent une photo cohérente.
+  # 0x6000-0x7FFF: on MBC3, writing 0x01 freezes the clock into the latched
+  # registers — games write 0 then 1 and read a consistent snapshot.
   defp ram_write(ram, addr, value) when addr < 0x8000 do
     if Map.get(ram, :mbc) == :mbc3 and value == 0x01 do
       Map.put(ram, :rtc_latch, rtc_now())
@@ -488,11 +502,11 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # La RAM cartouche — celle que la pile garde en vie, par banque (clé
-  # addr + banque × 0x10000 : la banque 0 garde ses clés nues, les .sav et
-  # les jeux MBC1 ne voient rien changer). Chaque écriture la marque sale :
-  # Atomboy.Save sait alors qu'un .sav mérite d'être écrit. Les registres
-  # RTC ignorent l'écriture — l'horloge suit le temps réel du Mac.
+  # Cartridge RAM — the one the battery keeps alive, per bank (key
+  # addr + bank × 0x10000: bank 0 keeps its bare keys, so .sav files and MBC1
+  # games see nothing change). Every write marks it dirty: Atomboy.Save then knows
+  # a .sav is worth writing. The RTC registers ignore writes — the clock follows
+  # the Mac's real time.
   defp ram_write(ram, addr, value) when addr >= 0xA000 and addr < 0xC000 do
     case ram do
       %{cram_enabled: true} ->
@@ -506,7 +520,7 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # La VRAM et la WRAM haute, banquées en écriture comme en lecture.
+  # VRAM and high WRAM, banked on writes just as on reads.
   defp ram_write(ram, addr, value) when addr >= 0x8000 and addr < 0xA000 do
     Map.put(ram, addr + Map.get(ram, :vram_base, 0), value)
   end
@@ -515,16 +529,16 @@ defmodule Atomboy.CPU.CartLoop do
     Map.put(ram, addr + Map.get(ram, :wram_base, 0), value)
   end
 
-  # L'écho en écriture : même recâblage, récursif — la donnée vit à sa
-  # vraie adresse, banque comprise.
+  # The echo on writes: the same rewiring, recursive — the data lives at its real
+  # address, bank included.
   defp ram_write(ram, addr, value) when addr >= 0xE000 and addr < 0xFE00 do
     ram_write(ram, addr - 0x2000, value)
   end
 
-  # KEY1 (0xFF4D) : la double vitesse du GBC. Le matériel exige « préparer
-  # (bit 0) puis STOP » ; ici la bascule se joue dès l'écriture — STOP reste
-  # le nop qu'il est, le jeu relit le bit 7 et le trouve levé. Le budget de
-  # cycles par scanline suit :speed dans Screen. CGB seulement.
+  # KEY1 (0xFF4D): the GBC's double speed. The hardware demands "prepare (bit 0)
+  # then STOP"; here the switch happens on the write itself — STOP stays the nop it
+  # already is, and the game reads bit 7 back to find it up. The per-scanline cycle
+  # budget follows :speed in Screen. CGB only.
   defp ram_write(ram, 0xFF4D, value) when :erlang.is_map_key(:cgb, ram) do
     if (value &&& 0x01) != 0 do
       fast? = Map.get(ram, :speed, 1) == 2
@@ -537,10 +551,10 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # HDMA5 (0xFF55) : les DMA vidéo du GBC. Bit 7 à zéro = transfert général
-  # (GDMA), différé à la frontière de scanline — la source peut être en ROM
-  # banquée, que seul Screen a sous la main. Bit 7 levé = un bloc de seize
-  # octets par HBlank ; écrire bit 7 à zéro pendant un HDMA l'annule.
+  # HDMA5 (0xFF55): the GBC's video DMAs. Bit 7 clear = a general transfer (GDMA),
+  # deferred to the scanline boundary — the source may sit in banked ROM, which
+  # only Screen has to hand. Bit 7 set = one sixteen-byte block per HBlank; writing
+  # bit 7 clear during an HDMA cancels it.
   defp ram_write(ram, 0xFF55, value) when :erlang.is_map_key(:cgb, ram) do
     src =
       (bsl(Map.get(ram, 0xFF51, 0), 8) ||| Map.get(ram, 0xFF52, 0)) &&& 0xFFF0
@@ -553,11 +567,11 @@ defmodule Atomboy.CPU.CartLoop do
         Map.put(ram, :hdma, {src, dst, blocks})
 
       Map.has_key?(ram, :hdma) ->
-        {_s, _d, restant} = Map.get(ram, :hdma)
+        {_s, _d, remaining} = Map.get(ram, :hdma)
 
         ram
         |> Map.delete(:hdma)
-        |> Map.put(0xFF55, 0x80 ||| (restant - 1 &&& 0x7F))
+        |> Map.put(0xFF55, 0x80 ||| (remaining - 1 &&& 0x7F))
 
       true ->
         ram
@@ -566,14 +580,14 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  # VBK (0xFF4F) : la banque de VRAM du GBC — 0 en clés nues, 1 décalée.
+  # VBK (0xFF4F): the GBC's VRAM bank — 0 on bare keys, 1 shifted.
   defp ram_write(ram, 0xFF4F, value) do
     ram
     |> Map.put(0xFF4F, value &&& 1)
     |> Map.put(:vram_base, (value &&& 1) * 0x10000)
   end
 
-  # SVBK (0xFF70) : la banque de WRAM haute — 1 à 7, zéro vaut un.
+  # SVBK (0xFF70): the high WRAM bank — 1 to 7, zero counts as one.
   defp ram_write(ram, 0xFF70, value) do
     bank = max(value &&& 0x07, 1)
 
@@ -582,27 +596,26 @@ defmodule Atomboy.CPU.CartLoop do
     |> Map.put(:wram_base, (bank - 1) * 0x10000)
   end
 
-  # Les palettes couleur : BCPS/OCPS portent l'index (bit 7 : auto-
-  # incrément), BCPD/OCPD écrivent l'octet — rangé hors bus, à
-  # 0x20000 + index (fond) et 0x20040 + index (sprites), où le PPU
-  # couleur viendra le lire.
+  # The colour palettes: BCPS/OCPS carry the index (bit 7: auto-increment),
+  # BCPD/OCPD write the byte — stored off-bus, at 0x20000 + index (background) and
+  # 0x20040 + index (sprites), where the colour PPU will come and read it.
   defp ram_write(ram, 0xFF69, value), do: cpal_write(ram, 0xFF68, 0x20000, value)
   defp ram_write(ram, 0xFF6B, value), do: cpal_write(ram, 0xFF6A, 0x20040, value)
 
   defp ram_write(ram, addr, value), do: Map.put(ram, addr, value)
 
-  @doc "Lit un octet avec la pleine sémantique cartouche — la voie des DMA."
+  @doc "Reads a byte with the full cartridge semantics — the DMAs' route in."
   @spec peek(rom(), ram(), 0..0xFFFF) :: 0..0xFF
   def peek(rom, ram, addr), do: mem_read(rom, ram, addr)
 
-  @doc "Écrit un octet avec la pleine sémantique cartouche — banques comprises."
+  @doc "Writes a byte with the full cartridge semantics — banking included."
   @spec poke(ram(), 0..0xFFFF, 0..0xFF) :: ram()
   def poke(ram, addr, value), do: ram_write(ram, addr, value)
 
-  # ── L'horloge temps réel du MBC3 ────────────────────────────────────────────
+  # ── The MBC3's real-time clock ──────────────────────────────────────────────
 
-  # Secondes, minutes, heures, jours (9 bits) — servis depuis l'heure du
-  # Mac : le cycle jour/nuit de Pokémon suit ta fenêtre.
+  # Seconds, minutes, hours, days (9 bits) — served from the Mac's own clock:
+  # Pokémon's day/night cycle follows your window.
   defp cpal_write(ram, spec_addr, base, value) do
     spec = Map.get(ram, spec_addr, 0)
     index = spec &&& 0x3F
@@ -620,9 +633,8 @@ defmodule Atomboy.CPU.CartLoop do
   end
 
   defp rtc_now do
-    # ATOMBOY_RTC_OFFSET (secondes) décale l'horloge servie — l'outil des
-    # chasses aux bugs dépendants de l'heure, et du voyage dans le temps
-    # pour les baies.
+    # ATOMBOY_RTC_OFFSET (in seconds) shifts the clock that gets served — the tool
+    # for hunting time-dependent bugs, and for time travel when growing berries.
     offset =
       case System.get_env("ATOMBOY_RTC_OFFSET") do
         nil -> 0

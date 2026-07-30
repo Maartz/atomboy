@@ -1,49 +1,48 @@
 defmodule Atomboy.CPU.Insn do
   @moduledoc """
-  La description d'une instruction SM83.
+  The description of one SM83 instruction.
 
-  ## Un struct de compilation, jamais d'exécution
+  ## A compile-time struct, never a runtime one
 
-  Ce struct décrit ce qu'*est* une instruction. Il est construit à la
-  compilation par `Atomboy.CPU.Table`, consommé par `Atomboy.CPU.Gen` qui en
-  dérive une clause de fonction, puis **il disparaît**. Aucun `%Insn{}` n'existe
-  à l'exécution.
+  This struct describes what an instruction *is*. It is built at compile time by
+  `Atomboy.CPU.Table`, consumed by `Atomboy.CPU.Gen` which derives a function
+  clause from it, and then **it vanishes**. No `%Insn{}` exists at runtime.
 
-  La distinction est structurante, pas cosmétique. En Elixir un struct est une
-  map. Un émulateur qui décoderait vers un `%Insn{}` à l'exécution paierait, par
-  instruction émulée, une allocation de map plus un accès haché par champ — soit
-  500 000 allocations par seconde pour représenter une information entièrement
-  connue à la compilation. C'est le piège classique de l'interpréteur « propre »,
-  et il est plus lent que le tableau de clauses qu'il remplace.
+  The distinction is structural, not cosmetic. In Elixir a struct is a map. An
+  emulator that decoded into an `%Insn{}` at runtime would pay, per emulated
+  instruction, one map allocation plus a hashed lookup per field — 500,000
+  allocations per second to represent information entirely known at compile time.
+  That is the classic trap of the "clean" interpreter, and it is slower than the
+  table of clauses it replaces.
 
-  Décrire l'instruction en donnée et la faire disparaître à la compilation donne
-  les deux : une table lisible, et du code plat sans indirection.
+  Describing the instruction as data and making it vanish at compile time gives
+  you both: a readable table, and flat code with no indirection.
 
-  ## Le second consommateur
+  ## The second consumer
 
-  L'intérêt réel de cette table n'est pas l'interpréteur — un `for` avec de
-  l'arithmétique d'opcode aurait suffi. C'est qu'en **phase 5**, le
-  recompilateur statique lira la *même* table pour émettre du Core Erlang. Sans
-  elle, il faudrait maintenir deux décodages en parallèle et garantir à la main
-  qu'ils s'accordent ; avec elle, l'interpréteur et le recompilateur sont deux
-  backends d'une seule source de vérité.
+  The real value of this table is not the interpreter — a `for` with some opcode
+  arithmetic would have been enough. It is that in **phase 5**, the static
+  recompiler will read the *same* table to emit Core Erlang. Without it, two
+  decoders would have to be maintained in parallel and kept in agreement by
+  hand; with it, the interpreter and the recompiler are two backends over a
+  single source of truth.
   """
 
   @typedoc """
-  Un opérande.
+  An operand.
 
-    * `{:reg, :b}` — un registre 8 bits
-    * `:hl_ind` — l'octet en mémoire à l'adresse HL, l'encodage `r = 6`
-    * `{:imm, 8}` — un octet immédiat, lu à PC ; l'instruction avance PC
-    * `{:imm, 16}` — un mot immédiat little-endian, PC avance de deux
-    * `{:pair, :bc}` — une paire 16 bits (`:bc`, `:de`, `:hl`, `:sp`)
-    * `{:ind, :bc}` — l'octet en mémoire à l'adresse d'une paire ; `:hl_inc` et
-      `:hl_dec` post-incrémentent ou décrémentent HL après l'accès
-    * `:a16_ind` — la mémoire à l'adresse donnée par un mot immédiat
-    * `{:rst, 0x28}` — la cible fixe d'un RST, encodée dans l'opcode
-    * `:a8_ind` — la page haute : 0xFF00 + un octet immédiat
-    * `:c_ind` — la page haute via C : 0xFF00 + C
-    * `{:bit, 3}` — le numéro de bit d'un BIT/RES/SET, encodé dans l'opcode
+    * `{:reg, :b}` — an 8-bit register
+    * `:hl_ind` — the byte in memory at address HL, the `r = 6` encoding
+    * `{:imm, 8}` — an immediate byte, read at PC; the instruction advances PC
+    * `{:imm, 16}` — a little-endian immediate word, PC advances by two
+    * `{:pair, :bc}` — a 16-bit pair (`:bc`, `:de`, `:hl`, `:sp`)
+    * `{:ind, :bc}` — the byte in memory at a pair's address; `:hl_inc` and
+      `:hl_dec` post-increment or post-decrement HL after the access
+    * `:a16_ind` — the memory at the address given by an immediate word
+    * `{:rst, 0x28}` — a RST's fixed target, encoded in the opcode
+    * `:a8_ind` — the high page: 0xFF00 + an immediate byte
+    * `:c_ind` — the high page through C: 0xFF00 + C
+    * `{:bit, 3}` — a BIT/RES/SET's bit number, encoded in the opcode
   """
   @type operand ::
           {:reg, atom()}
@@ -59,7 +58,7 @@ defmodule Atomboy.CPU.Insn do
           | {:bit, 0..7}
 
   @typedoc """
-  Une condition de branchement, ou `nil` pour les instructions inconditionnelles.
+  A branch condition, or `nil` for unconditional instructions.
   """
   @type condition :: nil | :nz | :z | :nc | :c
 
@@ -85,13 +84,13 @@ defmodule Atomboy.CPU.Insn do
   ]
 
   @doc """
-  Le nom lisible de l'instruction, en syntaxe assembleur.
+  The instruction's readable name, in assembler syntax.
 
       iex> Atomboy.CPU.Insn.label(%Atomboy.CPU.Insn{opcode: 0x46, mnemonic: :ld, operands: [{:reg, :b}, :hl_ind], cycles: 8})
       "LD B, (HL)"
 
-  Utilisé dans les messages d'erreur et le tableau de bord : `opcode 46` ne dit
-  rien, `LD B, (HL)` désigne l'instruction.
+  Used in error messages and on the dashboard: `opcode 46` says nothing,
+  `LD B, (HL)` names the instruction.
   """
   @spec label(t()) :: String.t()
   def label(%__MODULE__{mnemonic: mnemonic, condition: condition, operands: operands}) do
