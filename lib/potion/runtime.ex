@@ -66,10 +66,13 @@ defmodule Potion.Runtime do
   the flag tells "this is a new frame" apart from "someone woke me". Without it,
   the actor would run at a rhythm unknown to it.
 
-  ## The v0's two tiles
+  ## The tiles
 
   Tile 0 is a solid square — the sprite. Tile 1 is empty, and the init fills the
-  whole background map (0x9800-0x9BFF) with tile 1.
+  whole background map (0x9800-0x9BFF) with tile 1. Tiles 2 to 11 are the ten
+  digits, copied from ROM at startup: a score is the first thing a game wants to
+  say in words rather than in sprites, and it is also the cheapest — 160 bytes
+  and a copy loop, against one OAM entry per figure.
 
   That map is the only departure from a strictly minimal kernel, and it is
   forced: a cleared VRAM leaves the background map at zero, hence at tile 0 — the
@@ -109,6 +112,23 @@ defmodule Potion.Runtime do
   @vram 0x8000
   @vram_bytes 0x2000
   @background 0x9800
+  @digits 2
+
+  # Five columns of ink in an eight-wide tile, with the last row left blank so
+  # two lines of digits do not touch.
+  @font [
+    [0x3C, 0x66, 0x6E, 0x7E, 0x76, 0x66, 0x3C, 0x00],
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00],
+    [0x3C, 0x66, 0x06, 0x0C, 0x18, 0x30, 0x7E, 0x00],
+    [0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00],
+    [0x0C, 0x1C, 0x3C, 0x6C, 0x7E, 0x0C, 0x0C, 0x00],
+    [0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00],
+    [0x1C, 0x30, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00],
+    [0x7E, 0x66, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x00],
+    [0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00],
+    [0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x38, 0x00]
+  ]
+
   @wram_cleared 0x0200
 
   # LCD on, tile data at 0x8000 (unsigned indices), OBJ and BG on. 0x93 is what
@@ -142,6 +162,7 @@ defmodule Potion.Runtime do
       read_pad() ++
       main_loop(length(fragments)) ++
       [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
+      [{:label, :font_data}, {:bytes, font_bytes()}] ++
       Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
         [{:label, actor_label(slot)}] ++ fragment
       end)
@@ -196,6 +217,40 @@ defmodule Potion.Runtime do
   @spec actor_state() :: 0xC100
   def actor_state, do: @state
 
+  @doc """
+  The tile index of the digit `0`; the ten follow it in order.
+
+  Tiles 0 and 1 belong to the kernel -- the solid square and the empty one --
+  so the font starts at 2. A game rarely needs the number: `background(c, r,
+  digit: n)` adds it, which is the whole point of spelling `digit:` rather than
+  `tile:`.
+  """
+  @spec digits() :: 2
+  def digits, do: @digits
+
+  @doc "The first byte of the background map."
+  @spec background_map() :: 0x9800
+  def background_map, do: @background
+
+  @doc """
+  Where a square of the background map lives.
+
+  The map is 32 tiles wide, of which the screen shows 20; a row is therefore 32
+  bytes, and the eleven past the twentieth are off-screen unless the game
+  scrolls.
+
+      iex> Potion.Runtime.background_address(0, 0)
+      0x9800
+
+      iex> Potion.Runtime.background_address(2, 1)
+      0x9822
+  """
+  @spec background_address(0..31, 0..31) :: 0x9800..0x9BFF
+  def background_address(column, row)
+      when column in 0..31 and row in 0..31 do
+    @background + row * 32 + column
+  end
+
   @doc "The address of the DMA routine in HRAM."
   @spec hram_dma() :: 0xFF80
   def hram_dma, do: @hram_dma
@@ -239,6 +294,7 @@ defmodule Potion.Runtime do
       clear(@oam_mirror, @wram_cleared, :clear_wram) ++
       bg_map() ++
       tiles() ++
+      font() ++
       copy_dma() ++
       [
         {:ld, :a, @palette},
@@ -309,6 +365,37 @@ defmodule Potion.Runtime do
   # Tile 0: sixteen bytes of 0xFF, that is, eight lines of eight pixels in
   # colour 3 — a solid square. Two bitplanes set to 1 make colour 3, and that is
   # the whole v0 tileset. Tile 1 stays the one the clearing left behind.
+  # The ten digits, copied into VRAM behind the kernel's two tiles.
+  #
+  # A score is the first thing a game wants to say in words rather than in
+  # sprites, and it is also the cheapest: ten tiles, 160 bytes of ROM, and a
+  # copy loop the init runs once. Sprites could spell it too -- the OAM holds
+  # forty -- but they would ride above the playfield and cost an entry each.
+  defp font do
+    [
+      {:ld, :hl, {:label, :font_data}},
+      {:ld, :de, @vram + @digits * 16},
+      {:ld, :b, 10 * 16},
+      {:label, :copy_font},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:dec, :b},
+      {:jr, :nz, {:label, :copy_font}}
+    ]
+  end
+
+  @doc """
+  The font's bytes: ten digits, 8x8, in the Game Boy's two-plane format.
+
+  Both planes carry the same bitmap, which puts the ink at colour 3 -- the same
+  the solid tile uses, so a digit and a sprite are the same black.
+  """
+  @spec font_bytes() :: binary()
+  def font_bytes do
+    for glyph <- @font, row <- glyph, into: <<>>, do: <<row, row>>
+  end
+
   defp tiles do
     [
       {:ld, :hl, @vram},

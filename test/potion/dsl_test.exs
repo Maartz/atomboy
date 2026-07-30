@@ -336,6 +336,28 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A score on the background layer: no sprite, no OAM entry, just a square of
+  # the map pointed at a digit of the kernel's font.
+  defmodule Scoreboard do
+    @moduledoc false
+    use Potion
+
+    defactor :hud do
+      variables score: 0, wait: 0
+
+      every_frame do
+        wait = wait + 1
+
+        if wait == 4 do
+          wait = 0
+          score = score + 1
+        end
+
+        background(2, 1, digit: score)
+      end
+    end
+  end
+
   describe "the flags a comparison reads" do
     # `CP n` is a subtraction thrown away: Z if equal, C if A was the smaller.
     # Every comparison is a choice of jumps over those two bits, and the choice
@@ -552,6 +574,68 @@ defmodule Potion.DSLTest do
     end
   end
 
+  describe "the background layer" do
+    test "a square of the map points at the digit the game asked for" do
+      {_pixels, _state, ram} = run_frames(Scoreboard, 8)
+      addresses = Scoreboard.addresses()
+
+      score = Map.get(ram, addresses.score)
+      square = Potion.Runtime.background_address(2, 1)
+
+      assert Map.get(ram, square) == Potion.Runtime.digits() + score
+      assert score > 0, "the counter never advanced"
+    end
+
+    test "the digit is really drawn, and only where it was put" do
+      {pixels, _state, _ram} = run_frames(Scoreboard, 8, render: true)
+      lit = non_white(pixels)
+
+      # Column 2, row 1 of the map is the 8x8 square at (16, 8).
+      inside = MapSet.intersection(lit, box(16, 8))
+
+      assert MapSet.size(inside) > 8, "nothing was drawn in the square"
+      assert MapSet.subset?(lit, box(16, 8)), "ink outside the one square asked for"
+
+      # And in the same black as the sprite's solid tile. Both planes of the
+      # glyph carry the bitmap, which is colour 3; carrying only one would draw
+      # a legible but grey digit, and "non-white" would not notice.
+      shades =
+        for {x, y} <- inside, into: MapSet.new(), do: :binary.at(pixels, y * 160 + x)
+
+      assert shades == MapSet.new([3]), "the ink is not colour 3: #{inspect(shades)}"
+    end
+
+    test "the kernel's font sits behind its own two tiles" do
+      assert Potion.Runtime.digits() == 2
+      assert byte_size(Potion.Runtime.font_bytes()) == 10 * 16
+    end
+
+    test "a raw tile index goes in unchanged" do
+      allocation = Potion.Compiler.allocate(n: 0)
+      body = {:background, [], [0, 0, [tile: {:n, [], nil}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+      square = Potion.Runtime.background_address(0, 0)
+
+      assert {:ld, :a, {:mem, allocation.cells.n}} in elements
+      assert {:ld, {:mem, square}, :a} in elements
+      refute Enum.any?(elements, &match?({:add, :a, _}, &1))
+    end
+
+    test "a digit adds the font's base, and a literal one folds at compile time" do
+      allocation = Potion.Compiler.allocate(n: 0)
+
+      variable =
+        Potion.Compiler.compile({:background, [], [0, 0, [digit: {:n, [], nil}]]}, allocation)
+
+      assert {:add, :a, Potion.Runtime.digits()} in variable
+
+      literal = Potion.Compiler.compile({:background, [], [0, 0, [digit: 7]]}, allocation)
+      assert {:ld, :a, Potion.Runtime.digits() + 7} in literal
+      refute Enum.any?(literal, &match?({:add, :a, _}, &1))
+    end
+  end
+
   describe "what the v0 refuses to compile" do
     test "an expression outside the subset" do
       message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
@@ -643,6 +727,19 @@ defmodule Potion.DSLTest do
       message = refuse_compile!(source)
 
       assert message =~ "two actors called :ball"
+    end
+
+    test "a background square outside the map" do
+      message = reject!("Rejected.Square", "variables x: 1", "background(40, 0, tile: 0)")
+
+      assert message =~ "background square outside the map"
+      assert message =~ "32 by 32"
+    end
+
+    test "a background square with neither tile nor digit" do
+      message = reject!("Rejected.Field", "variables x: 1", "background(0, 0, colour: 3)")
+
+      assert message =~ "malformed `background`"
     end
 
     test "a sprite number outside the forty OAM entries" do

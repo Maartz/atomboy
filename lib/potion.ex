@@ -110,6 +110,9 @@ defmodule Potion do
 
   ## What the v0 compiles
 
+      background(2, 1, digit: score)     a digit on the background layer
+      background(0, 0, tile: 0)          any tile, by index
+
       x = 5                              a constant into a cell
       x = y                              one cell into another
       x = x + 1                          eight bits, which wrap

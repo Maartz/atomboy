@@ -330,7 +330,51 @@ defmodule Potion.Compiler do
     {elements, counter}
   end
 
+  # ── A square of the background ──────────────────────────────────────────────
+
+  defp statement({:background, _, [column, row, fields]} = statement, allocation, counter) do
+    address = Runtime.background_address(square!(column, statement), square!(row, statement))
+    {kind, value} = background_field!(fields, statement)
+    base = if kind == :digit, do: Runtime.digits(), else: 0
+
+    {sprite_value(value, base, allocation, statement) ++ [{:ld, {:mem, address}, :a}], counter}
+  end
+
   defp statement(other, _allocation, _counter), do: reject!(other)
+
+  defp square!(value, _statement) when is_integer(value) and value in 0..31, do: value
+
+  defp square!(other, statement) do
+    raise CompileError, """
+    background square outside the map: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    The map is 32 by 32, and the column and the row are literals -- the address \
+    is worked out here rather than by the console. The screen shows the first \
+    20 columns and 18 rows of it; past that a square is real but off-view until \
+    the game scrolls.
+    """
+  end
+
+  # `digit:` is `tile:` with the font's base added, and it is worth its own word:
+  # a game says what it means -- "the digit three" -- and never learns that the
+  # kernel put its font at tile 2.
+  defp background_field!([tile: value], _statement), do: {:tile, value}
+  defp background_field!([digit: value], _statement), do: {:digit, value}
+
+  defp background_field!(fields, statement) do
+    raise CompileError, """
+    malformed `background`: #{Macro.to_string(fields)}
+
+        #{one_line(statement)}
+
+    A square takes exactly one of the two, a literal or a variable:
+
+        background(2, 1, digit: score)   the digit, the kernel's font
+        background(0, 0, tile: 0)        a tile index, whatever it holds
+    """
+  end
 
   # Without an `else`, the false branch already lands on the end label and there
   # is nothing to emit. With one, the taken branch has to jump over it.
