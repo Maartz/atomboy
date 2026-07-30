@@ -66,6 +66,22 @@ defmodule Atomboy.Native.Regs do
   @spec map() :: keyword(RV32.reg())
   def map, do: @map
 
+  @controle %{ime: 0x01, halted: 0x02, pending: 0x04}
+
+  @doc """
+  La disposition du registre de contrôle — trois booléens dans un registre.
+
+  Les regrouper n'est pas de l'économie de registres, il en reste : c'est pour
+  que le chemin rapide du `fetch` les écarte tous les trois d'un seul `bnez`.
+  Un jeu qui laisse IME éteint, ce qui est le cas hors gestionnaire
+  d'interruption, ne paie alors rien du tout.
+
+  Source unique : `Atomboy.Native.Emit` pose ces bits, `Atomboy.Native.Interp`
+  les lit et les fabrique depuis un `%Atomboy.CPU.State{}`.
+  """
+  @spec controle() :: %{ime: 1, halted: 2, pending: 4}
+  def controle, do: @controle
+
   @doc """
   Les registres libres pour un gestionnaire d'opcode.
 

@@ -31,7 +31,7 @@ defmodule Atomboy.NativeInterpTest do
   @seeds 1..8
 
   describe "la couverture" do
-    test "les étapes 1 et 3 à 7 ne laissent que les interruptions" do
+    test "la table SM83 est émise en entier" do
       couverts = MapSet.new(Emit.couverture())
 
       assert {nil, 0x00} in couverts, "NOP"
@@ -84,19 +84,17 @@ defmodule Atomboy.NativeInterpTest do
       assert {:cb, 0x86} in couverts, "RES 0, (HL)"
       assert {:cb, 0xFF} in couverts, "SET 7, A"
 
-      # Il ne reste que ce qui parle aux interruptions — étape 8. RETI compris :
-      # il pose IME, et l'invité refuse encore tout état où IME est armé.
-      refute {nil, 0x76} in couverts, "HALT"
-      refute {nil, 0xD9} in couverts, "RETI"
-      refute {nil, 0xF3} in couverts, "DI"
-      refute {nil, 0xFB} in couverts, "EI"
+      assert {nil, 0x76} in couverts, "HALT"
+      assert {nil, 0xD9} in couverts, "RETI"
+      assert {nil, 0xF3} in couverts, "DI"
+      assert {nil, 0xFB} in couverts, "EI"
 
-      # 239 (étapes 1 et 3 à 6) + STOP + les 256 du bloc étendu.
-      assert length(Emit.couverture_table()) == 496
-      assert length(Table.all()) - length(Emit.couverture_table()) == 4, "HALT, DI, EI, RETI"
+      # La table entière, sans exception.
+      assert length(Emit.couverture_table()) == length(Table.all())
+      assert Emit.restant() == []
 
       # Le préfixe s'ajoute au dispatchable sans être une entrée de table.
-      assert MapSet.size(couverts) == 497
+      assert MapSet.size(couverts) == length(Table.all()) + 1
       assert Emit.prefixe_couvert?()
     end
 
@@ -134,23 +132,14 @@ defmodule Atomboy.NativeInterpTest do
       assert resultat.memoire == memoire
     end
 
-    test "un opcode hors couverture s'arrête net et se nomme" do
-      # 0x76 : HALT, présent dans la table mais pas encore émis.
-      memoire = :binary.copy(<<0x76>>, 0x10000)
+    test "un opcode absent de la table s'arrête net et se nomme" do
+      # 0xE3 n'existe pas sur le SM83 : ni la table ni l'oracle ne le décrivent.
+      memoire = :binary.copy(<<0xE3>>, 0x10000)
 
       resultat = Run.run!(memoire, %State{}, 100)
 
       assert resultat.statut == :opcode_inconnu
-      assert resultat.opcode == 0x76
-    end
-
-    test "un état avec IME armé est refusé plutôt que mal exécuté" do
-      memoire = :binary.copy(<<0x00>>, 0x10000)
-
-      resultat = Run.run!(memoire, %State{ime: 1}, 100)
-
-      assert resultat.statut == :etat_non_supporte,
-             "les interruptions arrivent à l'étape 8 — d'ici là, l'invité doit refuser"
+      assert resultat.opcode == 0xE3
     end
 
     test "POP AF jette les quatre bits bas du registre de drapeaux" do
@@ -385,6 +374,127 @@ defmodule Atomboy.NativeInterpTest do
     end
   end
 
+  # Le matériel d'interruption est ce que `loop_test.exs` appelle son principal
+  # client, et les programmes aléatoires ne le servent presque pas : le service
+  # éteint IME, donc il ne se reproduit qu'après un `EI` ou un `RETI`. Mesuré,
+  # trois à sept services sur seize exécutions. D'où des scénarios écrits à la
+  # main, chacun confronté à l'oracle exactement comme les programmes
+  # aléatoires — l'équivalence reste le contrat, on choisit juste les entrées.
+  describe "les interruptions" do
+    test "une source armée détourne l'exécution vers son vecteur" do
+      # Le bit 2 d'IF est le timer : vecteur 0x50.
+      memoire = programme(%{0x100 => 0x00, 0xFF0F => 0x04, 0xFFFF => 0x1F})
+      state = %State{pc: 0x100, sp: 0x200, ime: 1}
+
+      resultat = equivalence!(memoire, state, 1)
+
+      assert resultat.state.pc == 0x50
+      assert resultat.state.ime == 0, "le service éteint IME"
+      assert resultat.state.sp == 0x1FE
+      assert :binary.at(resultat.memoire, 0x1FE) == 0x00, "PC empilé, octet bas"
+      assert :binary.at(resultat.memoire, 0x1FF) == 0x01
+      assert :binary.at(resultat.memoire, 0xFF0F) == 0x00, "le bit servi retombe"
+      assert resultat.cycles == 20
+    end
+
+    test "la source la plus basse passe en premier" do
+      # Deux sources armées : le bit 1 (LCD STAT, vecteur 0x48) doit gagner, et
+      # le bit 2 rester en attente.
+      memoire = programme(%{0x100 => 0x00, 0xFF0F => 0x06, 0xFFFF => 0x1F})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 1}, 1)
+
+      assert resultat.state.pc == 0x48
+      assert :binary.at(resultat.memoire, 0xFF0F) == 0x04, "l'autre source attend son tour"
+    end
+
+    test "une source armée sans autorisation ne détourne rien" do
+      memoire = programme(%{0x100 => 0x00, 0x101 => 0x00, 0xFF0F => 0x1F, 0xFFFF => 0x1F})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 0}, 2)
+
+      assert resultat.state.pc == 0x102, "IME éteint : les deux NOP s'exécutent"
+    end
+
+    test "IE masque ce qu'IF a armé" do
+      # IF arme le timer, IE n'autorise que le vblank : rien ne passe.
+      memoire = programme(%{0x100 => 0x00, 0xFF0F => 0x04, 0xFFFF => 0x01})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 1}, 1)
+
+      assert resultat.state.pc == 0x101
+      assert resultat.state.ime == 1
+    end
+
+    test "EI arme sans autoriser, et l'état juste après le dit" do
+      # Le budget s'arrête pile après l'EI, avant que le `fetch` suivant ne
+      # promeuve l'armement — le contrôle du budget passe en premier. C'est le
+      # seul instant où la distinction est observable, et sans ce test un `EI`
+      # qui allumerait IME directement serait indiscernable : vérifié par
+      # mutation, il passait les 42 autres tests.
+      memoire = programme(%{0x100 => 0xFB, 0xFFFF => 0x00})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100}, 1)
+
+      assert resultat.state.ime == 0, "EI n'autorise pas encore"
+      assert resultat.state.ime_pending == 1, "il arme"
+    end
+
+    test "EI arme, et la promotion se voit au pas suivant" do
+      memoire = programme(%{0x100 => 0xFB, 0x101 => 0x00, 0xFF0F => 0x01, 0xFFFF => 0x01})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200}, 2)
+
+      # Ce que fait exactement l'oracle est son affaire ; ce test exige que le
+      # natif en soit indiscernable, et que l'autorisation ait bien pris.
+      assert resultat.state.pc in [0x40, 0x102]
+    end
+
+    test "DI éteint ce qu'un EI venait d'allumer" do
+      # Aucune source armée, sinon le service partirait dès la promotion de
+      # l'EI — c'est-à-dire *avant* que le DI s'exécute. L'armement n'est donc
+      # jamais visible à une frontière d'instruction : `DI` remet `ime_pending`
+      # à zéro par symétrie avec l'oracle, pas parce qu'un programme pourrait
+      # l'observer.
+      memoire = programme(%{0x100 => 0xFB, 0x101 => 0xF3, 0x102 => 0x00, 0xFFFF => 0x00})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200}, 3)
+
+      assert resultat.state.ime == 0
+      assert resultat.state.ime_pending == 0
+      assert resultat.state.pc == 0x103
+    end
+
+    test "RETI rallume IME immédiatement" do
+      # La pile porte 0x0300 comme adresse de retour.
+      memoire = programme(%{0x100 => 0xD9, 0x200 => 0x00, 0x201 => 0x03, 0x300 => 0x00})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200}, 1)
+
+      assert resultat.state.pc == 0x300
+      assert resultat.state.ime == 1
+      assert resultat.state.sp == 0x202
+    end
+
+    test "HALT dort par pas de quatre cycles tant que rien n'attend" do
+      memoire = programme(%{0x100 => 0x76, 0xFF0F => 0x00, 0xFFFF => 0x00})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100}, 40)
+
+      assert resultat.state.halted, "toujours endormi"
+      assert resultat.state.pc == 0x101, "PC ne bouge plus"
+    end
+
+    test "HALT se réveille sur une source armée, même IME éteint" do
+      memoire = programme(%{0x100 => 0x76, 0x101 => 0x00, 0xFF0F => 0x01, 0xFFFF => 0x01})
+
+      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 0}, 3)
+
+      refute resultat.state.halted, "le réveil ne demande pas IME"
+      assert resultat.state.pc == 0x102
+    end
+  end
+
   describe "la taille du code" do
     test "l'interpréteur reste très en deçà de l'icache du C6" do
       memoire = :binary.copy(<<0x00>>, 0x10000)
@@ -400,14 +510,44 @@ defmodule Atomboy.NativeInterpTest do
     end
   end
 
+  # ══ L'équivalence, en une ligne ══════════════════════════════════════════════
+
+  # Exécute `steps` pas d'oracle, rejoue le même budget en natif, et exige que
+  # rien ne les distingue — état, cycles, et les 65 536 octets. Rend le résultat
+  # natif pour que l'appelant puisse en plus affirmer des faits précis.
+  defp equivalence!(memoire, state, steps) do
+    {attendu, memoire_oracle, budget, _fautif} = oracle(memoire, state, steps)
+
+    resultat = Run.run!(memoire, state, budget)
+
+    assert resultat.statut == :ok
+    assert resultat.cycles == budget
+    assert resultat.state == attendu
+
+    divergences =
+      for addr <- 0..0xFFFF,
+          octet_oracle = Flat.read8(memoire_oracle, addr),
+          octet_natif = :binary.at(resultat.memoire, addr),
+          octet_oracle != octet_natif,
+          do: {addr, octet_oracle, octet_natif}
+
+    assert divergences == []
+
+    resultat
+  end
+
   # ══ Génération ═══════════════════════════════════════════════════════════════
 
-  # Une mémoire de 64 Ko remplie de HALT — un opcode que le natif n'émet pas —
-  # avec quelques octets posés là où on les veut. Le remplissage sert de garde :
-  # si l'exécution déborde du programme voulu, elle s'arrête et le dit, au lieu
-  # de courir dans du bruit.
+  # Une mémoire de 64 Ko remplie de 0xE3 — un encodage qui n'existe pas sur le
+  # SM83 — avec quelques octets posés là où on les veut. Le remplissage sert de
+  # garde : si l'exécution déborde du programme voulu, elle s'arrête et le dit,
+  # au lieu de courir dans du bruit.
+  #
+  # C'était HALT jusqu'à l'étape 8. Depuis que HALT est implémenté, il
+  # endormirait le processeur au lieu de l'arrêter — une garde qui ne garde
+  # plus rien est pire qu'une absence de garde.
   defp programme(octets) do
-    for addr <- 0..0xFFFF, into: <<>>, do: <<Map.get(octets, addr, 0x76)>>
+    for addr <- 0..0xFFFF, into: <<>>, do: <<Map.get(octets, addr, 0xE3)>>
   end
 
   # Un octet par adresse, tiré du vivier donné — chaque tirage est donc un
@@ -445,7 +585,16 @@ defmodule Atomboy.NativeInterpTest do
       h: :rand.uniform(256) - 1,
       l: :rand.uniform(256) - 1,
       sp: :rand.uniform(0x10000) - 1,
-      pc: :rand.uniform(0x10000) - 1
+      pc: :rand.uniform(0x10000) - 1,
+      # Depuis l'étape 8, l'état d'interruption fait partie du tirage. Mesuré :
+      # cela ne produit que trois à sept services sur les seize exécutions,
+      # parce que le service éteint IME et que seuls EI et RETI le rallument.
+      # Les programmes aléatoires ne prouvent donc presque rien ici — c'est aux
+      # scénarios ci-dessus de le faire. `halted` reste hors du tirage : une
+      # graine qui démarre endormie sans source armée dort ses 5 000 pas et ne
+      # teste rien du tout.
+      ime: :rand.uniform(2) - 1,
+      ime_pending: :rand.uniform(2) - 1
     }
   end
 
@@ -472,19 +621,21 @@ defmodule Atomboy.NativeInterpTest do
         for {byte, addr} <- Enum.with_index(:binary.bin_to_list(memoire)), do: {addr, byte}
       )
 
-    boucle(state, plate, 0, steps, MapSet.new(opcodes_complets()), MapSet.new())
+    boucle(state, plate, 0, steps, MapSet.new())
   end
 
-  defp boucle(st, mem, cycles, 0, _couverts, vus), do: {st, mem, cycles, nil, vus}
+  defp boucle(st, mem, cycles, 0, vus), do: {st, mem, cycles, nil, vus}
 
-  defp boucle(st, mem, cycles, steps, couverts, vus) do
-    opcode = Flat.read8(mem, st.pc)
-
-    if MapSet.member?(couverts, opcode) do
-      {suite, mem, pas} = Atomboy.CPU.tick(st, mem)
-      boucle(suite, mem, cycles + pas, steps - 1, couverts, MapSet.put(vus, opcode))
-    else
-      {st, mem, cycles, opcode, vus}
-    end
+  # L'arrêt se fait sur exception plutôt que par pré-vérification de l'opcode :
+  # la table étant entièrement émise, ce que le natif refuse et ce que l'oracle
+  # refuse coïncident exactement. Et la pré-vérification lisait l'octet sous PC
+  # même quand le processeur dormait ou servait une interruption, donc au mauvais
+  # endroit. C'est la structure de `loop_test.exs`.
+  defp boucle(st, mem, cycles, steps, vus) do
+    vus = if st.halted, do: vus, else: MapSet.put(vus, Flat.read8(mem, st.pc))
+    {suite, mem, pas} = Atomboy.CPU.tick(st, mem)
+    boucle(suite, mem, cycles + pas, steps - 1, vus)
+  rescue
+    error in Atomboy.CPU.Unimplemented -> {st, mem, cycles, error.opcode, vus}
   end
 end

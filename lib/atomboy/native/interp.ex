@@ -20,10 +20,13 @@ defmodule Atomboy.Native.Interp do
   programmes qui arment un EI juste avant une interruption, et c'est le test
   d'équivalence qui le dira, plusieurs semaines après la faute.
 
-  À l'étape 1, seuls le budget et le dispatch sont écrits. Un état où IME,
-  HALT ou un EI armé sont posés n'est pas exécuté du tout : l'invité s'arrête et
-  rapporte `:etat_non_supporte`, plutôt que de rendre un résultat faux. C'est la
-  seule façon honnête de livrer un interpréteur partiel.
+  Les trois bits d'IME, HALT et EI-armé tiennent dans un seul registre pour que
+  le chemin rapide les écarte d'un `bnez` unique : hors gestionnaire
+  d'interruption, où IME est éteint, le coût est nul. Quand IME est allumé —
+  l'état normal d'un jeu — chaque instruction paie la lecture d'IF et d'IE,
+  exactement comme `Atomboy.CPU.Loop` la paie aujourd'hui. Mettre en cache
+  `IF & IE` et l'invalider aux écritures est l'optimisation évidente ; elle
+  vient après le premier chiffre honnête, pas avant.
 
   ## Le protocole
 
@@ -33,21 +36,30 @@ defmodule Atomboy.Native.Interp do
   fin. Un harnais sans dialogue est un harnais qui ne peut pas se désynchroniser.
   """
 
+  import Bitwise
+
   alias Atomboy.CPU.Insn
   alias Atomboy.CPU.State
   alias Atomboy.CPU.Table
   alias Atomboy.Native.ALU
   alias Atomboy.Native.Asm
+  alias Atomboy.Native.Bus
   alias Atomboy.Native.Emit
   alias Atomboy.Native.Image
   alias Atomboy.Native.Regs
   alias Atomboy.Native.RV32
 
+  @ime Regs.controle().ime
+  @halted Regs.controle().halted
+  @pending Regs.controle().pending
+
   @magic 0xA5
   @taille_enregistrement 20
   @memoire 0x10000
 
-  @statuts %{ok: 0, opcode_inconnu: 1, etat_non_supporte: 2}
+  # `etat_non_supporte` a disparu avec l'étape 8 : il n'existe plus d'état que
+  # l'invité refuse d'exécuter.
+  @statuts %{ok: 0, opcode_inconnu: 1}
 
   @doc "Les codes de statut que l'invité peut rapporter."
   @spec statuts() :: %{atom() => 0..255}
@@ -71,7 +83,7 @@ defmodule Atomboy.Native.Interp do
   @spec image(binary(), State.t(), pos_integer()) :: Asm.assembled()
   def image(memoire, %State{} = state, budget) when byte_size(memoire) == @memoire do
     Image.build(
-      [pilote(), fetch(), sorties(), gestionnaires(), ALU.routines()],
+      [pilote(), fetch(), fetch_lent(), sorties(), gestionnaires(), ALU.routines()],
       donnees(memoire, state, budget)
     )
   end
@@ -112,7 +124,8 @@ defmodule Atomboy.Native.Interp do
     [
       Asm.label(:fetch),
       Asm.bgeu(Regs.cycles(), Regs.budget(), :vers_materialise),
-      Asm.bnez(Regs.control(), :vers_non_supporte),
+      Asm.bnez(Regs.control(), :vers_lent),
+      Asm.label(:rapide),
       RV32.add(:t0, Regs.mem(), Regs.pc()),
       RV32.lbu(Regs.opcode(), :t0, 0),
       RV32.addi(Regs.pc(), Regs.pc(), 1),
@@ -129,8 +142,109 @@ defmodule Atomboy.Native.Interp do
       # cause définitivement.
       Asm.label(:vers_materialise),
       Asm.j(:materialise),
-      Asm.label(:vers_non_supporte),
-      Asm.j(:etat_non_supporte)
+      Asm.label(:vers_lent),
+      Asm.j(:fetch_lent)
+    ]
+  end
+
+  # ══ Le chemin lent ═══════════════════════════════════════════════════════════
+  #
+  # L'ordre est celui de `Atomboy.CPU.Loop.fetch/17`, clause pour clause :
+  # promotion d'un EI armé, puis HALT, puis service d'interruption, puis
+  # dispatch. Le recopier n'est pas une politesse — un programme qui arme un EI
+  # juste avant qu'une interruption tombe distingue les permutations, et c'est
+  # le genre de faute qui se manifeste des semaines plus tard.
+  #
+  # Chaque étape repasse par `fetch` plutôt que d'enchaîner : un EI promu doit
+  # pouvoir déclencher le service dans la foulée, et un réveil de HALT aussi.
+  defp fetch_lent do
+    [
+      Asm.label(:fetch_lent),
+
+      # EI armé : IME s'allume, l'armement retombe.
+      RV32.andi(:t0, Regs.control(), @pending),
+      Asm.beqz(:t0, :lent_halt),
+      RV32.ori(Regs.control(), Regs.control(), @ime),
+      RV32.andi(Regs.control(), Regs.control(), bnot(@pending)),
+      Asm.j(:fetch),
+
+      # HALT : le processeur dort par pas de 4 T tant que rien n'attend. Le
+      # réveil est gratuit et ne dépend pas d'IME — un HALT se réveille même
+      # interruptions masquées, seul le service demande IME.
+      Asm.label(:lent_halt),
+      RV32.andi(:t0, Regs.control(), @halted),
+      Asm.beqz(:t0, :lent_irq),
+      Asm.call(:irq_en_attente),
+      Asm.bnez(:t1, :lent_reveil),
+      RV32.addi(Regs.cycles(), Regs.cycles(), 4),
+      Asm.j(:fetch),
+      Asm.label(:lent_reveil),
+      RV32.andi(Regs.control(), Regs.control(), bnot(@halted)),
+      Asm.j(:fetch),
+
+      # Reste IME seul. Sans source en attente, l'instruction s'exécute
+      # normalement — d'où le retour dans le chemin rapide plutôt qu'un saut.
+      Asm.label(:lent_irq),
+      Asm.call(:irq_en_attente),
+      Asm.beqz(:t1, :rapide),
+      service(),
+      irq_en_attente()
+    ]
+  end
+
+  # Le service : PC part sur la pile, IME s'éteint, le vecteur prend la main.
+  # 20 T, et l'on repasse par `fetch` — jamais par le dispatch.
+  defp service do
+    [
+      # Le bit le plus bas armé, isolé par le complément à deux.
+      RV32.sub(:t4, :zero, :t1),
+      RV32.and_(:t4, :t1, :t4),
+
+      # IF est lu **avant** les empilements, comme dans l'oracle : si la pile
+      # tombe sur 0xFF0F, c'est la valeur d'avant qui est masquée et réécrite.
+      # Le détail se lit mal dans `loop.ex:140-144` — le `ram` de la troisième
+      # écriture est celui d'entrée, pas celui du tuyau — et il compte.
+      RV32.lbu(:t6, :t0, 0),
+
+      # Le vecteur : 0x40 + 8 × l'index du bit.
+      RV32.li(:a0, 0x40),
+      RV32.mv(:a1, :t4),
+      Asm.label(:vecteur_boucle),
+      RV32.andi(:t3, :a1, 1),
+      Asm.bnez(:t3, :vecteur_pret),
+      RV32.srli(:a1, :a1, 1),
+      RV32.addi(:a0, :a0, 8),
+      Asm.j(:vecteur_boucle),
+      Asm.label(:vecteur_pret),
+      Bus.deplacer_pile(-2),
+      Bus.ecrire16(Regs.sp(), Regs.pc()),
+
+      # Le bit servi retombe dans IF.
+      RV32.li(:t0, 0xFF0F),
+      RV32.add(:t0, Regs.mem(), :t0),
+      RV32.xori(:t1, :t4, 0xFF),
+      RV32.and_(:t1, :t6, :t1),
+      RV32.sb(:t1, :t0, 0),
+      RV32.andi(Regs.control(), Regs.control(), bnot(@ime)),
+      RV32.mv(Regs.pc(), :a0),
+      RV32.addi(Regs.cycles(), Regs.cycles(), 20),
+      Asm.j(:fetch)
+    ]
+  end
+
+  # Rend dans `t1` les sources armées et autorisées, et laisse dans `t0`
+  # l'adresse de IF — dont le service se ressert.
+  defp irq_en_attente do
+    [
+      Asm.label(:irq_en_attente),
+      RV32.li(:t0, 0xFF0F),
+      RV32.add(:t0, Regs.mem(), :t0),
+      RV32.lbu(:t1, :t0, 0),
+      # 0xFFFF - 0xFF0F : IE se lit au même pointeur, décalé.
+      RV32.lbu(:t2, :t0, 0xF0),
+      RV32.and_(:t1, :t1, :t2),
+      RV32.andi(:t1, :t1, 0x1F),
+      RV32.ret()
     ]
   end
 
@@ -143,9 +257,6 @@ defmodule Atomboy.Native.Interp do
       Asm.j(:rapport),
       Asm.label(:opcode_inconnu),
       RV32.li(:t2, @statuts.opcode_inconnu),
-      Asm.j(:rapport),
-      Asm.label(:etat_non_supporte),
-      RV32.li(:t2, @statuts.etat_non_supporte),
       rapport(),
       vidage()
     ]

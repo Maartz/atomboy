@@ -65,6 +65,10 @@ defmodule Atomboy.Native.Emit do
   @alu Map.keys(@routine)
   @accumulateur [:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf]
 
+  @ime Regs.controle().ime
+  @halted Regs.controle().halted
+  @pending Regs.controle().pending
+
   # Les jumelles CB des rotations de l'accumulateur. Elles posent Z normalement
   # là où `RLCA` et compagnie l'effacent toujours — deux encodages, deux
   # sémantiques de Z, et une source classique de bugs.
@@ -313,14 +317,43 @@ defmodule Atomboy.Native.Emit do
     )
   end
 
-  def body(%Insn{mnemonic: :ret} = insn) do
+  # RET, RET cc et RETI — la lecture de pile n'a lieu que si le retour se fait,
+  # et RETI rallume IME dans le même souffle. Immédiatement, contrairement à
+  # `EI` : l'instruction existe pour sortir d'un gestionnaire d'interruption,
+  # et un délai d'une instruction y serait un piège.
+  def body(%Insn{mnemonic: m} = insn) when m in [:ret, :reti] do
+    reprise =
+      if m == :reti, do: [RV32.ori(Regs.control(), Regs.control(), @ime)], else: []
+
     conditionnel(
       insn,
       [],
       Bus.lire16(Regs.sp(), :t0) ++
         Bus.deplacer_pile(2) ++
-        [RV32.mv(Regs.pc(), :t0)]
+        [RV32.mv(Regs.pc(), :t0)] ++ reprise
     )
+  end
+
+  # ── Les interruptions ───────────────────────────────────────────────────────
+  #
+  # Trois instructions qui ne font que poser des bits dans le registre de
+  # contrôle. Tout le travail est dans `fetch`, où ces bits se lisent — c'est
+  # aussi ainsi que `Atomboy.CPU.Loop` est bâti.
+
+  # DI éteint IME **et désarme un EI en attente** : sans cela, un `EI` suivi
+  # d'un `DI` autoriserait quand même les interruptions un pas plus tard.
+  def body(%Insn{mnemonic: :di, cycles: cycles}) do
+    [RV32.andi(Regs.control(), Regs.control(), bnot(@ime ||| @pending))] ++ fin(cycles)
+  end
+
+  # EI n'autorise pas : il arme. La promotion se fait au pas suivant, dans le
+  # `fetch` — même point que dans les deux backends Elixir.
+  def body(%Insn{mnemonic: :ei, cycles: cycles}) do
+    [RV32.ori(Regs.control(), Regs.control(), @pending)] ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :halt, cycles: cycles}) do
+    [RV32.ori(Regs.control(), Regs.control(), @halted)] ++ fin(cycles)
   end
 
   # ── Le bloc CB ──────────────────────────────────────────────────────────────
