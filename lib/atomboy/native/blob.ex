@@ -72,6 +72,7 @@ defmodule Atomboy.Native.Blob do
         if(Keyword.get(opts, :relocate, true), do: relocate(), else: []),
         code,
         exit_(),
+        if(Keyword.get(opts, :relocate, true), do: relocated(), else: []),
         data
       ],
       0
@@ -141,16 +142,22 @@ defmodule Atomboy.Native.Blob do
   has to be an address. `auipc` gives the one number nothing else can:  where
   this copy of the blob actually landed.
 
-  **Once.** A second pass would add the base twice and every dispatch would jump
-  into nothing, so a blob is entered many times only if the caller keeps the
-  relocated copy and calls into a body that skips this -- which is why the
-  relocation sits in the entry sequence and not in the loop that uses it.
+  **Once, and it guards itself.** A second pass would add the base twice and
+  every dispatch would jump into nothing. That is not a hypothetical: the panel
+  loop calls the blob once per frame, and the second call died on an instruction
+  access fault before this flag existed. The first pass sets a word; every call
+  after it walks past four instructions instead of two thousand.
 
   Clobbers `t0` to `t3`, before any of them means anything.
   """
   @spec relocate() :: [Asm.item()]
   def relocate do
     [
+      Asm.la(:t3, :relocated),
+      RV32.lw(:t1, :t3, 0),
+      Asm.bnez(:t1, :relocate_done),
+      RV32.li(:t1, 1),
+      RV32.sw(:t1, :t3, 0),
       Asm.la(:t2, :blob_start),
       Asm.la(:t0, :table_base),
       RV32.li(:t1, 2 * 256),
@@ -160,7 +167,12 @@ defmodule Atomboy.Native.Blob do
       RV32.sw(:t3, :t0, 0),
       RV32.addi(:t0, :t0, 4),
       RV32.addi(:t1, :t1, -1),
-      Asm.bnez(:t1, :relocate_loop)
+      Asm.bnez(:t1, :relocate_loop),
+      Asm.label(:relocate_done)
     ]
   end
+
+  @doc "The word `relocate/0` sets once, for the image's data section."
+  @spec relocated() :: [Asm.item()]
+  def relocated, do: [{:align, 4}, Asm.label(:relocated), {:space, 4}]
 end

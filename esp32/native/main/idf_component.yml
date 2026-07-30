@@ -1,0 +1,5 @@
+## The ILI9341 lives in the component registry, not in ESP-IDF itself. Pulling
+## it beats hand-writing the panel's init sequence: forty magic commands nobody
+## can review, against a version number.
+dependencies:
+  espressif/esp_lcd_ili9341: "^1.2.0"

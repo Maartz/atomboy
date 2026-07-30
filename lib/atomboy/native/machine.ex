@@ -751,6 +751,33 @@ defmodule Atomboy.Native.Machine do
       Asm.label(:unknown_opcode),
       RV32.li(:t2, statuses.unknown_opcode),
       Asm.label(:blob_report),
+
+      # The state written back where the prologue will read it. Without this a
+      # second call would reload the boot registers and replay the same frames
+      # over a memory that had already moved -- the console would stutter back
+      # to its first instant while its RAM kept going. With it, the copy the
+      # caller holds *is* the console, and calling again is simply time passing.
+      Asm.la(:t1, :initial_state),
+      RV32.sb(Regs.a(), :t1, 0),
+      RV32.sb(Regs.f(), :t1, 1),
+      RV32.sb(Regs.b(), :t1, 2),
+      RV32.sb(Regs.c(), :t1, 3),
+      RV32.sb(Regs.d(), :t1, 4),
+      RV32.sb(Regs.e(), :t1, 5),
+      RV32.srli(:t0, Regs.hl(), 8),
+      RV32.sb(:t0, :t1, 6),
+      RV32.sb(Regs.hl(), :t1, 7),
+      RV32.sh(Regs.sp(), :t1, 8),
+      RV32.sh(Regs.pc(), :t1, 10),
+      RV32.sb(Regs.control(), :t1, 12),
+
+      # And the timer's phase -- the fraction of a period neither register
+      # shows. Chaining runs without it restarts the phase every call, which is
+      # the one thing `image/4` already refused to do between frames.
+      RV32.lw(:t0, @state_pointer, @ms_div),
+      RV32.sb(:t0, :t1, 13),
+      RV32.lw(:t0, @state_pointer, @ms_tima),
+      RV32.sh(:t0, :t1, 14),
       Asm.la(:a0, :blob_result),
       RV32.sw(:t2, :a0, 0),
       RV32.sw(Regs.opcode(), :a0, 4),
