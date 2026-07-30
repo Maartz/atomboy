@@ -7,6 +7,9 @@ defmodule Atomboy.Native.RV32 do
   each, so an instruction costs one table entry -- `{:add, "add", 0x00, 0x0}` --
   rather than a copied body.
 
+  RV32I, plus M -- multiply and divide, which share the R format and cost eight
+  more rows of the same table. See `@r_type` for what asked for them.
+
   ## The formats
 
       R  funct7[31:25] rs2[24:20] rs1[19:15] funct3[14:12] rd[11:7] opcode[6:0]
@@ -143,7 +146,28 @@ defmodule Atomboy.Native.RV32 do
     {:srl, "srl", 0x00, 0x5},
     {:sra, "sra", 0x20, 0x5},
     {:or_, "or", 0x00, 0x6},
-    {:and_, "and", 0x00, 0x7}
+    {:and_, "and", 0x00, 0x7},
+
+    # M: multiply and divide. Same R format, one funct7 apart, so they cost
+    # eight table rows and nothing else -- and `forms/0` being table-driven
+    # means the external assembler checks them the moment they appear.
+    #
+    # Both targets have them. The C6 is rv32imac and qemu's `virt` defaults to
+    # rv32gc; the extension this project does refuse is C, for the reason set
+    # out above, which is about the assembler and not about the silicon.
+    #
+    # The APU is what asked. Its channel timers divide an accumulated cycle
+    # count by a period once per channel per sample -- 2,196 divisions in a
+    # frame -- and the alternative is a loop of subtractions in the hottest
+    # path there is.
+    {:mul, "mul", 0x01, 0x0},
+    {:mulh, "mulh", 0x01, 0x1},
+    {:mulhsu, "mulhsu", 0x01, 0x2},
+    {:mulhu, "mulhu", 0x01, 0x3},
+    {:div, "div", 0x01, 0x4},
+    {:divu, "divu", 0x01, 0x5},
+    {:rem, "rem", 0x01, 0x6},
+    {:remu, "remu", 0x01, 0x7}
   ]
 
   @i_type [
