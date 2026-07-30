@@ -34,6 +34,7 @@
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -58,7 +59,7 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
  * coin toss: the clock rings, the data is sampled wrong, the panel ignores
  * every command and stays in the white it powered up in -- which is exactly
  * what it did. Speed is the last thing to raise, not the first. */
-#define SPI_HZ (20 * 1000 * 1000)
+#define SPI_HZ (80 * 1000 * 1000)
 
 #define GB_W 160
 #define GB_H 144
@@ -164,6 +165,13 @@ struct result {
   uint32_t cycles;
   uint32_t framebuffer;
   uint32_t memory;
+
+  /* The frame's sound, and how much of it there is. The count is 548 or 549 and
+   * never dependably one of them: 70,224 cycles over 128 leaves a fraction that
+   * the emulator carries forward, so a host assuming 548 forever loses a sample
+   * every eight frames. That is 8 Hz of drift, and it is audible. */
+  uint32_t samples;
+  uint32_t sample_count;
 };
 
 typedef uint32_t (*atomboy_entry_t)(void *argument);
@@ -375,6 +383,16 @@ static void audio_prove(i2s_chan_handle_t tx) {
   ESP_LOGI(TAG, "audio: 440 Hz sent, amp back off");
 }
 
+/* And back on, for the console this time. Nothing between here and the frame
+ * loop writes a sample, so the amplifier hears the channel's zeros until the
+ * emulator has something to say -- which is silence, not hiss, because the
+ * channel is clocking. */
+static void audio_resume(i2s_chan_handle_t tx) {
+  ESP_ERROR_CHECK(i2s_channel_enable(tx));
+  gpio_set_level(PIN_SD, 1);
+  ESP_LOGI(TAG, "audio: channel live, the console has the amplifier");
+}
+
 void app_main(void) {
   for (int i = 0; i < 4; i++) {
     palette[i] = rgb565_be(dmg[i]);
@@ -456,6 +474,20 @@ void app_main(void) {
   const atomboy_entry_t entry = (atomboy_entry_t)executable;
   int batches = 0;
 
+  /* Whether the music is whole, measured against the clock rather than against
+   * what the driver accepted.
+   *
+   * Counting accepted-over-offered was the first attempt and it read 99%, which
+   * was true and meaningless: every write succeeds precisely *because* the
+   * console cannot keep the DMA fed, so the buffer is always empty when we
+   * arrive. The number that matters is samples delivered per second against the
+   * 32,768 the speaker consumes. Below one hundred, the shortfall is silence
+   * that a listener hears as stutter. */
+  uint64_t produced = 0;
+  const int64_t audio_t0 = esp_timer_get_time();
+
+  audio_resume(audio);
+
   while (1) {
     const uint32_t before = esp_cpu_get_cycle_count();
     const struct result *result = (const struct result *)entry((void *)(uintptr_t)pressed);
@@ -464,6 +496,36 @@ void app_main(void) {
     if (result->status != 0) {
       ESP_LOGE(TAG, "stopped on an opcode it does not know: 0x%02lx", (unsigned long)result->opcode);
       return;
+    }
+
+    /* The frame's sound, straight into the DMA. Written before the pixels and
+     * before the pad on purpose: the samples are already generated and the
+     * buffer inside the blob will be overwritten by the next call, so the
+     * sooner they leave the sooner the amplifier has work.
+     *
+     * And it blocks, which is the whole pacing policy in one argument.
+     *
+     * This started as a wait of zero, on the reasoning that an emulator paced by
+     * its own soundtrack runs the game slow whenever the panel is busy. That was
+     * true at 20 MHz, where a frame took 40 ms and the console was at 40% of
+     * real time. At 80 MHz the panel stopped being the limit: the loop settled
+     * at 13.6 ms against the 16.7 a DMG frame is worth, and the console ran 22%
+     * *fast* -- which a non-blocking write hides, because the excess is silently
+     * dropped and the meter still reads 99%.
+     *
+     * So the sound is the clock. The DMA drains at exactly 32,768 samples a
+     * second, no faster and no slower, so a write that waits for room paces the
+     * console to precisely one DMG frame per DMG frame -- with no timer, no
+     * calibration, and nothing to drift. The 3 ms of headroom per frame is what
+     * pays for it, and it is the panel's speed that bought it. */
+    if (result->sample_count > 0) {
+      const size_t bytes = result->sample_count * 4;
+      size_t written = 0;
+
+      i2s_channel_write(audio, (const void *)(uintptr_t)result->samples, bytes, &written,
+                        portMAX_DELAY);
+
+      produced += written / 4u;
     }
 
     const uint8_t *shades = (const uint8_t *)result->framebuffer;
@@ -556,7 +618,12 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y, ORIGIN_X + OUT_W,
                                               ORIGIN_Y + OUT_H, pixels));
 
-    ESP_LOGI(TAG, "%lu us emulating, %lu us to the palette", (unsigned long)(emulated / 160u),
-             (unsigned long)((drawn - emulated) / 160u));
+    const int64_t elapsed = esp_timer_get_time() - audio_t0;
+
+    ESP_LOGI(TAG, "%lu us emulating, %lu us to the palette, sound at %lu%% of real time",
+             (unsigned long)(emulated / 160u), (unsigned long)((drawn - emulated) / 160u),
+             elapsed > 0
+                 ? (unsigned long)(produced * 100u * 1000000u / (uint64_t)elapsed / AUDIO_HZ)
+                 : 0u);
   }
 }

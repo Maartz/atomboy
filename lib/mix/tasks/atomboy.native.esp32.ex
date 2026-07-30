@@ -7,6 +7,7 @@ defmodule Mix.Tasks.Atomboy.Native.Esp32 do
       mix atomboy.native.esp32                  # games/hero.gb, 10 frames
       mix atomboy.native.esp32 games/pong.gb    # another cartridge
       mix atomboy.native.esp32 --frames 60
+      mix atomboy.native.esp32 --no-audio          # pixels only
 
   Writes `esp32/native/main/blob.bin`: position-independent RV32I with the
   guest's 64 KB, the jump tables and the framebuffer inside it. The ESP-IDF
@@ -36,7 +37,7 @@ defmodule Mix.Tasks.Atomboy.Native.Esp32 do
   def run(argv) do
     Mix.Task.run("compile")
 
-    {options, rest} = OptionParser.parse!(argv, strict: [frames: :integer, render: :boolean])
+    {options, rest} = OptionParser.parse!(argv, strict: [frames: :integer, render: :boolean, audio: :boolean])
 
     path = List.first(rest) || "games/hero.gb"
     frames = options[:frames] || 10
@@ -47,7 +48,8 @@ defmodule Mix.Tasks.Atomboy.Native.Esp32 do
 
     blob =
       Machine.blob(memory(rom), Screen.boot_state(rom, true), frames,
-        render: Keyword.get(options, :render, true)
+        render: Keyword.get(options, :render, true),
+        audio: Keyword.get(options, :audio, true)
       )
 
     File.mkdir_p!(Path.dirname(@output))
