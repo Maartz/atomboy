@@ -211,6 +211,15 @@ defmodule Atomboy.Native.APU do
   @spec samples_label() :: :apu_samples
   def samples_label, do: :apu_samples
 
+  @doc """
+  The word `:apu_frame` leaves its sample count in.
+
+  A word rather than a return value because `apu_frame` tail-jumps into
+  `apu_samples`, whose own return register is the caller's to keep.
+  """
+  @spec count_label() :: :apu_count
+  def count_label, do: :apu_count
+
   @doc "The state block's size in bytes, and the offsets a caller may seed or read."
   @spec state_bytes() :: 144
   def state_bytes, do: @st_size
@@ -280,15 +289,45 @@ defmodule Atomboy.Native.APU do
     [
       {:align, 4},
       Asm.label(:apu_state),
-      {:space, @st_size},
+      initial_state(),
       Asm.label(:apu_config),
       {:space, @cf_size},
+      Asm.label(:apu_count),
+      {:space, 4},
       Asm.label(:apu_duty),
       @duty |> List.flatten() |> :binary.list_to_bin(),
       {:align, 4},
       Asm.label(:apu_wave_shifts),
       @wave_shifts |> Enum.map(&<<&1::32-little>>) |> IO.iodata_to_binary()
     ]
+  end
+
+  @doc """
+  The 144 bytes a console starts from -- `%Atomboy.APU{}`, as the guest holds it.
+
+  Almost all of it is zero, and it was blank space until the one field that is
+  not cost an afternoon. The noise channel's LFSR starts at 0x7FFF, all fifteen
+  bits set, and a shift register of zeros is a *stuck* shift register: the
+  feedback bit is the xor of two zeros forever, so the sequence never moves and
+  the channel emits a constant where it should emit noise.
+
+  Silent games never showed it. Tetris did, 516 frames in, as a flat tone under
+  the music where the percussion belonged -- with the CPU state, all 48 sound
+  registers and 8 KB of work RAM agreeing exactly, which is what said the fault
+  was here and not upstream.
+
+  The differential bench could not have caught it either: every case it runs
+  installs a state of its own, so the one state nobody passes in is the one the
+  console actually boots with.
+  """
+  @spec initial_state() :: binary()
+  def initial_state do
+    channel = fn extra ->
+      <<0::32, 0::32, 0::32, 0::32, 0::32, 0::32, 0::32, extra::32-little>>
+    end
+
+    <<channel.(0)::binary, channel.(0)::binary, channel.(0)::binary, channel.(0x7FFF)::binary,
+      0::32, 0::32, 0::32, 0::32>>
   end
 
   # ══ A frame's worth ══════════════════════════════════════════════════════════
@@ -307,6 +346,13 @@ defmodule Atomboy.Native.APU do
       RV32.srli(:a0, :t2, 7),
       RV32.andi(:t2, :t2, @cycles_per_sample - 1),
       RV32.sw(:t2, :t1, @st_sample_acc),
+
+      # The count, left where a caller can read it. It is 548 or 549 depending on
+      # what the last frame carried, and a caller handed a buffer without a count
+      # would have to divide 70,224 by 128 itself to find out -- which is the
+      # arithmetic this routine exists to own.
+      Asm.la(:t1, :apu_count),
+      RV32.sw(:a0, :t1, 0),
       Asm.j(:apu_samples)
     ]
   end

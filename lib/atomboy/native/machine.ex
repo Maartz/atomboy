@@ -160,6 +160,8 @@ defmodule Atomboy.Native.Machine do
 
   alias Atomboy.CPU.State
   alias Atomboy.Native.ALU
+  alias Atomboy.Native.APU
+  alias Atomboy.Native.APUBench
   alias Atomboy.Native.Asm
   alias Atomboy.Native.Bus
   alias Atomboy.Native.Blob
@@ -184,6 +186,12 @@ defmodule Atomboy.Native.Machine do
   @tma 0xFF06
   @tac 0xFF07
   @irq_if 0xFF0F
+  # The four NRx4 registers, five bytes apart: bit 7 of any of them triggers its
+  # channel. Only the ends are named -- the arithmetic in `apu_trigger/1` finds
+  # the two in between.
+  @nr14 0xFF14
+  @nr44 0xFF23
+
   @lcdc 0xFF40
   @stat 0xFF41
   @ly 0xFF44
@@ -257,21 +265,23 @@ defmodule Atomboy.Native.Machine do
   def image(memory, %State{} = state, frames, opts \\ [])
       when byte_size(memory) == @memory and is_integer(frames) and frames > 0 do
     render? = Keyword.get(opts, :render, false)
+    audio? = Keyword.get(opts, :audio, false)
     rom = Keyword.get(opts, :rom)
 
     Image.build(
       [
         driver(render?, rom, true),
         scanline(),
-        line_done(render?),
+        line_done(render?, audio?),
         Interp.routines(budget_exit: :line_done),
-        exits(render?),
-        seam(rom),
+        exits(render?, audio?),
+        seam(rom, audio?),
         Interp.handlers(),
         ALU.routines(),
-        if(render?, do: PPU.routines(), else: [])
+        if(render?, do: PPU.routines(), else: []),
+        if(audio?, do: APU.routines(), else: [])
       ],
-      data(memory, state, frames, render?, Keyword.get(opts, :timer, {0, 0}), rom)
+      data(memory, state, frames, render?, audio?, Keyword.get(opts, :timer, {0, 0}), rom)
     )
   end
 
@@ -286,6 +296,8 @@ defmodule Atomboy.Native.Machine do
           state: State.t(),
           memory: binary(),
           pixels: binary() | nil,
+          samples: binary() | nil,
+          apu: Atomboy.APU.t() | nil,
           cycles: non_neg_integer(),
           timer: {non_neg_integer(), non_neg_integer()},
           status: :ok | :unknown_opcode,
@@ -305,10 +317,12 @@ defmodule Atomboy.Native.Machine do
   @spec run(binary(), State.t(), pos_integer(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(memory, %State{} = state, frames, opts \\ []) do
     render? = Keyword.get(opts, :render, false)
+    audio? = Keyword.get(opts, :audio, false)
 
     image =
       image(memory, state, frames,
         render: render?,
+        audio: audio?,
         timer: Keyword.get(opts, :timer, {0, 0}),
         rom: Keyword.get(opts, :rom)
       )
@@ -318,7 +332,7 @@ defmodule Atomboy.Native.Machine do
         {:error, {:timeout, us}}
 
       %{status: :ok, serial: serial, duration_us: us} ->
-        decode(serial, us, image.size, render?)
+        decode(serial, us, image.size, render?, audio?)
     end
   end
 
@@ -453,7 +467,7 @@ defmodule Atomboy.Native.Machine do
   # here is `Atomboy.Timer.advance/2` with the cycles the slice actually
   # consumed, overshoot included.
 
-  defp line_done(render?) do
+  defp line_done(render?, audio?) do
     [
       Asm.label(:line_done),
       RV32.lw(:t0, @state_pointer, @ms_total),
@@ -469,7 +483,18 @@ defmodule Atomboy.Native.Machine do
       RV32.li(:t1, @lines),
       Asm.bltu(:t0, :t1, :line_loop),
 
-      # The frame is over. One less to run.
+      # The frame is over, and the sound of it is generated here rather than per
+      # scanline. `Atomboy.APU.frame/2` does the same, and for the same reason:
+      # a game lays its notes down at vblank, so one frame of granularity is the
+      # time scale music is written on. It also means the registers are read once
+      # for 549 samples instead of 154 times for three and a half.
+      #
+      # The position is after the last line's timer, which is where the renderer
+      # would be if there were a 155th line -- everything the frame did has
+      # happened before a byte of its sound exists.
+      apu_frame(audio?),
+
+      # One less frame to run.
       RV32.lw(:t0, @state_pointer, @ms_frames),
       RV32.addi(:t0, :t0, -1),
       RV32.sw(:t0, @state_pointer, @ms_frames),
@@ -478,6 +503,15 @@ defmodule Atomboy.Native.Machine do
       # The record reports the total, not the last line's count.
       RV32.lw(Regs.cycles(), @state_pointer, @ms_total),
       Asm.j(:materialise)
+    ]
+  end
+
+  defp apu_frame(false), do: []
+
+  defp apu_frame(true) do
+    [
+      Asm.la(:t0, :apu_buffer),
+      Asm.call(APU.label())
     ]
   end
 
@@ -603,7 +637,7 @@ defmodule Atomboy.Native.Machine do
   # routine, because `Bus` drops it before the store rather than after -- which is
   # the only order that works, there being no way to un-write a byte.
 
-  defp seam(rom) do
+  defp seam(rom, audio?) do
     [
       Asm.label(Bus.seam()),
 
@@ -656,7 +690,7 @@ defmodule Atomboy.Native.Machine do
       # oracle handles either: the byte is merely stored.
       Asm.label(:mmio_dma),
       RV32.li(:t1, @dma),
-      Asm.bne(:a0, :t1, :mmio_done),
+      Asm.bne(:a0, :t1, :mmio_apu),
       RV32.li(:t1, 0x80),
       Asm.bltu(:t0, :t1, :mmio_done),
       RV32.slli(:t2, :t0, 8),
@@ -672,12 +706,55 @@ defmodule Atomboy.Native.Machine do
       RV32.addi(:t3, :t3, 1),
       RV32.addi(:t4, :t4, -1),
       Asm.j(:dma_loop),
+      apu_trigger(audio?),
       Asm.label(:mmio_store),
       RV32.add(:t1, Regs.mem(), :a0),
       RV32.sb(:t0, :t1, 0),
       Asm.label(:mmio_done),
       RV32.ret(),
       Cart.handle(rom, :mmio_done)
+    ]
+  end
+
+  # NRx4 with bit 7 set: a channel is being triggered. `Atomboy.CPU.CartLoop`
+  # captures the same four addresses and puts the channel on a list the APU
+  # replays; here it sets one of four bits, which is the same thing said shorter
+  # -- see `Atomboy.Native.APU` on why order and repetition are not observable.
+  #
+  # The byte itself has already been stored, as it has for every address at or
+  # above 0xFF00, and it stays readable exactly as written. That is what the
+  # hardware does not do -- bit 7 never reads back on a DMG -- and what the
+  # oracle does, so it is what happens here.
+  #
+  # The arithmetic is `div(addr - 0xFF14, 5)`, which is `CartLoop`'s own
+  # expression rather than four comparisons that would drift from it. The four
+  # NRx4 registers are five bytes apart and nothing else in the window is, so a
+  # remainder of zero identifies them.
+  defp apu_trigger(false), do: [Asm.label(:mmio_apu)]
+
+  defp apu_trigger(true) do
+    offsets = APU.offsets()
+
+    [
+      Asm.label(:mmio_apu),
+      RV32.andi(:t1, :t0, 0x80),
+      Asm.beqz(:t1, :mmio_done),
+      RV32.li(:t1, @nr14),
+      Asm.bltu(:a0, :t1, :mmio_done),
+      RV32.sub(:t1, :a0, :t1),
+      RV32.li(:t2, @nr44 - @nr14),
+      Asm.bltu(:t2, :t1, :mmio_done),
+      RV32.li(:t2, 5),
+      RV32.remu(:t3, :t1, :t2),
+      Asm.bnez(:t3, :mmio_done),
+      RV32.divu(:t1, :t1, :t2),
+      RV32.li(:t2, 1),
+      RV32.sll(:t1, :t2, :t1),
+      Asm.la(:t2, :apu_state),
+      RV32.lw(:t3, :t2, offsets.triggers),
+      RV32.or_(:t3, :t3, :t1),
+      RV32.sw(:t3, :t2, offsets.triggers),
+      Asm.j(:mmio_done)
     ]
   end
 
@@ -688,10 +765,31 @@ defmodule Atomboy.Native.Machine do
   # the timer's phase last -- appending is what lets a reader that knows only the
   # first region keep working.
 
-  defp exits(render?) do
+  defp exits(render?, audio?) do
     pixels =
       if render? do
         [{:pixels, [Asm.la(:t3, :framebuffer)], @frame_bytes}]
+      else
+        []
+      end
+
+    # A whole frame's worth, always, whether the frame produced 548 samples or
+    # 549. A region whose length depended on the run would have to be framed with
+    # a count, and the count is already in the record's own trailing word -- the
+    # reader trims. Fixed regions are what let a reader that knows only the first
+    # one keep working.
+    audio =
+      if audio? do
+        [
+          {:samples, [Asm.la(:t3, :apu_buffer)], APU.max_bytes()},
+
+          # And the channel state the frame stopped on. It is not there for the
+          # caller -- nothing above this needs it -- but for the bench: when the
+          # samples disagree after five hundred frames of accumulation, the
+          # question is *which of thirty fields* drifted, and a stream that only
+          # carries the output cannot answer it.
+          {:apu_state, [Asm.la(:t3, :apu_state)], APU.state_bytes()}
+        ]
       else
         []
       end
@@ -701,12 +799,12 @@ defmodule Atomboy.Native.Machine do
         pixels ++
         [
           {:timer, [Asm.la(:t3, :machine_state), RV32.addi(:t3, :t3, @ms_div)], @ms_timer_size}
-        ]
+        ] ++ audio
     )
   end
 
-  # status, opcode, cycles, framebuffer, memory -- five words.
-  @result_size 20
+  # status, opcode, cycles, framebuffer, memory, samples, sample count.
+  @result_size 28
 
   @doc """
   The same machine, as a subroutine an ESP-IDF application calls.
@@ -727,6 +825,13 @@ defmodule Atomboy.Native.Machine do
       8   cycles      T-cycles run, the whole run
       12  framebuffer the last frame, one shade per pixel -- 0 without `:render`
       16  memory      the 64 KB, so a host can read OAM or a save
+      20  samples     the last frame's stereo s16le -- 0 without `:audio`
+      24  count       how many stereo samples of it are the frame's
+
+  `count` is 548 or 549 and never both: 70,224 cycles over 128 leaves a fraction
+  that accumulates, so a caller pushing `samples` at an I2S peripheral has to
+  read the count rather than assume one. Assuming 548 forever drifts by a sample
+  every eight frames, which is 8 Hz of pitch error and audible within a minute.
 
   The guest's state lives inside the blob, so the copy the caller keeps *is* the
   console: calling again continues where the last call stopped. What it must not
@@ -736,6 +841,7 @@ defmodule Atomboy.Native.Machine do
   def blob(memory, %State{} = state, frames, opts \\ [])
       when byte_size(memory) == @memory and is_integer(frames) and frames > 0 do
     render? = Keyword.get(opts, :render, true)
+    audio? = Keyword.get(opts, :audio, true)
     rom = Keyword.get(opts, :rom)
 
     Blob.build(
@@ -747,15 +853,16 @@ defmodule Atomboy.Native.Machine do
         RV32.sw(:a0, :t0, 0),
         driver(render?, rom, false),
         scanline(),
-        line_done(render?),
+        line_done(render?, audio?),
         Interp.routines(budget_exit: :line_done),
-        blob_exits(render?),
-        seam(rom),
+        blob_exits(render?, audio?),
+        seam(rom, audio?),
         Interp.handlers(),
         ALU.routines(),
-        if(render?, do: PPU.routines(), else: [])
+        if(render?, do: PPU.routines(), else: []),
+        if(audio?, do: APU.routines(), else: [])
       ],
-      data(memory, state, frames, render?, Keyword.get(opts, :timer, {0, 0}), rom) ++
+      data(memory, state, frames, render?, audio?, Keyword.get(opts, :timer, {0, 0}), rom) ++
         [{:align, 4}, Asm.label(:blob_result), {:space, @result_size}]
     )
   end
@@ -767,7 +874,7 @@ defmodule Atomboy.Native.Machine do
   # The two exits an image sends over a serial port, answered instead. Both
   # labels have to exist under either regime: `unknown_opcode` is what 500 jump
   # table entries point at for a byte no handler covers.
-  defp blob_exits(render?) do
+  defp blob_exits(render?, audio?) do
     statuses = Interp.statuses()
 
     [
@@ -817,13 +924,24 @@ defmodule Atomboy.Native.Machine do
       RV32.sw(:t0, :a0, 12),
       Asm.la(:t0, :memory_gb),
       RV32.sw(:t0, :a0, 16),
+      if audio? do
+        [
+          Asm.la(:t0, :apu_buffer),
+          RV32.sw(:t0, :a0, 20),
+          Asm.la(:t0, APU.count_label()),
+          RV32.lw(:t0, :t0, 0),
+          RV32.sw(:t0, :a0, 24)
+        ]
+      else
+        [RV32.sw(:zero, :a0, 20), RV32.sw(:zero, :a0, 24)]
+      end,
       Asm.j(Blob.return())
     ]
   end
 
   # ══ The data ═════════════════════════════════════════════════════════════════
 
-  defp data(memory, state, frames, render?, timer, rom) do
+  defp data(memory, state, frames, render?, audio?, timer, rom) do
     [
       Interp.tables(),
       Cart.data(rom),
@@ -857,20 +975,37 @@ defmodule Atomboy.Native.Machine do
         ]
       else
         []
+      end,
+
+      # And the sound, on the same terms as the pixels and for the same reason:
+      # outside the 64 KB, because a DMG has no sample buffer in its address
+      # space either. 2,196 bytes, the largest a frame can be.
+      if audio? do
+        [
+          APU.data(),
+          {:align, 4},
+          Asm.label(:apu_buffer),
+          {:space, APU.max_bytes()}
+        ]
+      else
+        []
       end
     ]
   end
 
   # ══ The record, read back ════════════════════════════════════════════════════
 
-  defp decode(serial, duration_us, size, render?) do
+  defp decode(serial, duration_us, size, render?, audio?) do
     magic = Interp.magic()
     pixels = if render?, do: @frame_bytes, else: 0
+    sound = if audio?, do: APU.max_bytes(), else: 0
+    apu_state = if audio?, do: APU.state_bytes(), else: 0
 
     case serial do
       <<^magic, a, f, b, c, d, e, h, l, sp::16-little, pc::16-little, control, cycles::32-little,
         status, opcode, instret::32-little, memory::binary-size(@memory),
-        frame::binary-size(pixels), div_sub::32-little, tima_sub::32-little>> ->
+        frame::binary-size(pixels), div_sub::32-little, tima_sub::32-little,
+        samples::binary-size(sound), apu::binary-size(apu_state)>> ->
         {:ok,
          %{
            state: %State{
@@ -890,6 +1025,8 @@ defmodule Atomboy.Native.Machine do
            },
            memory: memory,
            pixels: if(render?, do: frame, else: nil),
+           samples: if(audio?, do: samples, else: nil),
+           apu: if(audio?, do: APUBench.decode_state(apu), else: nil),
            cycles: cycles,
            timer: {div_sub, tima_sub},
            status: status_name(status),

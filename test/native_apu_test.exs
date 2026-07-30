@@ -37,6 +37,9 @@ defmodule Atomboy.NativeAPUTest do
 
   alias Atomboy.APU
   alias Atomboy.Native.APUBench
+  alias Atomboy.Native.Boot
+  alias Atomboy.Native.Machine
+  alias Atomboy.Screen
 
   @moduletag :qemu
   @moduletag timeout: 900_000
@@ -85,6 +88,61 @@ defmodule Atomboy.NativeAPUTest do
       #{inputs(report.divergences, cases)}
       """
     end
+  end
+
+  describe "a real game, through the whole machine" do
+    @tag :slow
+    test "tetris.gb sounds the same on both cores, sample for sample" do
+      # The one that matters, and the reason the isolated bench is not enough:
+      # here the registers come from a game rather than from a case, the triggers
+      # come through the seam rather than from a mask handed in, and the state
+      # has accumulated across 520 frames rather than being installed.
+      #
+      # 520 is not arbitrary. Tetris is silent for its first 515 frames -- the
+      # copyright screen -- and a comparison of silence against silence is a
+      # comparison of nothing. It was passing at ten frames while three fields of
+      # channel state were already wrong.
+      rom = Screen.load(Path.join([__DIR__, "..", "tetris.gb"]))
+      state = Screen.boot_state(rom, true)
+      ram = Screen.boot_ram(rom, true) |> Map.merge(Boot.io_state())
+
+      {expected, expected_apu} = oracle_audio(state, rom, ram, 520)
+
+      result = Machine.run!(memory(rom, ram), state, 520, audio: true, timeout: 600_000)
+
+      assert result.status == :ok
+
+      # A frame of silence would pass every assertion below without proving one
+      # of them, which is exactly what happened for the first eleven runs.
+      assert byte_size(expected) == 2196
+
+      refute expected == :binary.copy(<<0>>, byte_size(expected)),
+             "tetris is silent at frame 520: the comparison proves nothing"
+
+      assert binary_part(result.samples, 0, byte_size(expected)) == expected
+      assert result.apu == expected_apu
+    end
+  end
+
+  # `Atomboy.Play.Audio`'s cadence, without the pipe: one frame of console, one
+  # frame of sound, the APU state and the trigger list carried between them.
+  defp oracle_audio(state, rom, ram, frames) do
+    {samples, _state, _ram, apu} =
+      Enum.reduce(1..frames, {<<>>, state, ram, %APU{}}, fn _index, {_bin, state, ram, apu} ->
+        {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+        {bin, ram, apu} = APU.frame(ram, apu)
+        {bin, state, ram, apu}
+      end)
+
+    {samples, apu}
+  end
+
+  # The flat 64 KB the guest receives, as `Atomboy.NativeMachineTest` builds it:
+  # the ROM below 0x8000, and above it what the oracle's map reads back -- 0xFF
+  # where nothing was written, which is `CartLoop`'s open bus.
+  defp memory(rom, ram) do
+    high = for address <- 0x8000..0xFFFF, into: <<>>, do: <<Map.get(ram, address, 0xFF)>>
+    binary_part(rom, 0, 0x8000) <> high
   end
 
   defp format(divergences, names) do
