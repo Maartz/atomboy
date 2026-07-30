@@ -1,38 +1,37 @@
 defmodule Atomboy.Native.Regs do
   @moduledoc """
-  Où vit chaque registre du SM83, dans les 32 registres du RISC-V.
+  Where each SM83 register lives among the RISC-V 32.
 
-  Le seul module qui le sache. Tout ce qui est au-dessus dit `read8({:reg, :h},
-  :t0)` et ignore que H n'existe pas — qu'il est la moitié haute d'un registre
-  qui contient HL.
+  The only module that knows. Everything above says `read8({:reg, :h}, :t0)`
+  and never learns that H does not exist -- that it is the high half of a
+  register holding HL.
 
-  ## La ressource rare n'est pas le nombre de registres
+  ## The scarce resource is not the number of registers
 
-  Il y en a 32 pour une quinzaine de besoins. Ce qui est rare, c'est le sous-
-  ensemble `x8`-`x15` : une instruction dont tous les opérandes y tombent peut
-  se coder sur deux octets au lieu de quatre. On n'émet encore rien de
-  compressé (voir `Atomboy.Native.RV32`), mais le jour où l'icache mordra, la
-  compression sera gratuite là où les registres chauds auront été placés — et
-  hors de prix ailleurs. D'où cette carte, décidée maintenant plutôt que
-  regrettée plus tard.
+  There are 32 for about fifteen needs. What is scarce is the `x8`-`x15`
+  subset: an instruction whose operands all land there can encode in two bytes
+  instead of four. We emit nothing compressed yet (see `Atomboy.Native.RV32`),
+  but the day the instruction cache bites, compression will be free where the
+  hot registers were placed -- and unaffordable elsewhere. Hence this map,
+  decided now rather than regretted later.
 
-  ## Trois choix qui ne vont pas de soi
+  ## Three choices that are not obvious
 
-  **`0xFFFF` occupe un registre entier.** `andi` ne prend qu'un immédiat signé
-  sur 12 bits : masquer un octet est gratuit, masquer 16 bits est impossible.
-  Sans registre dédié, chaque repli — PC, SP, HL, toute adresse — coûterait
-  deux instructions au lieu d'une.
+  **`0xFFFF` takes a whole register.** `andi` only takes a 12-bit signed
+  immediate: masking a byte is free, masking 16 bits is impossible. Without a
+  dedicated register, every wrap -- PC, SP, HL, any address -- would cost two
+  instructions instead of one.
 
-  **HL est empaqueté, B/C/D/E restent séparés.** Asymétrie délibérée avec les
-  backends Elixir, et le seul endroit où le natif ne doit pas les imiter. HL
-  sert d'adresse bien plus souvent que de deux octets : chaque opérande `(HL)`
-  devient une addition, là où la forme séparée demanderait un décalage, un ou
-  logique et une addition. B, C, D et E vont dans l'autre sens — presque
-  toujours lus en octets, leurs formes par paires sont les rares.
+  **HL is packed, B/C/D/E stay split.** A deliberate asymmetry with the Elixir
+  backends, and the one place the native side must not imitate them. HL serves
+  as an address far more often than as two bytes: every `(HL)` operand becomes
+  one addition, where the split form would need a shift, an or and an addition.
+  B, C, D and E go the other way -- almost always read as bytes, their paired
+  forms being the rare ones.
 
-  **F reste empaqueté en bits 7-4.** Le dépaqueter casserait `PUSH AF`, `DAA`,
-  et surtout le contrat 1:1 avec `Atomboy.CPU.ALU` dont dépendra le test
-  différentiel exhaustif des drapeaux.
+  **F stays packed in bits 7-4.** Unpacking it would break `PUSH AF`, `DAA`,
+  and above all the 1:1 contract with `Atomboy.CPU.ALU` that the exhaustive
+  flag differential test depends on.
   """
 
   alias Atomboy.Native.RV32
@@ -57,47 +56,47 @@ defmodule Atomboy.Native.Regs do
   ]
 
   for {role, register} <- @map do
-    @doc "Le registre RV32 qui porte #{role}."
+    @doc "The RV32 register carrying #{role}."
     @spec unquote(role)() :: RV32.reg()
     def unquote(role)(), do: unquote(register)
   end
 
-  @doc "La carte complète, pour la documentation et les tests."
+  @doc "The complete map, for documentation and tests."
   @spec map() :: keyword(RV32.reg())
   def map, do: @map
 
-  @controle %{ime: 0x01, halted: 0x02, pending: 0x04}
+  @control_bits %{ime: 0x01, halted: 0x02, pending: 0x04}
 
   @doc """
-  La disposition du registre de contrôle — trois booléens dans un registre.
+  The control register's layout -- three booleans in one register.
 
-  Les regrouper n'est pas de l'économie de registres, il en reste : c'est pour
-  que le chemin rapide du `fetch` les écarte tous les trois d'un seul `bnez`.
-  Un jeu qui laisse IME éteint, ce qui est le cas hors gestionnaire
-  d'interruption, ne paie alors rien du tout.
+  Grouping them is not register economy, there are spare ones: it is so the
+  fast path of `fetch` clears all three with a single `bnez`. A game leaving
+  IME off, which is the case outside an interrupt handler, then pays nothing at
+  all.
 
-  Source unique : `Atomboy.Native.Emit` pose ces bits, `Atomboy.Native.Interp`
-  les lit et les fabrique depuis un `%Atomboy.CPU.State{}`.
+  Single source: `Atomboy.Native.Emit` sets these bits, `Atomboy.Native.Interp`
+  reads them and builds them from an `%Atomboy.CPU.State{}`.
   """
-  @spec controle() :: %{ime: 1, halted: 2, pending: 4}
-  def controle, do: @controle
+  @spec control_bits() :: %{ime: 1, halted: 2, pending: 4}
+  def control_bits, do: @control_bits
 
   @doc """
-  Les registres libres pour un gestionnaire d'opcode.
+  The registers a handler may use freely.
 
-  `a1` porte l'opcode courant jusqu'au bout du gestionnaire — c'est ce qui
-  permet à `opcode_inconnu` de dire lequel — et n'est donc pas de la pâture.
+  `a1` carries the current opcode all the way through -- that is what lets
+  `unknown_opcode` name it -- so it is not fair game.
   """
   @spec scratch() :: [RV32.reg()]
   def scratch, do: [:t0, :t1, :t2, :a0]
 
-  # ══ Les octets ═══════════════════════════════════════════════════════════════
+  # ══ The bytes ════════════════════════════════════════════════════════════════
 
   @doc """
-  Lit un registre 8 bits du SM83 dans `dest`.
+  Reads an 8-bit SM83 register into `dest`.
 
-  `dest` peut être le registre porteur lui-même : la lecture est alors une
-  copie inutile, que l'appelant est libre d'élider.
+  `dest` may be the carrying register itself: the read is then a useless copy,
+  which the caller is free to elide.
   """
   @spec read8({:reg, atom()}, RV32.reg()) :: [binary()]
   def read8({:reg, :h}, dest), do: [RV32.srli(dest, hl(), 8)]
@@ -105,10 +104,10 @@ defmodule Atomboy.Native.Regs do
   def read8({:reg, name}, dest), do: [RV32.mv(dest, direct!(name))]
 
   @doc """
-  Écrit `src` dans un registre 8 bits du SM83.
+  Writes `src` into an 8-bit SM83 register.
 
-  `src` doit déjà tenir sur huit bits. Les formes H et L écrasent `t1` et `t2`,
-  qui ne doivent donc pas porter `src`.
+  `src` must already fit in eight bits. The H and L forms clobber `t1` and
+  `t2`, which therefore must not carry `src`.
   """
   @spec write8({:reg, atom()}, RV32.reg()) :: [binary()]
   def write8({:reg, :h}, src) do
@@ -124,9 +123,9 @@ defmodule Atomboy.Native.Regs do
   def write8({:reg, :l}, src) do
     guard!(:l, src, [:t1])
 
-    # -256 vaut 0xFFFFFF00 une fois sign-étendu : les huit bits bas tombent,
-    # tout le reste survit. L'immédiat tient dans les 12 bits signés, là où
-    # 0xFF00 n'y tiendrait pas.
+    # -256 is 0xFFFFFF00 once sign-extended: the low eight bits fall, everything
+    # else survives. The immediate fits in 12 signed bits, where 0xFF00 would
+    # not.
     [
       RV32.andi(:t1, hl(), -256),
       RV32.or_(hl(), :t1, src)
@@ -135,45 +134,45 @@ defmodule Atomboy.Native.Regs do
 
   def write8({:reg, name}, src), do: [RV32.mv(direct!(name), src)]
 
-  # ══ Les paires ═══════════════════════════════════════════════════════════════
+  # ══ The pairs ════════════════════════════════════════════════════════════════
 
   @doc """
-  Lit une paire 16 bits dans `dest`.
+  Reads a 16-bit pair into `dest`.
 
-  `HL` et `SP` sont déjà des registres 16 bits : la lecture est une copie, que
-  l'appelant peut élider s'il sait où il met les pieds. `BC`, `DE` et `AF` se
-  recomposent, ce qui est le prix de les garder séparés — payé sur les formes
-  par paires, qui sont les rares.
+  `HL` and `SP` are already 16-bit registers: the read is a copy, which the
+  caller may elide knowingly. `BC`, `DE` and `AF` are recomposed, which is the
+  price of keeping them split -- paid on the paired forms, which are the rare
+  ones.
   """
   @spec read16({:pair, atom()}, RV32.reg()) :: [binary()]
   def read16({:pair, :hl}, dest), do: [RV32.mv(dest, hl())]
   def read16({:pair, :sp}, dest), do: [RV32.mv(dest, sp())]
-  def read16({:pair, :bc}, dest), do: composer(b(), c(), dest)
-  def read16({:pair, :de}, dest), do: composer(d(), e(), dest)
-  def read16({:pair, :af}, dest), do: composer(a(), f(), dest)
+  def read16({:pair, :bc}, dest), do: compose(b(), c(), dest)
+  def read16({:pair, :de}, dest), do: compose(d(), e(), dest)
+  def read16({:pair, :af}, dest), do: compose(a(), f(), dest)
 
   @doc """
-  Écrit `src` dans une paire 16 bits. `src` doit déjà tenir sur seize bits.
+  Writes `src` into a 16-bit pair. `src` must already fit in sixteen bits.
 
-  Le cas `AF` porte le masque `0xF0` sur F : les quatre bits bas du registre de
-  drapeaux n'existent pas sur le matériel, et `POP AF` est le seul endroit d'où
-  une valeur arbitraire pourrait y entrer. C'est aussi ce que fait
-  `Atomboy.CPU.Gen` (gen.ex:1441) — le masque est ici plutôt que chez l'appelant
-  parce que `AF` ne s'écrit nulle part ailleurs.
+  The `AF` case carries the `0xF0` mask on F: the flag register's low four bits
+  do not exist on hardware, and `POP AF` is the only place an arbitrary value
+  could enter them. `Atomboy.CPU.Gen` does the same (gen.ex:1441) -- the mask
+  lives here rather than at the call site because `AF` is written nowhere
+  else.
   """
   @spec write16({:pair, atom()}, RV32.reg()) :: [binary()]
   def write16({:pair, :hl}, src), do: [RV32.mv(hl(), src)]
   def write16({:pair, :sp}, src), do: [RV32.mv(sp(), src)]
-  def write16({:pair, :bc}, src), do: decomposer(b(), c(), src, 0xFF)
-  def write16({:pair, :de}, src), do: decomposer(d(), e(), src, 0xFF)
-  def write16({:pair, :af}, src), do: decomposer(a(), f(), src, 0xF0)
+  def write16({:pair, :bc}, src), do: decompose(b(), c(), src, 0xFF)
+  def write16({:pair, :de}, src), do: decompose(d(), e(), src, 0xFF)
+  def write16({:pair, :af}, src), do: decompose(a(), f(), src, 0xF0)
 
-  defp composer(haut, bas, dest) do
-    [RV32.slli(dest, haut, 8), RV32.or_(dest, dest, bas)]
+  defp compose(high, low, dest) do
+    [RV32.slli(dest, high, 8), RV32.or_(dest, dest, low)]
   end
 
-  defp decomposer(haut, bas, src, masque) do
-    [RV32.srli(haut, src, 8), RV32.andi(bas, src, masque)]
+  defp decompose(high, low, src, mask) do
+    [RV32.srli(high, src, 8), RV32.andi(low, src, mask)]
   end
 
   defp direct!(name) do
@@ -183,14 +182,14 @@ defmodule Atomboy.Native.Regs do
 
       :error ->
         raise ArgumentError,
-              "registre SM83 sans porteur direct : #{inspect(name)} — H et L passent par HL"
+              "SM83 register with no direct carrier: #{inspect(name)} -- H and L go through HL"
     end
   end
 
   defp guard!(name, src, forbidden) do
     if src in forbidden do
       raise ArgumentError,
-            "écrire #{String.upcase(to_string(name))} depuis #{src} : ce registre sert de temporaire ici"
+            "writing #{String.upcase(to_string(name))} from #{src}: that register is a temporary here"
     end
   end
 end

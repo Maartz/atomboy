@@ -1,13 +1,13 @@
 defmodule Atomboy.Native.RV32 do
   @moduledoc """
-  L'encodeur RISC-V 32 bits — une instruction, quatre octets.
+  The RISC-V 32-bit encoder -- one instruction, four bytes.
 
-  Le même pari que `Atomboy.CPU.Table` : décrire l'encodage en donnée et laisser
-  la génération produire les fonctions. Les cinq formats de RV32I tiennent en
-  quelques lignes chacun, et une instruction ne coûte alors qu'une entrée de
-  table — `{:add, "add", 0x00, 0x0}` — plutôt qu'un corps recopié.
+  The same bet as `Atomboy.CPU.Table`: describe the encoding as data and let
+  generation produce the functions. The five RV32I formats fit in a few lines
+  each, so an instruction costs one table entry -- `{:add, "add", 0x00, 0x0}` --
+  rather than a copied body.
 
-  ## Les formats
+  ## The formats
 
       R  funct7[31:25] rs2[24:20] rs1[19:15] funct3[14:12] rd[11:7] opcode[6:0]
       I  imm[31:20]              rs1        funct3        rd       opcode
@@ -16,26 +16,26 @@ defmodule Atomboy.Native.RV32 do
       U  imm[31:12]                                       rd       opcode
       J  imm[20|10:1|11|19:12]                            rd       opcode
 
-  Les formats B et J réordonnent les bits de l'immédiat au lieu de les poser
-  d'affilée. Ce n'est pas une coquetterie : le découpage aligne chaque bit sur la
-  position qu'il occupe déjà dans les autres formats, ce qui économise du câblage
-  dans le décodeur matériel. Pour nous c'est juste un piège à recopier
-  soigneusement, d'où l'oracle externe : `riscv64-unknown-elf-as` assemble le
-  même texte, `objdump` le redonne en octets, et le test compare.
+  The B and J formats scramble the immediate's bits instead of laying them out
+  in order. That is not affectation: the split keeps each bit at the position it
+  already occupies in the other formats, which saves wiring in the hardware
+  decoder. For us it is simply a trap to copy carefully, hence the external
+  oracle -- `riscv64-unknown-elf-as` assembles the same text, `objdump` gives it
+  back as bytes, and the test compares.
 
-  ## Rien de compressé
+  ## Nothing compressed
 
-  RV32C sait coder certaines instructions sur deux octets. On n'en émet aucune,
-  délibérément. La taille d'une instruction compressée dépend de ses opérandes —
-  et pour un branchement, de la distance à sa cible, laquelle dépend de la taille
-  des instructions intermédiaires. C'est un point fixe, et le résoudre demande un
-  assembleur bien plus gros que celui d'`Atomboy.Native.Asm`. Tout fait quatre
-  octets : la passe 1 connaît chaque adresse avant d'émettre un seul octet.
+  RV32C can encode some instructions in two bytes. We emit none of them,
+  deliberately. A compressed instruction's size depends on its operands -- and
+  for a branch, on the distance to its target, which depends on the size of the
+  instructions in between. That is a fixed point, and solving it takes an
+  assembler far larger than `Atomboy.Native.Asm`. Everything is four bytes, so
+  pass one knows every address before a single byte is emitted.
 
-  Le jour où la taille du code deviendra le facteur limitant — c'est le sujet du
-  projet, donc ce jour viendra — la compression s'ajoutera là où elle est sûre :
-  les instructions dont les opérandes sont connus à l'émission, jamais celles qui
-  visent une étiquette.
+  The day code size becomes the limiting factor -- that is the subject of this
+  project, so that day will come -- compression goes where it is safe: on
+  instructions whose operands are known at emission, never on those targeting a
+  label.
   """
 
   import Bitwise
@@ -75,7 +75,7 @@ defmodule Atomboy.Native.RV32 do
     t6: 31
   }
 
-  @typedoc "Un registre, désigné par son nom ABI."
+  @typedoc "A register, named after the ABI."
   @type reg ::
           :zero
           | :ra
@@ -110,7 +110,7 @@ defmodule Atomboy.Native.RV32 do
           | :a6
           | :a7
 
-  @doc "Le numéro d'un registre. Lève sur un nom inconnu — une faute de frappe ne doit pas encoder."
+  @doc "A register's number. Raises on an unknown name -- a typo must not encode."
   @spec reg(reg()) :: 0..31
   def reg(name) do
     case @regs do
@@ -119,19 +119,19 @@ defmodule Atomboy.Native.RV32 do
 
       _ ->
         raise ArgumentError,
-              "registre RV32 inconnu : #{inspect(name)} — les noms sont ceux de l'ABI (#{@regs |> Map.keys() |> Enum.sort() |> Enum.join(", ")})"
+              "unknown RV32 register: #{inspect(name)} -- names are the ABI ones (#{@regs |> Map.keys() |> Enum.sort() |> Enum.join(", ")})"
     end
   end
 
-  @doc "Tous les noms de registres, du plus petit numéro au plus grand."
+  @doc "Every register name, lowest number first."
   @spec regs() :: [reg()]
   def regs, do: @regs |> Enum.sort_by(&elem(&1, 1)) |> Enum.map(&elem(&1, 0))
 
   # ══ Les tables ═══════════════════════════════════════════════════════════════
   #
-  # Chaque entrée : {nom Elixir, mnémonique assembleur, …champs d'encodage}. Le
-  # nom diffère du mnémonique pour `and`, `or` et `xor`, qui sont des formes
-  # spéciales d'Elixir et ne peuvent pas être des noms de fonction.
+  # Each entry: {Elixir name, assembler mnemonic, ...encoding fields}. The name
+  # differs from the mnemonic for `and`, `or` and `xor`, which are Elixir special
+  # forms and cannot be function names.
 
   @r_type [
     {:add, "add", 0x00, 0x0},
@@ -190,7 +190,7 @@ defmodule Atomboy.Native.RV32 do
     {:auipc, "auipc", 0x17}
   ]
 
-  # ══ Les émetteurs, générés ═══════════════════════════════════════════════════
+  # ══ The emitters, generated ══════════════════════════════════════════════════
 
   for {name, asm, funct7, funct3} <- @r_type do
     @doc "`#{asm} rd, rs1, rs2`"
@@ -203,7 +203,7 @@ defmodule Atomboy.Native.RV32 do
   end
 
   for {name, asm, opcode, funct3} <- @i_type do
-    @doc "`#{asm} rd, rs1, imm` — l'immédiat est signé sur 12 bits."
+    @doc "`#{asm} rd, rs1, imm` -- the immediate is signed, 12 bits."
     @spec unquote(name)(reg(), reg(), -2048..2047) :: binary()
     def unquote(name)(rd, rs1, imm) do
       check_imm!(unquote(asm), imm, -2048, 2047)
@@ -221,7 +221,7 @@ defmodule Atomboy.Native.RV32 do
   end
 
   for {name, asm, funct7, funct3} <- @shift_type do
-    @doc "`#{asm} rd, rs1, shamt` — le décalage tient sur 5 bits."
+    @doc "`#{asm} rd, rs1, shamt` -- the shift amount fits in 5 bits."
     @spec unquote(name)(reg(), reg(), 0..31) :: binary()
     def unquote(name)(rd, rs1, shamt) do
       check_imm!(unquote(asm), shamt, 0, 31)
@@ -244,8 +244,8 @@ defmodule Atomboy.Native.RV32 do
 
   for {name, asm, funct3} <- @b_type do
     @doc """
-    `#{asm} rs1, rs2, offset` — l'offset est relatif à l'instruction elle-même,
-    pair, et tient sur 13 bits signés (±4 Ko).
+    `#{asm} rs1, rs2, offset` -- the offset is relative to the instruction
+    itself, even, and fits in 13 signed bits (+/-4 KB).
     """
     @spec unquote(name)(reg(), reg(), integer()) :: binary()
     def unquote(name)(rs1, rs2, offset) do
@@ -260,7 +260,7 @@ defmodule Atomboy.Native.RV32 do
   end
 
   for {name, asm, opcode} <- @u_type do
-    @doc "`#{asm} rd, imm` — les 20 bits de poids fort, l'immédiat étant déjà décalé."
+    @doc "`#{asm} rd, imm` -- the top 20 bits, the immediate already shifted."
     @spec unquote(name)(reg(), 0..0xFFFFF) :: binary()
     def unquote(name)(rd, imm) do
       check_imm!(unquote(asm), imm, 0, 0xFFFFF)
@@ -269,10 +269,10 @@ defmodule Atomboy.Native.RV32 do
   end
 
   @doc """
-  `jal rd, offset` — saut relatif, pair, sur 21 bits signés (±1 Mo).
+  `jal rd, offset` -- a relative jump, even, in 21 signed bits (+/-1 MB).
 
-  La portée décide de la forme des tables de saut : à ±1 Mo, un `j` couvre
-  n'importe quelle cible de l'interpréteur sans détour.
+  That reach decides the shape of the jump tables: at +/-1 MB, a `j` covers any
+  target in the interpreter without a detour.
   """
   @spec jal(reg(), integer()) :: binary()
   def jal(rd, offset) do
@@ -282,12 +282,12 @@ defmodule Atomboy.Native.RV32 do
   end
 
   @doc """
-  `csrrs rd, csr, rs1` — lit un registre de contrôle.
+  `csrrs rd, csr, rs1` -- reads a control register.
 
-  Une seule adresse nous intéresse : `0xC02`, le compteur `instret`
-  d'instructions retirées. Sous `qemu -icount shift=0` il compte exactement les
-  instructions exécutées, ce qui donne la mesure du projet — instructions RV32
-  par instruction SM83 — sans greffon ni ligne de C.
+  Only one address interests us: `0xC02`, the `instret` counter of retired
+  instructions. Under `qemu -icount shift=0` it counts executed instructions
+  exactly, which yields this project's measurement -- RV32 instructions per SM83
+  instruction -- with no plugin and no line of C.
   """
   @spec csrrs(reg(), 0..0xFFF, reg()) :: binary()
   def csrrs(rd, csr, rs1) do
@@ -298,16 +298,16 @@ defmodule Atomboy.Native.RV32 do
   # ══ Pseudo-instructions ══════════════════════════════════════════════════════
 
   @doc """
-  `li rd, valeur` — charge une constante quelconque, en une ou deux instructions.
+  `li rd, value` -- loads any constant, in one or two instructions.
 
-  Le piège : `addi` sign-étend son immédiat. Quand les 12 bits de poids faible
-  dépassent 0x7FF, ils s'interprètent en négatif et retranchent 0x1000 au
-  résultat — il faut donc ajouter 1 aux bits hauts pour compenser. L'arrondi
-  `(valeur + 0x800) >>> 12` fait exactement cela.
+  The trap: `addi` sign-extends its immediate. When the low 12 bits exceed
+  0x7FF they read as negative and subtract 0x1000 from the result, so the high
+  bits must be incremented to compensate. The rounding `(value + 0x800) >>> 12`
+  does exactly that.
 
-  Second piège, trouvé par l'oracle : la valeur est d'abord ramenée à un entier
-  signé sur 32 bits. Sans cela `0xFFFFFFFF` — la même valeur que `-1`, écrite
-  autrement — sortait en deux instructions au lieu d'une.
+  A second trap, found by the oracle: the value is first reduced to a signed
+  32-bit integer. Without that, `0xFFFFFFFF` -- the same value as `-1`, written
+  differently -- came out as two instructions instead of one.
   """
   @spec li(reg(), integer()) :: [binary()]
   def li(rd, value) do
@@ -328,34 +328,34 @@ defmodule Atomboy.Native.RV32 do
     end
   end
 
-  @doc "`nop` — le `addi zero, zero, 0` canonique."
+  @doc "`nop` -- the canonical `addi zero, zero, 0`."
   @spec nop() :: binary()
   def nop, do: addi(:zero, :zero, 0)
 
-  @doc "`mv rd, rs` — une copie de registre."
+  @doc "`mv rd, rs` -- a register copy."
   @spec mv(reg(), reg()) :: binary()
   def mv(rd, rs), do: addi(rd, rs, 0)
 
-  @doc "`j offset` — un saut qui ne garde pas d'adresse de retour."
+  @doc "`j offset` -- a jump that keeps no return address."
   @spec j(integer()) :: binary()
   def j(offset), do: jal(:zero, offset)
 
-  @doc "`jr rs` — un saut vers l'adresse contenue dans un registre."
+  @doc "`jr rs` -- a jump to the address held in a register."
   @spec jr(reg()) :: binary()
   def jr(rs), do: jalr(:zero, rs, 0)
 
-  @doc "`ret` — le retour d'une sous-routine, `jr ra`."
+  @doc "`ret` -- a subroutine return, `jr ra`."
   @spec ret() :: binary()
   def ret, do: jr(:ra)
 
   # ══ Introspection ════════════════════════════════════════════════════════════
 
   @doc """
-  Toutes les formes émises, en donnée — le test différentiel les parcourt.
+  Every emitted form, as data -- the differential test walks them.
 
-  Chaque entrée décrit comment appeler l'émetteur et comment écrire la même
-  instruction pour `riscv64-unknown-elf-as`, ce qui permet au test de couvrir
-  automatiquement toute nouvelle instruction ajoutée aux tables.
+  Each entry says how to call the emitter and how to write the same instruction
+  for `riscv64-unknown-elf-as`, which lets the test cover any new instruction
+  added to the tables automatically.
   """
   @spec forms() :: [%{name: atom(), asm: String.t(), shape: atom()}]
   def forms do
@@ -368,26 +368,26 @@ defmodule Atomboy.Native.RV32 do
       Enum.map(@u_type, fn {name, asm, _} -> %{name: name, asm: asm, shape: :upper} end)
   end
 
-  # jalr s'écrit comme un chargement chez as : `jalr rd, imm(rs1)`.
+  # as writes jalr like a load: `jalr rd, imm(rs1)`.
   defp shape_i(:jalr), do: :load
   defp shape_i(_), do: :rri
 
-  # ══ Le socle ═════════════════════════════════════════════════════════════════
+  # ══ The foundation ═══════════════════════════════════════════════════════════
 
-  # Les champs sont posés du bit 31 au bit 0, puis relus en petit-boutien : c'est
-  # dans cet ordre que la documentation RISC-V les présente, et c'est le seul
-  # moyen que la relecture d'un encodage soit possible.
+  # Fields are laid out from bit 31 down to bit 0, then read back little-endian:
+  # that is the order the RISC-V documentation presents them in, and the only
+  # order in which re-reading an encoding is possible.
   defp encode(<<word::32>>), do: <<word::32-little>>
 
   defp check_imm!(mnemonic, value, low, high) when is_integer(value) do
     unless value >= low and value <= high do
       raise ArgumentError,
-            "#{mnemonic} : l'immédiat #{value} sort de la portée #{low}..#{high}"
+            "#{mnemonic}: immediate #{value} is outside #{low}..#{high}"
     end
   end
 
   defp check_imm!(mnemonic, value, _low, _high) do
-    raise ArgumentError, "#{mnemonic} : l'immédiat #{inspect(value)} n'est pas un entier"
+    raise ArgumentError, "#{mnemonic}: immediate #{inspect(value)} is not an integer"
   end
 
   defp check_branch!(mnemonic, offset, low, high) do
@@ -395,7 +395,7 @@ defmodule Atomboy.Native.RV32 do
 
     unless rem(offset, 2) == 0 do
       raise ArgumentError,
-            "#{mnemonic} : le déplacement #{offset} est impair — les instructions sont alignées"
+            "#{mnemonic}: displacement #{offset} is odd -- instructions are aligned"
     end
   end
 end

@@ -1,14 +1,13 @@
 defmodule Atomboy.NativeImageTest do
   @moduledoc """
-  L'image de fumée, de bout en bout.
+  The smoke image, end to end.
 
-  Ce test ne vérifie pas grand-chose sur le papier — trois lettres sur un port
-  série. Ce qu'il verrouille, ce sont les quatre suppositions dont dépend tout
-  le harnais, et qu'aucune lecture de documentation ne tranche avec certitude :
-  le processeur démarre bien à `0x8000_0000` sur un binaire brut, l'UART veut
-  qu'on interroge son registre d'état, `sifive_test` rend la main proprement, et
-  l'Elixir n'a besoin ni de compilateur C ni d'éditeur de liens pour produire
-  tout cela.
+  On paper this test checks very little -- three letters on a serial port. What
+  it locks down are the four assumptions the whole harness rests on, none of
+  which documentation settles with certainty: the processor really starts at
+  `0x8000_0000` on a raw binary, the UART wants its status register polled,
+  `sifive_test` hands control back cleanly, and Elixir needs neither a C
+  compiler nor a linker to produce any of it.
   """
 
   use ExUnit.Case, async: true
@@ -18,37 +17,37 @@ defmodule Atomboy.NativeImageTest do
 
   @moduletag :qemu
 
-  test "l'image de fumée boote, parle, et s'éteint" do
+  test "the smoke image boots, speaks, and powers off" do
     image = Image.smoke()
 
-    resultat = Qemu.run(image.code, timeout: 15_000)
+    result = Qemu.run(image.code, timeout: 15_000)
 
-    assert resultat.status == :ok, "qemu n'a pas rendu la main — l'invité boucle"
-    assert resultat.exit_status == 0
-    assert resultat.serial == "OK\n"
+    assert result.status == :ok, "qemu never handed control back -- the guest is looping"
+    assert result.exit_status == 0
+    assert result.serial == "OK\n"
   end
 
-  test "l'image reste minuscule — c'est la promesse du chantier" do
+  test "the image stays tiny -- that is this work's promise" do
     image = Image.smoke()
 
     assert image.size < 512,
-           "le socle a grossi à #{image.size} octets ; l'icache du C6 fait 32 Ko"
+           "the runtime grew to #{image.size} bytes; the C6 cache is 32 KB"
 
     assert rem(image.size, 4) == 0
   end
 
-  test "le point d'entrée est bien le premier octet" do
+  test "the entry point really is the first byte" do
     image = Image.smoke()
     assert image.labels[:_start] == 0
   end
 
-  test "un délai de garde interrompt un invité qui boucle" do
-    # Une image qui ne s'éteint jamais : le premier octet saute sur lui-même.
-    bouclette = Image.build([{:label, :bloque}, Atomboy.Native.Asm.j(:bloque)])
+  test "a watchdog interrupts a looping guest" do
+    # An image that never powers off: the first byte jumps to itself.
+    looper = Image.build([{:label, :bloque}, Atomboy.Native.Asm.j(:bloque)])
 
-    resultat = Qemu.run(bouclette.code, timeout: 1_500)
+    result = Qemu.run(looper.code, timeout: 1_500)
 
-    assert resultat.status == :timeout
-    assert resultat.duration_us >= 1_500_000
+    assert result.status == :timeout
+    assert result.duration_us >= 1_500_000
   end
 end

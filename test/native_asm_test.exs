@@ -4,60 +4,60 @@ defmodule Atomboy.NativeAsmTest do
   alias Atomboy.Native.Asm
   alias Atomboy.Native.RV32
 
-  describe "les étiquettes" do
-    test "un renvoi arrière vise la bonne distance" do
+  describe "labels" do
+    test "a backward reference targets the right distance" do
       %{code: code} =
         Asm.assemble([
-          Asm.label(:boucle),
+          Asm.label(:loop),
           RV32.nop(),
-          Asm.j(:boucle)
+          Asm.j(:loop)
         ])
 
-      # Le saut est à l'offset 4, la cible à 0 : un déplacement de -4.
+      # The jump is at offset 4, the target at 0: a displacement of -4.
       assert code == RV32.nop() <> RV32.j(-4)
     end
 
-    test "un renvoi avant est comblé à la seconde passe" do
+    test "a forward reference is filled on the second pass" do
       %{code: code} =
         Asm.assemble([
-          Asm.j(:fin),
+          Asm.j(:done),
           RV32.nop(),
           RV32.nop(),
-          Asm.label(:fin),
+          Asm.label(:done),
           RV32.ret()
         ])
 
       assert code == RV32.j(12) <> RV32.nop() <> RV32.nop() <> RV32.ret()
     end
 
-    test "un branchement conditionnel vise une étiquette comme les autres" do
-      %{code: code} = Asm.assemble([Asm.beqz(:a0, :suite), RV32.nop(), Asm.label(:suite)])
+    test "a conditional branch targets a label like the rest" do
+      %{code: code} = Asm.assemble([Asm.beqz(:a0, :next), RV32.nop(), Asm.label(:next)])
       assert code == RV32.beq(:a0, :zero, 8) <> RV32.nop()
     end
 
-    test "une étiquette inconnue lève en nommant celles qui existent" do
-      assert_raise ArgumentError, ~r/étiquette inconnue : :absente.*présente/s, fn ->
-        Asm.assemble([Asm.label(:présente), Asm.j(:absente)])
+    test "an unknown label raises, naming the ones that exist" do
+      assert_raise ArgumentError, ~r/unknown label: :absent.*present/s, fn ->
+        Asm.assemble([Asm.label(:present), Asm.j(:absent)])
       end
     end
 
-    test "une étiquette définie deux fois lève" do
-      assert_raise ArgumentError, ~r/deux fois/, fn ->
-        Asm.assemble([Asm.label(:双), Asm.label(:双)])
+    test "a label defined twice raises" do
+      assert_raise ArgumentError, ~r/twice/, fn ->
+        Asm.assemble([Asm.label(:twice_over), Asm.label(:twice_over)])
       end
     end
   end
 
-  describe "les adresses absolues" do
-    test "un {:addr, _} contient l'adresse de chargement plus l'offset" do
+  describe "absolute addresses" do
+    test "an {:addr, _} holds the load address plus the offset" do
       base = 0x8000_0000
 
       %{code: code} =
         Asm.assemble(
           [
-            {:addr, :cible},
+            {:addr, :target},
             RV32.nop(),
-            Asm.label(:cible),
+            Asm.label(:target),
             RV32.ret()
           ],
           base
@@ -67,47 +67,47 @@ defmodule Atomboy.NativeAsmTest do
       assert address == base + 8
     end
 
-    test "address/3 rend la même adresse que la table de saut" do
+    test "address/3 returns the same address as the jump table" do
       base = 0x8000_0000
-      image = Asm.assemble([RV32.nop(), Asm.label(:ici), RV32.ret()], base)
-      assert Asm.address(image, :ici, base) == base + 4
+      image = Asm.assemble([RV32.nop(), Asm.label(:here), RV32.ret()], base)
+      assert Asm.address(image, :here, base) == base + 4
     end
   end
 
-  describe "l'alignement et les réserves" do
-    test "{:align, n} bourre jusqu'au multiple" do
+  describe "alignment and reservations" do
+    test "{:align, n} pads up to the multiple" do
       %{code: code, labels: labels} =
-        Asm.assemble([<<1, 2, 3>>, {:align, 4}, Asm.label(:aligné), <<0xFF>>])
+        Asm.assemble([<<1, 2, 3>>, {:align, 4}, Asm.label(:aligned), <<0xFF>>])
 
       assert byte_size(code) == 5
-      assert labels[:aligné] == 4
+      assert labels[:aligned] == 4
       assert code == <<1, 2, 3, 0, 0xFF>>
     end
 
-    test "{:align, n} sur une position déjà alignée ne coûte rien" do
+    test "{:align, n} on an already-aligned position costs nothing" do
       %{code: code} = Asm.assemble([RV32.nop(), {:align, 4}, RV32.ret()])
       assert byte_size(code) == 8
     end
 
-    test "{:space, n} réserve des octets nuls" do
-      %{code: code, labels: labels} = Asm.assemble([{:space, 6}, Asm.label(:après)])
+    test "{:space, n} reserves zero bytes" do
+      %{code: code, labels: labels} = Asm.assemble([{:space, 6}, Asm.label(:after)])
       assert code == <<0, 0, 0, 0, 0, 0>>
-      assert labels[:après] == 6
+      assert labels[:after] == 6
     end
   end
 
-  describe "l'invariant des deux passes" do
-    test "la taille annoncée est celle qui est émise" do
-      # Un mélange de tous les types d'éléments, dont la taille est connue :
+  describe "the two-pass invariant" do
+    test "the announced size is the one emitted" do
+      # A mix of every item kind, whose total size is known:
       # 4 + 4 + 4 + 3 + 1 (alignement) + 4 + 8 = 28.
       %{code: code, size: size} =
         Asm.assemble([
           RV32.nop(),
-          Asm.j(:fin),
-          {:addr, :fin},
+          Asm.j(:done),
+          {:addr, :done},
           <<1, 2, 3>>,
           {:align, 4},
-          Asm.label(:fin),
+          Asm.label(:done),
           RV32.ret(),
           {:space, 8}
         ])
@@ -116,13 +116,13 @@ defmodule Atomboy.NativeAsmTest do
       assert byte_size(code) == size
     end
 
-    test "un élément inconnu lève plutôt que d'être ignoré" do
-      assert_raise ArgumentError, ~r/élément d'assemblage inconnu/, fn ->
+    test "an unknown item raises rather than being ignored" do
+      assert_raise ArgumentError, ~r/unknown assembly item/, fn ->
         Asm.assemble([RV32.nop(), :surprise])
       end
     end
 
-    test "les listes imbriquées sont aplaties — li en produit" do
+    test "nested lists are flattened -- li produces them" do
       %{size: size} = Asm.assemble([RV32.li(:a0, 0x1234_5678), RV32.ret()])
       assert size == 12
     end

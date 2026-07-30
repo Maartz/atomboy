@@ -1,44 +1,42 @@
 defmodule Atomboy.Native.ALU do
   @moduledoc """
-  L'arithmétique de drapeaux, en RISC-V — le miroir de `Atomboy.CPU.ALU`.
+  Flag arithmetic in RISC-V -- the mirror of `Atomboy.CPU.ALU`.
 
-  Une routine par fonction, mêmes noms, même contrat. Ce n'est pas de la
-  coquetterie : c'est ce qui rend possible le test différentiel de
-  `Atomboy.Native.Banc`, qui compare les deux implémentations sur l'espace
-  d'entrée entier plutôt que sur des exemples. La demi-retenue de `ADC` a un cas
-  fautif sur 4 096 ; un jeu d'exemples ne le trouve pas, une comparaison
-  exhaustive ne peut pas le rater.
+  One routine per function, same names, same contract. That is not affectation:
+  it is what makes `Atomboy.Native.Bench`'s differential test possible, which
+  compares the two implementations over the whole input space rather than over
+  examples. `ADC`'s half-carry has one faulty case in 4096; a set of examples
+  does not find it, an exhaustive comparison cannot miss it.
 
-  ## Des routines appelées, pas de l'inlining
+  ## Called routines, not inlining
 
-  Les 64 opcodes `ALU A, r` plus leurs 8 formes immédiates partageraient sinon
-  une quinzaine d'instructions de calcul de drapeaux recopiées soixante-douze
-  fois — environ 4 Ko, sur un budget d'icache de 32 Ko qui est *toute la raison
-  d'être du chantier*. Le prix est un `jal` et un `ret` par instruction ALU. À
-  remesurer une fois la table pleine, pas avant.
+  The 64 `ALU A, r` opcodes plus their 8 immediate forms would otherwise share
+  some fifteen instructions of flag math copied seventy-two times -- about 4 KB,
+  against a 32 KB instruction-cache budget which is *the entire reason this work
+  exists*. The price is one `jal` and one `ret` per ALU instruction. To be
+  remeasured once the table is full, not before.
 
-  ## La convention d'appel
+  ## The calling convention
 
-      a0    premier argument, et résultat 8 ou 16 bits
-      a1    second argument, quand il en faut un
-      s0    A — lu et réécrit par les opérations sur l'accumulateur
-      s1    F — lu et réécrit par presque tout
-      a2    HL — pour `add16` seulement
-      ra    le retour
+      a0    first argument, and the 8- or 16-bit result
+      a1    second argument, when one is needed
+      s0    A -- read and rewritten by the accumulator operations
+      s1    F -- read and rewritten by nearly everything
+      a2    HL -- for `add16` only
+      ra    the return
 
-  Une routine peut écraser `t0` à `t4`, `a0`, `a1`, et les registres de son
-  contrat. Tout le reste survit : c'est ce qui permet à un gestionnaire d'opcode
-  de garder son état de travail à travers un appel.
+  A routine may clobber `t0` through `t4`, `a0`, `a1`, and the registers of its
+  own contract. Everything else survives: that is what lets an opcode handler
+  keep its working state across a call.
 
-  Aucune routine n'en appelle une autre — ce sont des feuilles, `ra` n'est
-  jamais sauvegardé.
+  No routine calls another -- they are leaves, and `ra` is never saved.
 
-  ## Ce qui reste en dur ailleurs
+  ## What stays inline elsewhere
 
-  Ce que `Atomboy.CPU.Gen` inline, le natif l'inline aussi : `RES`/`SET`, les
-  INC/DEC 16 bits, le masque `0xF0` de `POP AF`, l'extension de signe de `JR`,
-  les tests de condition. La frontière est donc la même des trois côtés, et elle
-  se relit dans un seul endroit — `alu.ex` — plutôt que de se deviner.
+  What `Atomboy.CPU.Gen` inlines, the native side inlines too: `RES`/`SET`, the
+  16-bit INC/DEC, `POP AF`'s `0xF0` mask, `JR`'s sign extension, the condition
+  tests. The boundary is therefore the same on all three sides, and it reads in
+  one place -- `alu.ex` -- instead of having to be guessed.
   """
 
   import Bitwise
@@ -52,9 +50,9 @@ defmodule Atomboy.Native.ALU do
   @c 0x10
 
   @doc """
-  Toutes les routines, à placer une fois dans une image.
+  Every routine, to be placed once in an image.
 
-  Elles ne coûtent que leur taille : rien ne s'exécute sans être appelé.
+  They cost only their size: nothing runs unless it is called.
   """
   @spec routines() :: [Asm.item()]
   def routines do
@@ -79,62 +77,62 @@ defmodule Atomboy.Native.ALU do
       cpl(),
       scf(),
       ccf(),
-      rotations_cb(),
+      cb_rotations(),
       bits()
     ]
   end
 
   @doc """
-  Le nom de l'étiquette d'une routine — le pont entre les deux mondes.
+  A routine's label name -- the bridge between the two worlds.
 
-  `Atomboy.CPU.Gen.alu_call/4` associe déjà un mnémonique à un nom de fonction
-  d'ALU pour les deux backends Elixir ; ceci en est l'équivalent natif.
+  `Atomboy.CPU.Gen.alu_call/4` already maps a mnemonic to an ALU function name
+  for both Elixir backends; this is the native equivalent.
   """
-  @spec etiquette(atom()) :: atom()
-  def etiquette(nom), do: :"alu_#{nom}"
+  @spec label(atom()) :: atom()
+  def label(name), do: :"alu_#{name}"
 
-  @doc "Le nom de l'étiquette d'un `BIT n`, dont le numéro de bit est cuit dans la routine."
-  @spec etiquette_bit(0..7) :: atom()
-  def etiquette_bit(n), do: :"alu_bit_#{n}"
+  @doc "The label name of a `BIT n`, whose bit number is baked into the routine."
+  @spec bit_label(0..7) :: atom()
+  def bit_label(n), do: :"alu_bit_#{n}"
 
   # ══ Additions ════════════════════════════════════════════════════════════════
 
-  # ADD A, v — la retenue entrante est nulle, tout le reste est partagé.
+  # ADD A, v -- the incoming carry is zero, everything else is shared.
   defp add do
     [
-      Asm.label(etiquette(:add)),
+      Asm.label(label(:add)),
       RV32.li(:t4, 0),
-      add_corps(),
+      add_body(),
       RV32.ret()
     ]
   end
 
-  # ADC A, v — la retenue entrante sort de F et **compte dans la demi-retenue**.
-  # C'est le piège documenté dans `Atomboy.CPU.ALU` : l'oublier laisse passer la
-  # grande majorité des cas et ne casse que DAA, beaucoup plus tard.
+  # ADC A, v -- the incoming carry comes from F and **counts in the half-carry**.
+  # This is the trap documented in `Atomboy.CPU.ALU`: forgetting it passes the
+  # vast majority of cases and only breaks DAA, much later.
   defp adc do
     [
-      Asm.label(etiquette(:adc)),
+      Asm.label(label(:adc)),
       carry_in(:t4),
-      add_corps(),
+      add_body(),
       RV32.ret()
     ]
   end
 
-  # A en s0, valeur en a0, retenue entrante en t4. Écrit s0 et s1.
-  defp add_corps do
+  # A in s0, value in a0, incoming carry in t4. Writes s0 and s1.
+  defp add_body do
     [
-      # somme complète, jusqu'à 0x1FF
+      # the full sum, up to 0x1FF
       RV32.add(:t3, :s0, :a0),
       RV32.add(:t3, :t3, :t4),
-      # demi-retenue : les quartets bas plus la retenue dépassent-ils 0xF
+      # half-carry: do the low nibbles plus the carry exceed 0xF
       RV32.andi(:t0, :s0, 0x0F),
       RV32.andi(:t1, :a0, 0x0F),
       RV32.add(:t0, :t0, :t1),
       RV32.add(:t0, :t0, :t4),
       RV32.srli(:t0, :t0, 4),
       RV32.slli(:t0, :t0, 5),
-      # retenue sortante : le bit 8 de la somme
+      # outgoing carry: bit 8 of the sum
       RV32.srli(:t1, :t3, 8),
       RV32.slli(:t1, :t1, 4),
       RV32.or_(:t0, :t0, :t1),
@@ -148,64 +146,64 @@ defmodule Atomboy.Native.ALU do
 
   defp sub do
     [
-      Asm.label(etiquette(:sub)),
+      Asm.label(label(:sub)),
       RV32.li(:t4, 0),
-      sub_corps(true),
+      sub_body(true),
       RV32.ret()
     ]
   end
 
   defp sbc do
     [
-      Asm.label(etiquette(:sbc)),
+      Asm.label(label(:sbc)),
       carry_in(:t4),
-      sub_corps(true),
+      sub_body(true),
       RV32.ret()
     ]
   end
 
-  # CP v — une soustraction dont le résultat est jeté. Le même corps, sans
-  # l'écriture de A : dupliquer le calcul reviendrait à entretenir deux fois la
-  # même subtilité d'emprunt.
+  # CP v -- a subtraction whose result is thrown away. The same body without the
+  # write to A: duplicating the computation would mean maintaining the same
+  # borrow subtlety twice.
   defp cp do
     [
-      Asm.label(etiquette(:cp)),
+      Asm.label(label(:cp)),
       RV32.li(:t4, 0),
-      sub_corps(false),
+      sub_body(false),
       RV32.ret()
     ]
   end
 
-  defp sub_corps(ecrit_a?) do
+  defp sub_body(writes_a?) do
     [
-      # emprunt de demi-octet : le quartet bas de A passe-t-il sous celui de v
+      # nibble borrow: does A's low nibble drop below v's
       RV32.andi(:t0, :s0, 0x0F),
       RV32.andi(:t1, :a0, 0x0F),
       RV32.add(:t1, :t1, :t4),
       RV32.sltu(:t0, :t0, :t1),
       RV32.slli(:t0, :t0, 5),
-      # emprunt d'octet
+      # byte borrow
       RV32.add(:t1, :a0, :t4),
       RV32.sltu(:t1, :s0, :t1),
       RV32.slli(:t1, :t1, 4),
       RV32.or_(:t0, :t0, :t1),
       RV32.ori(:t0, :t0, @n),
-      # le résultat, écrit ou seulement pesé
+      # the result, written or merely weighed
       RV32.sub(:t3, :s0, :a0),
       RV32.sub(:t3, :t3, :t4),
       RV32.andi(:t3, :t3, 0xFF),
       zero(:t3, :t2),
       RV32.or_(:s1, :t0, :t2),
-      if(ecrit_a?, do: [RV32.mv(:s0, :t3)], else: [])
+      if(writes_a?, do: [RV32.mv(:s0, :t3)], else: [])
     ]
   end
 
   # ══ Logiques ═════════════════════════════════════════════════════════════════
 
-  # AND pose H. Ce n'est pas une régularité oubliée, c'est ainsi sur le matériel.
+  # AND sets H. That is not a forgotten regularity, it is how the hardware is.
   defp bit_and do
     [
-      Asm.label(etiquette(:bit_and)),
+      Asm.label(label(:bit_and)),
       RV32.and_(:s0, :s0, :a0),
       zero(:s0, :t0),
       RV32.ori(:s1, :t0, @h),
@@ -215,7 +213,7 @@ defmodule Atomboy.Native.ALU do
 
   defp bit_xor do
     [
-      Asm.label(etiquette(:bit_xor)),
+      Asm.label(label(:bit_xor)),
       RV32.xor_(:s0, :s0, :a0),
       zero(:s0, :s1),
       RV32.ret()
@@ -224,22 +222,22 @@ defmodule Atomboy.Native.ALU do
 
   defp bit_or do
     [
-      Asm.label(etiquette(:bit_or)),
+      Asm.label(label(:bit_or)),
       RV32.or_(:s0, :s0, :a0),
       zero(:s0, :s1),
       RV32.ret()
     ]
   end
 
-  # ══ Incréments ═══════════════════════════════════════════════════════════════
+  # ══ Increments ═══════════════════════════════════════════════════════════════
 
-  # INC et DEC **préservent C**. Second piège classique après la demi-retenue :
-  # poser les quatre drapeaux par réflexe. Le motif `OR A / INC / JR C` des jeux
-  # dépend de cette préservation.
+  # INC and DEC **preserve C**. The second classic trap after the half-carry:
+  # setting all four flags by reflex. The `OR A / INC / JR C` pattern games use
+  # depends on that preservation.
   defp inc do
     [
-      Asm.label(etiquette(:inc)),
-      # H quand le quartet bas valait 0xF
+      Asm.label(label(:inc)),
+      # H when the low nibble was 0xF
       RV32.andi(:t0, :a0, 0x0F),
       RV32.xori(:t0, :t0, 0x0F),
       RV32.sltiu(:t0, :t0, 1),
@@ -256,8 +254,8 @@ defmodule Atomboy.Native.ALU do
 
   defp dec do
     [
-      Asm.label(etiquette(:dec)),
-      # H quand le quartet bas valait 0 — l'emprunt traverse
+      Asm.label(label(:dec)),
+      # H when the low nibble was 0 -- the borrow crosses
       RV32.andi(:t0, :a0, 0x0F),
       RV32.sltiu(:t0, :t0, 1),
       RV32.slli(:t0, :t0, 5),
@@ -272,15 +270,15 @@ defmodule Atomboy.Native.ALU do
     ]
   end
 
-  # ══ Seize bits ═══════════════════════════════════════════════════════════════
+  # ══ Sixteen bits ═════════════════════════════════════════════════════════════
 
-  # ADD HL, rr — le miroir inversé d'INC : ici c'est Z qui est préservé et C qui
-  # bouge. H se calcule au bit 11, C au bit 15.
+  # ADD HL, rr -- INC's mirror image: here Z is preserved and C moves. H is
+  # computed at bit 11, C at bit 15.
   defp add16 do
     [
-      Asm.label(etiquette(:add16)),
-      # 0x0FFF ne tient pas dans l'immédiat de andi (12 bits signés) : le
-      # masque des douze bits bas se fait au décalage.
+      Asm.label(label(:add16)),
+      # 0x0FFF does not fit andi's immediate (12 signed bits): the low twelve
+      # bits are masked by shifting.
       RV32.slli(:t0, :a2, 20),
       RV32.srli(:t0, :t0, 20),
       RV32.slli(:t1, :a0, 20),
@@ -299,13 +297,13 @@ defmodule Atomboy.Native.ALU do
     ]
   end
 
-  # ADD SP, r8 — les drapeaux les plus contre-intuitifs du processeur :
-  # opération 16 bits, drapeaux calculés sur l'octet bas comme une addition
-  # 8 bits non signée, et Z toujours effacé même quand le résultat est nul.
-  # L'offset est signé pour le résultat, non signé pour les drapeaux.
+  # ADD SP, r8 -- the processor's most counter-intuitive flags: a 16-bit
+  # operation whose flags are computed on the low byte as an unsigned 8-bit
+  # addition, and Z always cleared even when the result is zero. The offset is
+  # signed for the result, unsigned for the flags.
   defp add_sp do
     [
-      Asm.label(etiquette(:add_sp)),
+      Asm.label(label(:add_sp)),
       RV32.andi(:t0, :a0, 0x0F),
       RV32.andi(:t1, :a1, 0x0F),
       RV32.add(:t0, :t0, :t1),
@@ -316,7 +314,7 @@ defmodule Atomboy.Native.ALU do
       RV32.srli(:t1, :t1, 8),
       RV32.slli(:t1, :t1, 4),
       RV32.or_(:s1, :t0, :t1),
-      # extension de signe sans branche : retrancher 256 quand le bit 7 est levé
+      # branchless sign extension: subtract 256 when bit 7 is set
       RV32.srli(:t2, :a1, 7),
       RV32.slli(:t2, :t2, 8),
       RV32.sub(:t2, :a1, :t2),
@@ -326,14 +324,14 @@ defmodule Atomboy.Native.ALU do
     ]
   end
 
-  # ══ L'accumulateur seul ══════════════════════════════════════════════════════
+  # ══ The accumulator alone ════════════════════════════════════════════════════
 
-  # Les rotations de A effacent **toujours** Z, contrairement à leurs jumelles
-  # de la table CB qui le posent normalement. Deux instructions, deux encodages,
-  # deux sémantiques de Z : source classique de confusion.
+  # A's rotations **always** clear Z, unlike their CB-table twins which set it
+  # normally. Two instructions, two encodings, two meanings for Z: a classic
+  # source of confusion.
   defp rlca do
     [
-      Asm.label(etiquette(:rlca)),
+      Asm.label(label(:rlca)),
       RV32.srli(:t0, :s0, 7),
       RV32.slli(:s0, :s0, 1),
       RV32.or_(:s0, :s0, :t0),
@@ -345,7 +343,7 @@ defmodule Atomboy.Native.ALU do
 
   defp rrca do
     [
-      Asm.label(etiquette(:rrca)),
+      Asm.label(label(:rrca)),
       RV32.andi(:t0, :s0, 1),
       RV32.srli(:s0, :s0, 1),
       RV32.slli(:t1, :t0, 7),
@@ -357,7 +355,7 @@ defmodule Atomboy.Native.ALU do
 
   defp rla do
     [
-      Asm.label(etiquette(:rla)),
+      Asm.label(label(:rla)),
       carry_in(:t1),
       RV32.srli(:t0, :s0, 7),
       RV32.slli(:s0, :s0, 1),
@@ -370,7 +368,7 @@ defmodule Atomboy.Native.ALU do
 
   defp rra do
     [
-      Asm.label(etiquette(:rra)),
+      Asm.label(label(:rra)),
       carry_in(:t1),
       RV32.andi(:t0, :s0, 1),
       RV32.srli(:s0, :s0, 1),
@@ -381,16 +379,16 @@ defmodule Atomboy.Native.ALU do
     ]
   end
 
-  # DAA — l'instruction la plus tordue du processeur, et la raison d'être des
-  # drapeaux N et H posés soigneusement partout ailleurs : elle est leur seul
-  # lecteur. C est **posé, jamais effacé**.
+  # DAA -- the processor's most contorted instruction, and the reason N and H
+  # are set carefully everywhere else: it is their only reader. C is **set,
+  # never cleared**.
   defp daa do
     [
-      Asm.label(etiquette(:daa)),
+      Asm.label(label(:daa)),
       RV32.andi(:t0, :s1, @n),
       Asm.bnez(:t0, :daa_soustraction),
 
-      # Après une addition : l'ajustement dépend de H, de C, et de la valeur.
+      # After an addition: the adjustment depends on H, on C, and on the value.
       RV32.li(:t1, 0),
       RV32.andi(:t2, :s1, @h),
       Asm.bnez(:t2, :daa_bas),
@@ -412,8 +410,8 @@ defmodule Atomboy.Native.ALU do
       RV32.add(:s0, :s0, :t1),
       Asm.j(:daa_fin),
 
-      # Après une soustraction : H et C seuls décident, la valeur de A n'entre
-      # pas en compte. C'est ainsi.
+      # After a subtraction: H and C alone decide, A's value plays no part.
+      # That is how it is.
       Asm.label(:daa_soustraction),
       RV32.li(:t1, 0),
       RV32.andi(:t2, :s1, @h),
@@ -426,7 +424,7 @@ defmodule Atomboy.Native.ALU do
       Asm.label(:daa_soustraction_fin),
       RV32.sub(:s0, :s0, :t1),
 
-      # N et C survivent, H tombe, Z se recalcule.
+      # N and C survive, H falls, Z is recomputed.
       Asm.label(:daa_fin),
       RV32.andi(:s0, :s0, 0xFF),
       RV32.andi(:t0, :s1, @n ||| @c),
@@ -438,7 +436,7 @@ defmodule Atomboy.Native.ALU do
 
   defp cpl do
     [
-      Asm.label(etiquette(:cpl)),
+      Asm.label(label(:cpl)),
       RV32.xori(:s0, :s0, 0xFF),
       RV32.andi(:t0, :s1, @z ||| @c),
       RV32.ori(:s1, :t0, @n ||| @h),
@@ -448,7 +446,7 @@ defmodule Atomboy.Native.ALU do
 
   defp scf do
     [
-      Asm.label(etiquette(:scf)),
+      Asm.label(label(:scf)),
       RV32.andi(:t0, :s1, @z),
       RV32.ori(:s1, :t0, @c),
       RV32.ret()
@@ -457,7 +455,7 @@ defmodule Atomboy.Native.ALU do
 
   defp ccf do
     [
-      Asm.label(etiquette(:ccf)),
+      Asm.label(label(:ccf)),
       RV32.andi(:t0, :s1, @z),
       RV32.andi(:t1, :s1, @c),
       RV32.xori(:t1, :t1, @c),
@@ -468,10 +466,10 @@ defmodule Atomboy.Native.ALU do
 
   # ══ Les rotations de la table CB ═════════════════════════════════════════════
   #
-  # Même forme que leurs jumelles sur A, à ceci près qu'elles posent Z
-  # normalement, et qu'elles travaillent sur a0 plutôt que sur l'accumulateur.
+  # Same shape as their twins on A, except that they set Z normally and work on
+  # a0 rather than on the accumulator.
 
-  defp rotations_cb do
+  defp cb_rotations do
     [
       rlc(),
       rrc(),
@@ -486,7 +484,7 @@ defmodule Atomboy.Native.ALU do
 
   defp rlc do
     [
-      Asm.label(etiquette(:rlc)),
+      Asm.label(label(:rlc)),
       RV32.srli(:t0, :a0, 7),
       RV32.slli(:a0, :a0, 1),
       RV32.or_(:a0, :a0, :t0),
@@ -500,7 +498,7 @@ defmodule Atomboy.Native.ALU do
 
   defp rrc do
     [
-      Asm.label(etiquette(:rrc)),
+      Asm.label(label(:rrc)),
       RV32.andi(:t0, :a0, 1),
       RV32.srli(:a0, :a0, 1),
       RV32.slli(:t1, :t0, 7),
@@ -514,7 +512,7 @@ defmodule Atomboy.Native.ALU do
 
   defp rl do
     [
-      Asm.label(etiquette(:rl)),
+      Asm.label(label(:rl)),
       carry_in(:t1),
       RV32.srli(:t0, :a0, 7),
       RV32.slli(:a0, :a0, 1),
@@ -529,7 +527,7 @@ defmodule Atomboy.Native.ALU do
 
   defp rr do
     [
-      Asm.label(etiquette(:rr)),
+      Asm.label(label(:rr)),
       carry_in(:t1),
       RV32.andi(:t0, :a0, 1),
       RV32.srli(:a0, :a0, 1),
@@ -544,7 +542,7 @@ defmodule Atomboy.Native.ALU do
 
   defp sla do
     [
-      Asm.label(etiquette(:sla)),
+      Asm.label(label(:sla)),
       RV32.srli(:t0, :a0, 7),
       RV32.slli(:a0, :a0, 1),
       RV32.andi(:a0, :a0, 0xFF),
@@ -555,10 +553,10 @@ defmodule Atomboy.Native.ALU do
     ]
   end
 
-  # SRA réplique le bit 7 : le signe survit au décalage.
+  # SRA replicates bit 7: the sign survives the shift.
   defp sra do
     [
-      Asm.label(etiquette(:sra)),
+      Asm.label(label(:sra)),
       RV32.andi(:t0, :a0, 1),
       RV32.andi(:t1, :a0, 0x80),
       RV32.srli(:a0, :a0, 1),
@@ -572,7 +570,7 @@ defmodule Atomboy.Native.ALU do
 
   defp swap do
     [
-      Asm.label(etiquette(:swap)),
+      Asm.label(label(:swap)),
       RV32.andi(:t0, :a0, 0x0F),
       RV32.slli(:t0, :t0, 4),
       RV32.srli(:a0, :a0, 4),
@@ -584,7 +582,7 @@ defmodule Atomboy.Native.ALU do
 
   defp srl do
     [
-      Asm.label(etiquette(:srl)),
+      Asm.label(label(:srl)),
       RV32.andi(:t0, :a0, 1),
       RV32.srli(:a0, :a0, 1),
       RV32.slli(:t0, :t0, 4),
@@ -596,15 +594,15 @@ defmodule Atomboy.Native.ALU do
 
   # ══ BIT n ════════════════════════════════════════════════════════════════════
   #
-  # Huit routines plutôt qu'une seule paramétrée : le numéro de bit est une
-  # constante de compilation dans les 64 opcodes qui l'utilisent, donc le masque
-  # se cuit dans le code et aucun registre n'a besoin de le porter. Z reçoit
-  # l'inverse du bit, H se pose, C est préservé, la valeur n'est pas écrite.
+  # Eight routines rather than one parameterised: the bit number is a
+  # compile-time constant in the 64 opcodes that use it, so the mask is baked
+  # into the code and no register has to carry it. Z receives the bit's inverse,
+  # H is set, C is preserved, the value is not written.
 
   defp bits do
     for n <- 0..7 do
       [
-        Asm.label(etiquette_bit(n)),
+        Asm.label(bit_label(n)),
         RV32.andi(:t0, :a0, 1 <<< n),
         RV32.sltiu(:t0, :t0, 1),
         RV32.slli(:t0, :t0, 7),
@@ -616,14 +614,14 @@ defmodule Atomboy.Native.ALU do
     end
   end
 
-  # ══ Les briques partagées ════════════════════════════════════════════════════
+  # ══ The shared pieces ════════════════════════════════════════════════════════
 
-  # La retenue entrante, ramenée à 0 ou 1.
+  # The incoming carry, reduced to 0 or 1.
   defp carry_in(dest) do
     [RV32.andi(dest, :s1, @c), RV32.srli(dest, dest, 4)]
   end
 
-  # Z, posé quand les huit bits bas de `source` sont nuls.
+  # Z, set when `source`'s low eight bits are zero.
   defp zero(source, dest) do
     [
       RV32.andi(dest, source, 0xFF),

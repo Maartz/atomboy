@@ -1,30 +1,29 @@
 defmodule Mix.Tasks.Atomboy.Native.Bench do
-  @shortdoc "Mesure le coût du natif en instructions RV32 par instruction SM83"
+  @shortdoc "Measures the native cost in RV32 instructions per SM83 instruction"
 
   @moduledoc """
-  Le chiffre du chantier.
+  This project's number.
 
       mix atomboy.native.bench
 
-  ## Pourquoi pas des secondes
+  ## Why not seconds
 
-  qemu n'est pas cycle-exact : chronométrer une exécution invitée ne mesure que
-  la machine hôte. Ce qui est exact, en revanche, c'est le **nombre
-  d'instructions retirées** — sous `-icount shift=0`, le compteur `instret` du
-  processeur émulé les compte une à une. Vérifié à la main : une boucle de mille
-  tours à deux instructions rend 2002.
+  qemu is not cycle-accurate: timing a guest run measures the host machine. What
+  is exact is the **count of retired instructions** -- under `-icount shift=0`,
+  the emulated processor's `instret` counter counts them one by one. Verified by
+  hand: a thousand-iteration loop of two instructions reports 2002.
 
-  Le rapport « instructions RV32 par instruction SM83 » est donc une mesure, pas
-  une estimation. C'est aussi la seule grandeur qui se transporte du qemu au
-  silicium : elle ne dépend ni de la fréquence, ni du cache, ni de l'hôte.
+  So "RV32 instructions per SM83 instruction" is a measurement, not an estimate.
+  It is also the only quantity that carries from qemu to silicon: it depends
+  neither on frequency, nor on cache, nor on the host.
 
-  ## Ce que le chiffre ne dit pas
+  ## What the number does not say
 
-  Il ne dit pas combien d'instructions par cycle le C6 retire réellement. Les
-  défauts d'icache, la latence de la flash et les aléas de branchement ne sont
-  pas dans qemu. La projection en fin de rapport pose donc une hypothèse d'IPC
-  explicite, et elle vaut ce que vaut cette hypothèse — c'est-à-dire qu'elle
-  attend le silicium.
+  It does not say how many instructions per cycle the C6 actually retires. Cache
+  misses, flash latency and branch mispredictions are not in qemu. The
+  projection at the end of the report therefore states an explicit IPC
+  assumption, and it is worth exactly what that assumption is worth -- which is
+  to say it is waiting for silicon.
   """
 
   use Mix.Task
@@ -38,21 +37,20 @@ defmodule Mix.Tasks.Atomboy.Native.Bench do
   alias Atomboy.Native.Run
 
   @icache 32 * 1024
-  @horloge_dmg 4_194_304
-  @horloge_c6 160_000_000
+  @dmg_clock 4_194_304
+  @c6_clock 160_000_000
 
-  # Deux programmes, et deux façons de mentir sur la même mesure.
+  # Two programs, and two ways of lying about the same measurement.
   #
-  # `LD B, C` répété n'accède à rien : c'est un plafond optimiste, et c'est
-  # exactement ce que mesure `mix atomboy.bench`, donc les deux chiffres se
-  # comparent.
+  # `LD B, C` repeated accesses nothing: an optimistic ceiling, and exactly what
+  # `mix atomboy.bench` measures, so the two figures compare.
   #
-  # Le bloc mixte est celui que `Atomboy.AtomVM.Main` fait tourner sur carte —
-  # immédiats, ALU, rotation CB, accès registre — donc les mesures du natif et
-  # celles du C6 parlent du même programme.
-  @blocs [
+  # The mixed block is the one `Atomboy.AtomVM.Main` runs on the board --
+  # immediates, ALU, a CB rotation, register access -- so the native figures and
+  # the C6 figures describe the same program.
+  @blocks [
     {"LD B, C", <<0x41>>},
-    {"bloc mixte",
+    {"mixed block",
      <<0x3E, 0x55, 0x06, 0x33, 0x80, 0x04, 0xB1, 0x2F, 0xCB, 0x37, 0xA8, 0x15, 0x1F, 0xE6, 0x0F,
        0x7D>>}
   ]
@@ -65,161 +63,159 @@ defmodule Mix.Tasks.Atomboy.Native.Bench do
       Mix.raise("qemu-system-riscv32 est introuvable — `brew install qemu`")
     end
 
-    taille()
+    size_report()
     Mix.shell().info("")
-    Enum.each(@blocs, &mesure/1)
+    Enum.each(@blocks, &measure/1)
   end
 
-  # ══ La taille ════════════════════════════════════════════════════════════════
+  # ══ The size ═════════════════════════════════════════════════════════════════
 
-  defp taille do
+  defp size_report do
     image = Interp.image(:binary.copy(<<0>>, 0x10000), %State{}, 1)
     l = image.labels
 
     sections = [
-      {"pilote, fetch et rapport", l[:h_cb]},
-      {"gestionnaires d'opcodes", l[:alu_add] - l[:h_cb]},
-      {"routines d'ALU", l[:table_base] - l[:alu_add]},
-      {"tables de saut", 2 * 256 * 4}
+      {"driver, fetch and report", l[:h_cb]},
+      {"opcode handlers", l[:alu_add] - l[:h_cb]},
+      {"ALU routines", l[:table_base] - l[:alu_add]},
+      {"jump tables", 2 * 256 * 4}
     ]
 
     code = l[:table_base] + 2 * 256 * 4
 
-    Mix.shell().info("Taille du code émis")
+    Mix.shell().info("Emitted code size")
 
-    for {nom, octets} <- sections do
-      Mix.shell().info("  #{String.pad_trailing(nom, 26)} #{pad(octets)} o")
+    for {name, bytes} <- sections do
+      Mix.shell().info("  #{String.pad_trailing(name, 26)} #{pad(bytes)} B")
     end
 
-    Mix.shell().info("  #{String.pad_trailing("total", 26)} #{pad(code)} o")
+    Mix.shell().info("  #{String.pad_trailing("total", 26)} #{pad(code)} B")
 
     Mix.shell().info(
-      "  soit #{Float.round(code * 100 / @icache, 1)} % de l'icache du C6 (#{@icache} o)"
+      "  that is #{Float.round(code * 100 / @icache, 1)} % of the C6's cache (#{@icache} bytes)"
     )
   end
 
   defp pad(n), do: String.pad_leading(Integer.to_string(n), 6)
 
-  # ══ La mesure ════════════════════════════════════════════════════════════════
+  # ══ The measurement ══════════════════════════════════════════════════════════
 
-  defp mesure({nom, bloc}) do
-    %{instructions: par_bloc, cycles: cycles_bloc} = analyse(bloc)
+  defp measure({name, block}) do
+    %{instructions: per_block, cycles: block_cycles} = analyse(block)
 
-    # Un budget en nombre entier de blocs : la dernière instruction ne déborde
-    # pas, donc le compte d'instructions SM83 est exact et non estimé.
-    tours = 5_000
-    budget = cycles_bloc * tours
-    instructions = par_bloc * tours
+    # A budget of whole blocks: the last instruction does not overrun, so the
+    # SM83 instruction count is exact rather than estimated.
+    turns = 5_000
+    budget = block_cycles * turns
+    instructions = per_block * turns
 
-    memoire = remplir(bloc)
-    verifie!(nom, bloc, memoire, par_bloc, cycles_bloc)
+    memory = fill(block)
+    verify!(name, block, memory, per_block, block_cycles)
 
-    resultat = Run.run!(memoire, %State{}, budget, icount: true)
+    result = Run.run!(memory, %State{}, budget, icount: true)
 
-    if resultat.statut != :ok do
-      Mix.raise("le bloc « #{nom} » s'est arrêté sur #{resultat.statut}")
+    if result.status != :ok do
+      Mix.raise("block #{name} stopped on #{result.status}")
     end
 
-    if resultat.cycles != budget do
-      Mix.raise("budget #{budget} demandé, #{resultat.cycles} consommés — le bloc ne boucle pas")
+    if result.cycles != budget do
+      Mix.raise("budget #{budget} asked for, #{result.cycles} consumed -- block does not loop")
     end
 
-    # PC exactement sur la frontière du dernier tour : sans cela, le budget
-    # s'arrêterait au milieu d'un bloc, le décompte d'instructions serait décalé
-    # et le rapport faux sans que rien ne le signale.
-    attendu_pc = rem(tours * byte_size(bloc), 0x10000)
+    # PC exactly on the last turn's boundary: otherwise the budget would stop
+    # mid-block, the instruction count would be off, and the report wrong with
+    # nothing to signal it.
+    expected_pc = rem(turns * byte_size(block), 0x10000)
 
-    if resultat.state.pc != attendu_pc do
+    if result.state.pc != expected_pc do
       Mix.raise(
-        "PC finit à #{resultat.state.pc} au lieu de #{attendu_pc} — " <>
-          "le budget ne tombe pas sur un tour entier"
+        "PC ends at #{result.state.pc} instead of #{expected_pc} -- " <>
+          "the budget does not land on a whole turn"
       )
     end
 
-    par_instruction = resultat.instret / instructions
-    par_cycle = resultat.instret / budget
-    cycles_par_seconde = @horloge_c6 / par_cycle
+    per_instruction = result.instret / instructions
+    per_cycle = result.instret / budget
+    cycles_per_second = @c6_clock / per_cycle
 
     Mix.shell().info("""
-    #{nom} — #{par_bloc} instruction(s) SM83, #{cycles_bloc} T par tour
-      #{instructions} instructions SM83, #{resultat.instret} instructions RV32
-      #{Float.round(par_instruction, 2)} instructions RV32 par instruction SM83
-      #{Float.round(par_cycle, 2)} par cycle T
+    #{name} -- #{per_block} SM83 instruction(s), #{block_cycles} T per turn
+      #{instructions} SM83 instructions, #{result.instret} RV32 instructions
+      #{Float.round(per_instruction, 2)} RV32 instructions per SM83 instruction
+      #{Float.round(per_cycle, 2)} per T cycle
 
-      Projection C6 à #{div(@horloge_c6, 1_000_000)} MHz : #{round(cycles_par_seconde / 1000)} kcycles/s,
-      soit #{Float.round(cycles_par_seconde * 100 / @horloge_dmg, 1)} % du temps réel d'une DMG —
-      **en supposant une instruction par cycle**, ce que qemu ne peut pas valider,
-      et **pour le seul CPU** : ni PPU, ni APU, ni banques de cartouche.
+      C6 projection at #{div(@c6_clock, 1_000_000)} MHz: #{round(cycles_per_second / 1000)} kcycles/s,
+      that is #{Float.round(cycles_per_second * 100 / @dmg_clock, 1)} % of a DMG's real time --
+      **assuming one instruction per cycle**, which qemu cannot validate, and
+      **for the CPU alone**: no PPU, no APU, no cartridge banking.
     """)
   end
 
-  # Le décompte du bloc, confronté à l'oracle : `instructions` pas doivent
-  # consommer exactement `cycles` T et ramener PC à son point de départ. Un banc
-  # qui compte faux rend un rapport faux sans que rien ne le signale.
-  defp verifie!(nom, bloc, memoire, instructions, cycles) do
-    plate =
-      Flat.new(for {b, addr} <- Enum.with_index(:binary.bin_to_list(memoire)), do: {addr, b})
+  # The block's tally, checked against the oracle: `instructions` steps must
+  # consume exactly `cycles` T and bring PC back to its starting point. A bench
+  # that miscounts returns a wrong report with nothing to signal it.
+  defp verify!(name, block, memory, instructions, cycles) do
+    flat =
+      Flat.new(for {b, addr} <- Enum.with_index(:binary.bin_to_list(memory)), do: {addr, b})
 
-    {etat, _mem, consommes} =
-      Enum.reduce(1..instructions, {%State{}, plate, 0}, fn _, {st, mem, total} ->
+    {state, _mem, consumed} =
+      Enum.reduce(1..instructions, {%State{}, flat, 0}, fn _, {st, mem, total} ->
         {st, mem, pas} = Atomboy.CPU.tick(st, mem)
         {st, mem, total + pas}
       end)
 
-    if consommes != cycles do
-      Mix.raise(
-        "« #{nom} » : la table annonce #{cycles} T par tour, l'oracle en consomme #{consommes}"
-      )
+    if consumed != cycles do
+      Mix.raise("#{name}: the table says #{cycles} T per turn, the oracle consumes #{consumed}")
     end
 
-    if etat.pc != byte_size(bloc) do
+    if state.pc != byte_size(block) do
       Mix.raise(
-        "« #{nom} » : après #{instructions} pas l'oracle est en #{etat.pc}, " <>
-          "or le bloc fait #{byte_size(bloc)} octets — le décompte d'instructions est faux"
+        "#{name}: after #{instructions} steps the oracle is at #{state.pc}, " <>
+          "but the block is #{byte_size(block)} bytes -- the instruction count is wrong"
       )
     end
 
     :ok
   end
 
-  # Le bloc répété jusqu'à remplir l'espace d'adressage. Sa longueur divise
-  # 65 536 pour que le bouclage de PC retombe sur une frontière de bloc.
-  defp remplir(bloc) do
-    taille = byte_size(bloc)
+  # The block repeated until it fills the address space. Its length divides
+  # 65536 so PC's wrap lands back on a block boundary.
+  defp fill(block) do
+    size = byte_size(block)
 
-    unless rem(0x10000, taille) == 0 do
-      Mix.raise("un bloc de #{taille} octets ne pave pas 64 Ko")
+    unless rem(0x10000, size) == 0 do
+      Mix.raise("a block of #{size} bytes does not tile 64 KB")
     end
 
-    :binary.copy(bloc, div(0x10000, taille))
+    :binary.copy(block, div(0x10000, size))
   end
 
-  # ══ Le décompte, depuis la table ═════════════════════════════════════════════
+  # ══ The tally, from the table ════════════════════════════════════════════════
 
-  # Combien d'instructions et de cycles dans un bloc. Dérivé de la table plutôt
-  # qu'écrit à la main : un bloc de bench qui compterait faux donnerait un
-  # rapport faux sans que rien ne le dise.
-  defp analyse(bloc), do: analyse(:binary.bin_to_list(bloc), %{instructions: 0, cycles: 0})
+  # How many instructions and cycles a block holds. Derived from the table
+  # rather than written by hand: a bench block counting wrong would give a wrong
+  # report with nothing to say so.
+  defp analyse(block), do: analyse(:binary.bin_to_list(block), %{instructions: 0, cycles: 0})
 
   defp analyse([], acc), do: acc
 
-  defp analyse([0xCB, sous | reste], acc) do
-    insn = trouve(Table.extended(), sous)
-    analyse(reste, %{acc | instructions: acc.instructions + 1, cycles: acc.cycles + insn.cycles})
+  defp analyse([0xCB, sub | rest], acc) do
+    insn = find_insn(Table.extended(), sub)
+    analyse(rest, %{acc | instructions: acc.instructions + 1, cycles: acc.cycles + insn.cycles})
   end
 
-  defp analyse([opcode | reste], acc) do
-    insn = trouve(Table.base(), opcode)
-    reste = Enum.drop(reste, operandes(insn))
-    analyse(reste, %{acc | instructions: acc.instructions + 1, cycles: acc.cycles + insn.cycles})
+  defp analyse([opcode | rest], acc) do
+    insn = find_insn(Table.base(), opcode)
+    rest = Enum.drop(rest, operand_bytes(insn))
+    analyse(rest, %{acc | instructions: acc.instructions + 1, cycles: acc.cycles + insn.cycles})
   end
 
-  defp trouve(table, opcode) do
+  defp find_insn(table, opcode) do
     Enum.find(table, &(&1.opcode == opcode)) ||
-      Mix.raise("le bloc contient l'opcode #{opcode}, absent de la table")
+      Mix.raise("the block holds opcode #{opcode}, absent from the table")
   end
 
-  defp operandes(%Insn{operands: operands}) do
+  defp operand_bytes(%Insn{operands: operands}) do
     Enum.reduce(operands, 0, fn
       {:imm, 8}, n -> n + 1
       :a8_ind, n -> n + 1

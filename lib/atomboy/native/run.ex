@@ -1,14 +1,14 @@
 defmodule Atomboy.Native.Run do
   @moduledoc """
-  Exécuter du SM83 en natif, vu d'Elixir.
+  Running SM83 natively, seen from Elixir.
 
-  La même signature que `Atomboy.CPU.Loop.run/4`, à la mémoire près — le natif
-  ne connaît qu'un espace d'adressage plat de 64 Ko, sans la superposition
-  ROM + écritures que la boucle Elixir traîne pour rester immuable.
+  The same signature as `Atomboy.CPU.Loop.run/4`, memory aside -- the native
+  side knows only a flat 64 KB address space, without the ROM + writes overlay
+  the Elixir loop carries to stay immutable.
 
-  C'est volontairement le seul point de contact : tout ce qui est au-dessus
-  (tests d'équivalence, rejeu de vecteurs, mesures) passe par ici et ignore
-  qu'il y a une image, un qemu et un port série au milieu.
+  This is deliberately the only point of contact: everything above it
+  (equivalence tests, vector replay, measurements) goes through here and never
+  learns there is an image, a qemu and a serial port in the middle.
   """
 
   import Bitwise
@@ -17,30 +17,30 @@ defmodule Atomboy.Native.Run do
   alias Atomboy.Native.Interp
   alias Atomboy.Native.Qemu
 
-  @memoire 0x10000
+  @memory 0x10000
 
-  @typedoc "Ce que l'invité rapporte."
-  @type resultat :: %{
+  @typedoc "What the guest reports."
+  @type result :: %{
           state: State.t(),
-          memoire: binary(),
+          memory: binary(),
           cycles: non_neg_integer(),
-          statut: :ok | :opcode_inconnu,
+          status: :ok | :unknown_opcode,
           opcode: 0..0xFF,
           instret: non_neg_integer(),
           duration_us: non_neg_integer(),
-          taille: non_neg_integer()
+          size: non_neg_integer()
         }
 
   @doc """
-  Exécute `budget` T-cycles depuis `state`, sur une mémoire plate de 64 Ko.
+  Runs `budget` T-cycles from `state`, over a flat 64 KB memory.
 
-  Rend `{:ok, resultat}`, ou `{:error, raison}` si qemu n'a pas rendu la main ou
-  si le flux série est illisible — deux pannes qu'il vaut mieux distinguer d'un
-  désaccord avec l'oracle.
+  Returns `{:ok, result}`, or `{:error, reason}` if qemu never handed control
+  back or the serial stream is unreadable -- two failures worth telling apart
+  from a disagreement with the oracle.
   """
-  @spec run(binary(), State.t(), pos_integer(), keyword()) :: {:ok, resultat()} | {:error, term()}
-  def run(memoire, %State{} = state, budget, opts \\ []) when byte_size(memoire) == @memoire do
-    image = Interp.image(memoire, state, budget)
+  @spec run(binary(), State.t(), pos_integer(), keyword()) :: {:ok, result()} | {:error, term()}
+  def run(memory, %State{} = state, budget, opts \\ []) when byte_size(memory) == @memory do
+    image = Interp.image(memory, state, budget)
 
     case Qemu.run(image.code, opts) do
       %{status: :timeout, duration_us: us} ->
@@ -52,25 +52,25 @@ defmodule Atomboy.Native.Run do
   end
 
   @doc """
-  Le même appel, mais qui lève sur une panne de harnais.
+  The same call, but raising on a harness failure.
 
-  Dans un test, un qemu qui boucle n'est pas un résultat à comparer : c'est un
-  échec, et il doit le dire tout de suite.
+  In a test, a qemu that loops is not a result to compare: it is a failure, and
+  it should say so immediately.
   """
-  @spec run!(binary(), State.t(), pos_integer(), keyword()) :: resultat()
-  def run!(memoire, state, budget, opts \\ []) do
-    case run(memoire, state, budget, opts) do
-      {:ok, resultat} -> resultat
-      {:error, raison} -> raise "l'invité n'a rien rendu d'exploitable : #{inspect(raison)}"
+  @spec run!(binary(), State.t(), pos_integer(), keyword()) :: result()
+  def run!(memory, state, budget, opts \\ []) do
+    case run(memory, state, budget, opts) do
+      {:ok, result} -> result
+      {:error, reason} -> raise "the guest returned nothing usable: #{inspect(reason)}"
     end
   end
 
-  defp decode(serial, duration_us, taille) do
+  defp decode(serial, duration_us, size) do
     magic = Interp.magic()
 
     case serial do
       <<^magic, a, f, b, c, d, e, h, l, sp::16-little, pc::16-little, control, cycles::32-little,
-        statut, opcode, instret::32-little, memoire::binary-size(@memoire)>> ->
+        status, opcode, instret::32-little, memory::binary-size(@memory)>> ->
         {:ok,
          %{
            state: %State{
@@ -88,22 +88,22 @@ defmodule Atomboy.Native.Run do
              halted: (control &&& 2) != 0,
              ime_pending: control >>> 2 &&& 1
            },
-           memoire: memoire,
+           memory: memory,
            cycles: cycles,
-           statut: statut(statut),
+           status: status_name(status),
            opcode: opcode,
            instret: instret,
            duration_us: duration_us,
-           taille: taille
+           size: size
          }}
 
-      autre ->
+      other ->
         {:error,
-         {:flux_illisible, byte_size(autre), binary_part(autre, 0, min(32, byte_size(autre)))}}
+         {:unreadable_stream, byte_size(other), binary_part(other, 0, min(32, byte_size(other)))}}
     end
   end
 
-  defp statut(code) do
-    Enum.find_value(Interp.statuts(), :inconnu, fn {nom, valeur} -> valeur == code && nom end)
+  defp status_name(code) do
+    Enum.find_value(Interp.statuses(), :unknown, fn {name, value} -> value == code && name end)
   end
 end

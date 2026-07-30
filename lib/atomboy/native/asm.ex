@@ -1,50 +1,48 @@
 defmodule Atomboy.Native.Asm do
   @moduledoc """
-  Étiquettes, renvois avant, et la passe qui comble les trous.
+  Labels, forward references, and the pass that fills the holes.
 
-  `Atomboy.Native.RV32` encode une instruction dont tous les opérandes sont
-  connus. Un interpréteur n'en produit presque aucune de ce genre : `j fetch`
-  saute vers une étiquette dont l'adresse dépend de tout ce qui sera émis après.
-  Ce module est la couche qui manque — et elle est petite, parce qu'une seule
-  règle la garde petite.
+  `Atomboy.Native.RV32` encodes an instruction whose operands are all known. An
+  interpreter produces almost none of those: `j fetch` jumps to a label whose
+  address depends on everything emitted after it. This module is the missing
+  layer -- and it is small, because one rule keeps it small.
 
-  ## La règle : aucune taille ne dépend d'une distance
+  ## The rule: no size depends on a distance
 
-  Rien n'est compressé (voir `Atomboy.Native.RV32`), donc chaque élément connaît
-  sa taille avant que la moindre adresse ne soit résolue. La passe 1 parcourt les
-  éléments en sommant les tailles et note où tombe chaque étiquette ; la passe 2
-  repasse et émet les octets, les trous étant comblés avec les distances qu'on
-  connaît désormais.
+  Nothing is compressed (see `Atomboy.Native.RV32`), so every item knows its
+  size before a single address is resolved. Pass one walks the items summing
+  sizes and notes where each label lands; pass two walks again emitting bytes,
+  filling the holes with the distances now known.
 
-  Sans cette règle il faudrait un point fixe : un branchement lointain occupe
-  plus de place, ce qui éloigne les cibles suivantes, ce qui allonge d'autres
-  branchements. C'est le problème de la relaxation, et il vaut cent fois son prix
-  en octets tant que le code tient dans l'icache.
+  Without that rule this would need a fixed point: a distant branch takes more
+  room, which pushes later targets further away, which lengthens other branches.
+  That is branch relaxation, and it costs a hundred times its worth in bytes as
+  long as the code fits in the instruction cache.
 
-  L'invariant qui verrouille tout cela — *le nombre d'octets émis en passe 2 est
-  exactement la taille calculée en passe 1* — est vérifié à chaque assemblage,
-  pas seulement dans les tests. Une régression de taille est le genre de bug qui
-  produit du code qui s'exécute et donne de mauvais résultats.
+  The invariant that locks it down -- *the number of bytes emitted in pass two
+  equals the size computed in pass one* -- is checked on every assembly, not
+  just in tests. A size regression is the kind of bug that produces code which
+  runs and gives wrong answers.
 
-  ## Les éléments
+  ## The items
 
-      binary                    des octets déjà encodés — instruction ou donnée
-      {:label, nom}             taille nulle ; définit une adresse
-      {:align, n}               bourrage de zéros jusqu'au multiple de n
-      {:ref, nom, encodeur}     4 octets, comblés par `encodeur.(distance)`
-      {:addr, nom}              4 octets : l'adresse absolue de l'étiquette
-      {:la, rd, nom}            8 octets : charge l'adresse de nom dans rd
-      {:space, n}               n octets à zéro
+      binary                    already-encoded bytes -- instruction or data
+      {:label, name}            zero size; defines an address
+      {:align, n}               zero padding up to a multiple of n
+      {:ref, name, encoder}     4 bytes, filled by `encoder.(distance)`
+      {:addr, name}             4 bytes: the label's absolute address
+      {:la, rd, name}           8 bytes: loads name's address into rd
+      {:space, n}               n zero bytes
 
-  `{:addr, nom}` est ce qui rend la table de saut possible : 256 mots contenant
-  l'adresse de chaque gestionnaire, chargés par un `lw` et suivis d'un `jr`.
+  `{:addr, name}` is what makes the jump table possible: 256 words holding each
+  handler's address, loaded with an `lw` and followed by a `jr`.
   """
 
   import Bitwise
 
   alias Atomboy.Native.RV32
 
-  @typedoc "Un élément d'assemblage."
+  @typedoc "One assembly item."
   @type item ::
           binary()
           | {:label, atom()}
@@ -54,7 +52,7 @@ defmodule Atomboy.Native.Asm do
           | {:la, RV32.reg(), atom()}
           | {:space, non_neg_integer()}
 
-  @typedoc "Le résultat d'un assemblage : les octets, et où chaque étiquette est tombée."
+  @typedoc "The result of an assembly: the bytes, and where each label landed."
   @type assembled :: %{
           code: binary(),
           labels: %{atom() => non_neg_integer()},
@@ -62,10 +60,10 @@ defmodule Atomboy.Native.Asm do
         }
 
   @doc """
-  Assemble une liste d'éléments en partant de l'adresse `base`.
+  Assembles a list of items starting from address `base`.
 
-  `base` est l'adresse à laquelle l'image sera chargée : les `{:addr, _}`
-  contiennent des adresses absolues, donc l'assembleur doit la connaître.
+  `base` is where the image will be loaded: `{:addr, _}` items hold absolute
+  addresses, so the assembler has to know it.
   """
   @spec assemble([item()], non_neg_integer()) :: assembled()
   def assemble(items, base \\ 0) do
@@ -74,31 +72,31 @@ defmodule Atomboy.Native.Asm do
     code = emit(items, base, labels)
 
     unless byte_size(code) == size do
-      raise "assemblage incohérent : passe 1 annonce #{size} octets, passe 2 en a émis #{byte_size(code)}"
+      raise "inconsistent assembly: pass one announced #{size} bytes, pass two emitted #{byte_size(code)}"
     end
 
     %{code: code, labels: labels, size: size}
   end
 
   @doc """
-  L'adresse absolue d'une étiquette dans un assemblage.
+  A label's absolute address within an assembly.
   """
   @spec address(assembled(), atom(), non_neg_integer()) :: non_neg_integer()
   def address(%{labels: labels}, name, base \\ 0) do
     case labels do
       %{^name => offset} -> base + offset
-      _ -> raise ArgumentError, "étiquette inconnue : #{inspect(name)}"
+      _ -> raise ArgumentError, "unknown label: #{inspect(name)}"
     end
   end
 
-  # ══ Passe 1 : les tailles et les étiquettes ══════════════════════════════════
+  # ══ Pass one: sizes and labels ═══════════════════════════════════════════════
 
   defp measure(items) do
     Enum.reduce(items, {0, %{}}, fn item, {offset, labels} ->
       case item do
         {:label, name} ->
           if Map.has_key?(labels, name) do
-            raise ArgumentError, "étiquette définie deux fois : #{inspect(name)}"
+            raise ArgumentError, "label defined twice: #{inspect(name)}"
           end
 
           {offset, Map.put(labels, name, offset)}
@@ -117,7 +115,7 @@ defmodule Atomboy.Native.Asm do
   defp size({:align, n}, offset), do: padding(offset, n)
 
   defp size(item, _offset) do
-    raise ArgumentError, "élément d'assemblage inconnu : #{inspect(item)}"
+    raise ArgumentError, "unknown assembly item: #{inspect(item)}"
   end
 
   defp padding(offset, n) do
@@ -127,7 +125,7 @@ defmodule Atomboy.Native.Asm do
     end
   end
 
-  # ══ Passe 2 : les octets ═════════════════════════════════════════════════════
+  # ══ Pass two: the bytes ══════════════════════════════════════════════════════
 
   defp emit(items, base, labels) do
     {chunks, _offset} =
@@ -157,11 +155,11 @@ defmodule Atomboy.Native.Asm do
     encoder.(resolve!(labels, name) - offset)
   end
 
-  # `auipc` pose les 20 bits hauts d'une distance relative au PC, `addi` ajoute
-  # les 12 bas — et comme `addi` sign-étend, les bits hauts sont arrondis pour
-  # compenser, exactement comme dans `RV32.li/2`. Relatif au PC plutôt
-  # qu'absolu : l'image reste déplaçable, ce qui comptera le jour où elle ne
-  # sera plus chargée à 0x8000_0000 mais quelque part dans la flash d'un C6.
+  # `auipc` lays down the top 20 bits of a PC-relative distance, `addi` adds the
+  # low 12 -- and since `addi` sign-extends, the high bits are rounded to
+  # compensate, exactly as in `RV32.li/2`. PC-relative rather than absolute: the
+  # image stays relocatable, which will matter the day it is no longer loaded at
+  # 0x8000_0000 but somewhere in a C6's flash.
   defp bytes({:la, rd, name}, offset, _base, labels) do
     delta = resolve!(labels, name) - offset
     high = (delta + 0x800) >>> 12 &&& 0xFFFFF
@@ -178,47 +176,47 @@ defmodule Atomboy.Native.Asm do
 
       _ ->
         raise ArgumentError,
-              "étiquette inconnue : #{inspect(name)} — définies : #{labels |> Map.keys() |> Enum.sort() |> Enum.join(", ")}"
+              "unknown label: #{inspect(name)} -- defined: #{labels |> Map.keys() |> Enum.sort() |> Enum.join(", ")}"
     end
   end
 
-  # ══ Les émetteurs qui visent une étiquette ═══════════════════════════════════
+  # ══ The emitters that target a label ═════════════════════════════════════════
 
-  @doc "Définit une étiquette à la position courante."
+  @doc "Defines a label at the current position."
   @spec label(atom()) :: item()
   def label(name), do: {:label, name}
 
-  @doc "Un saut inconditionnel vers une étiquette."
+  @doc "An unconditional jump to a label."
   @spec j(atom()) :: item()
   def j(name), do: {:ref, name, &RV32.j/1}
 
-  @doc "Un appel de sous-routine : l'adresse de retour part dans `ra`."
+  @doc "A subroutine call: the return address goes into `ra`."
   @spec call(atom()) :: item()
   def call(name), do: {:ref, name, &RV32.jal(:ra, &1)}
 
   @doc """
-  Charge l'adresse d'une étiquette dans un registre — deux instructions.
+  Loads a label's address into a register -- two instructions.
 
-  C'est ce qui permet au pilote de désigner la table de saut, la zone d'état et
-  les 64 Ko de mémoire émulée sans qu'aucune adresse absolue ne soit écrite en
-  dur nulle part.
+  This is what lets the driver point at the jump table, the state area and the
+  64 KB of emulated memory without a single absolute address hard-coded
+  anywhere.
   """
   @spec la(RV32.reg(), atom()) :: item()
   def la(rd, name), do: {:la, rd, name}
 
   for branch <- [:beq, :bne, :blt, :bge, :bltu, :bgeu] do
-    @doc "`#{branch} rs1, rs2, étiquette`"
+    @doc "`#{branch} rs1, rs2, label`"
     @spec unquote(branch)(RV32.reg(), RV32.reg(), atom()) :: item()
     def unquote(branch)(rs1, rs2, name) do
       {:ref, name, &RV32.unquote(branch)(rs1, rs2, &1)}
     end
   end
 
-  @doc "Un branchement si le registre est nul — `beq rs, zero`."
+  @doc "A branch taken when the register is zero -- `beq rs, zero`."
   @spec beqz(RV32.reg(), atom()) :: item()
   def beqz(rs, name), do: beq(rs, :zero, name)
 
-  @doc "Un branchement si le registre est non nul — `bne rs, zero`."
+  @doc "A branch taken when the register is non-zero -- `bne rs, zero`."
   @spec bnez(RV32.reg(), atom()) :: item()
   def bnez(rs, name), do: bne(rs, :zero, name)
 end

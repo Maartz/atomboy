@@ -1,20 +1,21 @@
 defmodule Mix.Tasks.Atomboy.Native do
-  @shortdoc "Construit l'interpréteur RV32 et l'exécute sous qemu"
+  @shortdoc "Builds the RV32 interpreter and runs it under qemu"
 
   @moduledoc """
-  Le backend natif, vu de la ligne de commande.
+  The native backend, from the command line.
 
-      mix atomboy.native            # taille, couverture, et une exécution témoin
-      mix atomboy.native --taille   # ne construit que, sans lancer qemu
-      mix atomboy.native --fumee    # l'image de fumée, sans interpréteur
+      mix atomboy.native          # size, coverage, and one witness run
+      mix atomboy.native --size   # build only, without launching qemu
+      mix atomboy.native --smoke  # the smoke image, no interpreter
 
-  ## Le chiffre à regarder
+  ## The number to watch
 
-  Ce chantier existe pour une raison mesurée : sur ESP32-C6, l'émulateur
-  plafonne à 12 % du temps réel parce que ~1 Mo d'interpréteur natif AtomVM se
-  bat contre 32 Ko d'icache. Un interpréteur SM83 émis directement doit y tenir.
-  La ligne « code » ci-dessous est donc le vrai tableau de bord du projet, et
-  elle doit rester lisible à chaque étape plutôt qu'être découverte à la fin.
+  This work exists for a measured reason: on the ESP32-C6 the emulator caps at
+  12% of real time because roughly a megabyte of AtomVM native interpreter
+  fights a 32 KB instruction cache. A SM83 interpreter emitted directly has to
+  fit inside it. The "code" line below is therefore the project's real
+  dashboard, and it should stay legible at every stage rather than be discovered
+  at the end.
   """
 
   use Mix.Task
@@ -35,74 +36,74 @@ defmodule Mix.Tasks.Atomboy.Native do
   def run(argv) do
     Mix.Task.run("compile")
 
-    if "--fumee" in argv, do: fumee(argv), else: interprete(argv)
+    if "--smoke" in argv, do: smoke(argv), else: interpreter(argv)
   end
 
-  defp interprete(argv) do
-    memoire = :binary.copy(<<0x00>>, 0x10000)
-    image = Interp.image(memoire, %State{}, 1)
+  defp interpreter(argv) do
+    memory = :binary.copy(<<0x00>>, 0x10000)
+    image = Interp.image(memory, %State{}, 1)
 
     code = image.labels[:table_base]
-    couverts = length(Emit.couverture_table())
+    covered = length(Emit.table_coverage())
     total = length(Table.all())
     alu = Asm.assemble(ALU.routines())
 
     Mix.shell().info("""
-    Couverture : #{couverts}/#{total} instructions émises (#{pourcent(couverts, total)} %)#{if Emit.prefixe_couvert?(), do: ", préfixe CB câblé", else: ""}
-    Code       : #{code} octets, soit #{pourcent(code, @icache)} % de l'icache du C6
-    ALU        : #{alu.size} octets pour #{routines(alu)} routines, liées à l'interpréteur
-    Image      : #{image.size} octets, dont 64 Ko de mémoire émulée
+    Coverage : #{covered}/#{total} instructions emitted (#{percent(covered, total)} %)#{if Emit.prefix_covered?(), do: ", CB prefix wired", else: ""}
+    Code     : #{code} bytes, #{percent(code, @icache)} % of the C6's instruction cache
+    ALU      : #{alu.size} bytes for #{routines(alu)} routines, linked into the interpreter
+    Image    : #{image.size} bytes, of which 64 KB is emulated memory
     """)
 
-    unless "--taille" in argv do
-      exige_qemu()
-      temoin(memoire)
+    unless "--size" in argv do
+      require_qemu()
+      witness(memory)
     end
   end
 
-  # Un programme de NOP : PC doit avoir avancé d'exactement un cran par tranche
-  # de quatre cycles. C'est le plus petit signe de vie qui prouve que le fetch,
-  # la table de saut et la comptabilité des cycles tiennent ensemble.
-  defp temoin(memoire) do
+  # A program of NOPs: PC must have advanced exactly one step per four cycles.
+  # It is the smallest sign of life proving that the fetch, the jump table and
+  # the cycle accounting hold together.
+  defp witness(memory) do
     budget = 4000
 
-    case Run.run(memoire, %State{}, budget) do
-      {:ok, resultat} ->
+    case Run.run(memory, %State{}, budget) do
+      {:ok, result} ->
         Mix.shell().info(
-          "Témoin : #{resultat.cycles} cycles, PC=#{resultat.state.pc}, " <>
-            "statut #{resultat.statut}, en #{div(resultat.duration_us, 1000)} ms"
+          "Witness : #{result.cycles} cycles, PC=#{result.state.pc}, " <>
+            "status #{result.status}, in #{div(result.duration_us, 1000)} ms"
         )
 
-      {:error, raison} ->
-        Mix.raise("l'invité n'a rien rendu : #{inspect(raison)}")
+      {:error, reason} ->
+        Mix.raise("the guest returned nothing: #{inspect(reason)}")
     end
   end
 
-  defp fumee(argv) do
+  defp smoke(argv) do
     image = Image.smoke()
-    Mix.shell().info("Image de fumée : #{image.size} octets")
+    Mix.shell().info("Smoke image: #{image.size} bytes")
 
-    unless "--taille" in argv do
-      exige_qemu()
-      resultat = Qemu.run(image.code)
+    unless "--size" in argv do
+      require_qemu()
+      result = Qemu.run(image.code)
 
-      case resultat.status do
-        :ok -> Mix.shell().info("Sortie série : #{inspect(resultat.serial)}")
-        :timeout -> Mix.raise("l'invité n'a pas rendu la main")
+      case result.status do
+        :ok -> Mix.shell().info("Serial output: #{inspect(result.serial)}")
+        :timeout -> Mix.raise("the guest never handed control back")
       end
     end
   end
 
-  defp exige_qemu do
+  defp require_qemu do
     unless Qemu.available?() do
-      Mix.raise("qemu-system-riscv32 est introuvable — `brew install qemu`")
+      Mix.raise("qemu-system-riscv32 not found -- `brew install qemu`")
     end
   end
 
-  defp pourcent(part, tout), do: Float.round(part * 100 / tout, 1)
+  defp percent(part, whole), do: Float.round(part * 100 / whole, 1)
 
-  # Une routine par étiquette : l'assemblage les a toutes résolues, donc les
-  # compter ici évite de tenir une liste en double.
+  # One routine per label: the assembly resolved them all, so counting them here
+  # avoids keeping a duplicate list.
   defp routines(%{labels: labels}) do
     labels |> Map.keys() |> Enum.count(&String.starts_with?(Atom.to_string(&1), "alu_"))
   end

@@ -1,16 +1,16 @@
 defmodule Atomboy.NativeInterpTest do
   @moduledoc """
-  L'interpréteur natif contre l'oracle — la même méthode que `loop_test.exs`.
+  The native interpreter against the oracle -- the same method as
+  `loop_test.exs`.
 
-  `Atomboy.CPU.Loop` n'est pas validé par les vecteurs SM83 mais par héritage :
-  l'oracle passe les vecteurs, et l'équivalence croisée sur programmes
-  aléatoires prouve que la boucle rapide en est indiscernable. L'interpréteur
-  RV32 est un troisième backend et se valide exactement pareil, à ceci près que
-  l'écart à combler est plus large — un encodage d'instruction, un jeu de
-  registres, un assembleur et un émulateur de processeur séparent les deux
-  états qu'on compare.
+  `Atomboy.CPU.Loop` is not validated by the SM83 vectors but by inheritance:
+  the oracle passes the vectors, and cross-equivalence on random programs proves
+  the fast loop is indistinguishable from it. The RV32 interpreter is a third
+  backend and is validated exactly the same way, except that the gap to bridge
+  is wider -- an instruction encoding, a register file, an assembler and a
+  processor emulator separate the two states being compared.
 
-  Les graines sont fixes : un échec est reproductible tel quel.
+  The seeds are fixed: a failure is reproducible as it stands.
   """
 
   use ExUnit.Case, async: true
@@ -24,82 +24,82 @@ defmodule Atomboy.NativeInterpTest do
   alias Atomboy.Native.Run
 
   @moduletag :qemu
-  # Le harnais paie un lancement de qemu et un vidage de 64 Ko par exécution.
+  # The harness pays one qemu launch and a 64 KB dump per run.
   @moduletag timeout: 120_000
 
   @steps 5_000
   @seeds 1..8
 
   describe "la couverture" do
-    test "la table SM83 est émise en entier" do
-      couverts = MapSet.new(Emit.couverture())
+    test "the SM83 table is emitted in full" do
+      covered = MapSet.new(Emit.coverage())
 
-      assert {nil, 0x00} in couverts, "NOP"
-      assert {nil, 0x41} in couverts, "LD B, C"
-      assert {nil, 0x7F} in couverts, "LD A, A"
-      assert {nil, 0x80} in couverts, "ADD A, B"
-      assert {nil, 0xBF} in couverts, "CP A"
-      assert {nil, 0xC6} in couverts, "ADD A, d8"
-      assert {nil, 0x3C} in couverts, "INC A"
-      assert {nil, 0x05} in couverts, "DEC B"
-      assert {nil, 0x27} in couverts, "DAA"
-      assert {nil, 0x3F} in couverts, "CCF"
-      assert {nil, 0x3E} in couverts, "LD A, d8"
-      assert {nil, 0x46} in couverts, "LD B, (HL)"
-      assert {nil, 0x70} in couverts, "LD (HL), B"
-      assert {nil, 0x86} in couverts, "ADD A, (HL)"
-      assert {nil, 0x34} in couverts, "INC (HL)"
-      assert {nil, 0x36} in couverts, "LD (HL), d8"
-      assert {nil, 0x22} in couverts, "LD (HL+), A"
-      assert {nil, 0x1A} in couverts, "LD A, (DE)"
-      assert {nil, 0xE0} in couverts, "LDH (a8), A"
-      assert {nil, 0xF2} in couverts, "LDH A, (C)"
-      assert {nil, 0xEA} in couverts, "LD (a16), A"
+      assert {nil, 0x00} in covered, "NOP"
+      assert {nil, 0x41} in covered, "LD B, C"
+      assert {nil, 0x7F} in covered, "LD A, A"
+      assert {nil, 0x80} in covered, "ADD A, B"
+      assert {nil, 0xBF} in covered, "CP A"
+      assert {nil, 0xC6} in covered, "ADD A, d8"
+      assert {nil, 0x3C} in covered, "INC A"
+      assert {nil, 0x05} in covered, "DEC B"
+      assert {nil, 0x27} in covered, "DAA"
+      assert {nil, 0x3F} in covered, "CCF"
+      assert {nil, 0x3E} in covered, "LD A, d8"
+      assert {nil, 0x46} in covered, "LD B, (HL)"
+      assert {nil, 0x70} in covered, "LD (HL), B"
+      assert {nil, 0x86} in covered, "ADD A, (HL)"
+      assert {nil, 0x34} in covered, "INC (HL)"
+      assert {nil, 0x36} in covered, "LD (HL), d8"
+      assert {nil, 0x22} in covered, "LD (HL+), A"
+      assert {nil, 0x1A} in covered, "LD A, (DE)"
+      assert {nil, 0xE0} in covered, "LDH (a8), A"
+      assert {nil, 0xF2} in covered, "LDH A, (C)"
+      assert {nil, 0xEA} in covered, "LD (a16), A"
 
-      assert {nil, 0x01} in couverts, "LD BC, d16"
-      assert {nil, 0x03} in couverts, "INC BC"
-      assert {nil, 0x09} in couverts, "ADD HL, BC"
-      assert {nil, 0xC5} in couverts, "PUSH BC"
-      assert {nil, 0xF1} in couverts, "POP AF"
-      assert {nil, 0xE8} in couverts, "ADD SP, r8"
-      assert {nil, 0xF8} in couverts, "LD HL, SP+r8"
-      assert {nil, 0xF9} in couverts, "LD SP, HL"
-      assert {nil, 0x08} in couverts, "LD (a16), SP"
-      assert {nil, 0xFF} in couverts, "RST 38H"
+      assert {nil, 0x01} in covered, "LD BC, d16"
+      assert {nil, 0x03} in covered, "INC BC"
+      assert {nil, 0x09} in covered, "ADD HL, BC"
+      assert {nil, 0xC5} in covered, "PUSH BC"
+      assert {nil, 0xF1} in covered, "POP AF"
+      assert {nil, 0xE8} in covered, "ADD SP, r8"
+      assert {nil, 0xF8} in covered, "LD HL, SP+r8"
+      assert {nil, 0xF9} in covered, "LD SP, HL"
+      assert {nil, 0x08} in covered, "LD (a16), SP"
+      assert {nil, 0xFF} in covered, "RST 38H"
 
-      assert {nil, 0x18} in couverts, "JR e8"
-      assert {nil, 0x20} in couverts, "JR NZ, e8"
-      assert {nil, 0xC3} in couverts, "JP a16"
-      assert {nil, 0xE9} in couverts, "JP HL"
-      assert {nil, 0xCA} in couverts, "JP Z, a16"
-      assert {nil, 0xCD} in couverts, "CALL a16"
-      assert {nil, 0xD4} in couverts, "CALL NC, a16"
-      assert {nil, 0xC9} in couverts, "RET"
-      assert {nil, 0xD8} in couverts, "RET C"
+      assert {nil, 0x18} in covered, "JR e8"
+      assert {nil, 0x20} in covered, "JR NZ, e8"
+      assert {nil, 0xC3} in covered, "JP a16"
+      assert {nil, 0xE9} in covered, "JP HL"
+      assert {nil, 0xCA} in covered, "JP Z, a16"
+      assert {nil, 0xCD} in covered, "CALL a16"
+      assert {nil, 0xD4} in covered, "CALL NC, a16"
+      assert {nil, 0xC9} in covered, "RET"
+      assert {nil, 0xD8} in covered, "RET C"
 
-      assert {nil, 0xCB} in couverts, "le préfixe CB"
-      assert {:cb, 0x00} in couverts, "RLC B"
-      assert {:cb, 0x36} in couverts, "SWAP (HL)"
-      assert {:cb, 0x7E} in couverts, "BIT 7, (HL)"
-      assert {:cb, 0x86} in couverts, "RES 0, (HL)"
-      assert {:cb, 0xFF} in couverts, "SET 7, A"
+      assert {nil, 0xCB} in covered, "the CB prefix"
+      assert {:cb, 0x00} in covered, "RLC B"
+      assert {:cb, 0x36} in covered, "SWAP (HL)"
+      assert {:cb, 0x7E} in covered, "BIT 7, (HL)"
+      assert {:cb, 0x86} in covered, "RES 0, (HL)"
+      assert {:cb, 0xFF} in covered, "SET 7, A"
 
-      assert {nil, 0x76} in couverts, "HALT"
-      assert {nil, 0xD9} in couverts, "RETI"
-      assert {nil, 0xF3} in couverts, "DI"
-      assert {nil, 0xFB} in couverts, "EI"
+      assert {nil, 0x76} in covered, "HALT"
+      assert {nil, 0xD9} in covered, "RETI"
+      assert {nil, 0xF3} in covered, "DI"
+      assert {nil, 0xFB} in covered, "EI"
 
-      # La table entière, sans exception.
-      assert length(Emit.couverture_table()) == length(Table.all())
-      assert Emit.restant() == []
+      # The whole table, no exceptions.
+      assert length(Emit.table_coverage()) == length(Table.all())
+      assert Emit.missing() == []
 
-      # Le préfixe s'ajoute au dispatchable sans être une entrée de table.
-      assert MapSet.size(couverts) == length(Table.all()) + 1
-      assert Emit.prefixe_couvert?()
+      # The prefix joins the dispatchable set without being a table entry.
+      assert MapSet.size(covered) == length(Table.all()) + 1
+      assert Emit.prefix_covered?()
     end
 
-    test "la correspondance mnémonique → primitive suit celle de Gen" do
-      # `gen.ex:1490` fait la même traduction pour les deux backends Elixir.
+    test "the mnemonic-to-primitive mapping follows Gen's" do
+      # `gen.ex:1490` does the same translation for both Elixir backends.
       # Qu'elles divergent produirait du code natif qui appelle une routine
       # inexistante — ou pire, la mauvaise.
       exportees = MapSet.new(Enum.map(Atomboy.CPU.ALU.__info__(:functions), &elem(&1, 0)))
@@ -116,467 +116,465 @@ defmodule Atomboy.NativeInterpTest do
     end
 
     test "tout ce que le natif couvre, l'oracle le couvre aussi" do
-      assert MapSet.subset?(MapSet.new(Emit.couverture()), MapSet.new(Atomboy.CPU.implemented()))
+      assert MapSet.subset?(MapSet.new(Emit.coverage()), MapSet.new(Atomboy.CPU.implemented()))
     end
   end
 
-  describe "l'exécution" do
-    test "une mémoire de NOP avance PC d'un cran par instruction" do
-      memoire = :binary.copy(<<0x00>>, 0x10000)
+  describe "execution" do
+    test "a memory of NOPs advances PC one step per instruction" do
+      memory = :binary.copy(<<0x00>>, 0x10000)
 
-      resultat = Run.run!(memoire, %State{}, 100)
+      result = Run.run!(memory, %State{}, 100)
 
-      assert resultat.statut == :ok
-      assert resultat.cycles == 100
-      assert resultat.state.pc == 25
-      assert resultat.memoire == memoire
+      assert result.status == :ok
+      assert result.cycles == 100
+      assert result.state.pc == 25
+      assert result.memory == memory
     end
 
-    test "un opcode absent de la table s'arrête net et se nomme" do
-      # 0xE3 n'existe pas sur le SM83 : ni la table ni l'oracle ne le décrivent.
-      memoire = :binary.copy(<<0xE3>>, 0x10000)
+    test "an opcode absent from the table stops dead and names itself" do
+      # 0xE3 does not exist on the SM83: neither the table nor the oracle has it.
+      memory = :binary.copy(<<0xE3>>, 0x10000)
 
-      resultat = Run.run!(memoire, %State{}, 100)
+      result = Run.run!(memory, %State{}, 100)
 
-      assert resultat.statut == :opcode_inconnu
-      assert resultat.opcode == 0xE3
+      assert result.status == :unknown_opcode
+      assert result.opcode == 0xE3
     end
 
     test "POP AF jette les quatre bits bas du registre de drapeaux" do
       # Le seul endroit d'où une valeur arbitraire peut entrer dans F. Les
-      # quatre bits bas n'existent pas sur le matériel, et `POP AF` doit les
-      # perdre.
+      # low four bits do not exist on hardware, and `POP AF` must lose them.
       #
-      # Ce test est ici parce que l'équivalence croisée ne l'attrape pas : dans
-      # un programme aléatoire, la première opération d'ALU venue réécrit F
-      # entièrement, donc la pollution s'efface avant d'être observée. Vérifié
-      # par mutation — retirer le masque laisse les huit graines vertes.
-      memoire = programme(%{0x100 => 0xF1, 0x200 => 0xFF, 0x201 => 0x12})
+      # This test is here because cross-equivalence does not catch it: in a
+      # random program the next ALU operation rewrites F entirely, so the
+      # pollution is erased before it is observed. Verified by mutation --
+      # dropping the mask leaves all eight seeds green.
+      memory = program(%{0x100 => 0xF1, 0x200 => 0xFF, 0x201 => 0x12})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200}, 12)
+      result = Run.run!(memory, %State{pc: 0x100, sp: 0x200}, 12)
 
-      assert resultat.statut == :ok
-      assert resultat.state.a == 0x12
-      assert resultat.state.f == 0xF0, "F vaut #{resultat.state.f}, les bits bas ont survécu"
-      assert resultat.state.sp == 0x202
+      assert result.status == :ok
+      assert result.state.a == 0x12
+      assert result.state.f == 0xF0, "F is #{result.state.f}, the low bits survived"
+      assert result.state.sp == 0x202
     end
 
     test "PUSH puis POP rendent la paire intacte, octet bas en premier" do
       # PUSH BC puis POP DE : DE doit valoir BC, et la pile porter l'octet bas
-      # à l'adresse basse — l'ordre qu'attend le matériel.
-      memoire = programme(%{0x100 => 0xC5, 0x101 => 0xD1})
+      # at the low address -- the order the hardware expects.
+      memory = program(%{0x100 => 0xC5, 0x101 => 0xD1})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200, b: 0xBE, c: 0xEF}, 28)
+      result = Run.run!(memory, %State{pc: 0x100, sp: 0x200, b: 0xBE, c: 0xEF}, 28)
 
-      assert resultat.statut == :ok
-      assert {resultat.state.d, resultat.state.e} == {0xBE, 0xEF}
-      assert resultat.state.sp == 0x200
-      assert :binary.at(resultat.memoire, 0x1FE) == 0xEF, "octet bas à l'adresse basse"
-      assert :binary.at(resultat.memoire, 0x1FF) == 0xBE
+      assert result.status == :ok
+      assert {result.state.d, result.state.e} == {0xBE, 0xEF}
+      assert result.state.sp == 0x200
+      assert :binary.at(result.memory, 0x1FE) == 0xEF, "low byte at the low address"
+      assert :binary.at(result.memory, 0x1FF) == 0xBE
     end
 
-    test "RST empile l'adresse de retour et saute à sa cible" do
-      # RST 28H : l'opcode fait un octet, donc l'adresse empilée est celle qui
+    test "RST pushes the return address and jumps to its target" do
+      # RST 28H: the opcode is one byte, so the pushed address is the one
       # le suit.
-      memoire = programme(%{0x100 => 0xEF})
+      memory = program(%{0x100 => 0xEF})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200}, 16)
+      result = Run.run!(memory, %State{pc: 0x100, sp: 0x200}, 16)
 
-      assert resultat.statut == :ok
-      assert resultat.state.pc == 0x28
-      assert resultat.state.sp == 0x1FE
-      assert :binary.at(resultat.memoire, 0x1FE) == 0x01
-      assert :binary.at(resultat.memoire, 0x1FF) == 0x01
+      assert result.status == :ok
+      assert result.state.pc == 0x28
+      assert result.state.sp == 0x1FE
+      assert :binary.at(result.memory, 0x1FE) == 0x01
+      assert :binary.at(result.memory, 0x1FF) == 0x01
     end
 
-    test "un branchement non pris consomme son opérande et coûte moins cher" do
-      # JR NZ, +4 avec Z posé : l'offset est lu — donc PC avance de deux — mais
-      # le saut n'a pas lieu, et l'instruction coûte 8 T au lieu de 12.
-      memoire = programme(%{0x100 => 0x20, 0x101 => 0x04})
+    test "an untaken branch still consumes its operand and costs less" do
+      # JR NZ, +4 with Z set: the offset is read -- so PC advances by two --
+      # but the jump does not happen, and the instruction costs 8 T not 12.
+      memory = program(%{0x100 => 0x20, 0x101 => 0x04})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100, f: 0x80}, 8)
+      result = Run.run!(memory, %State{pc: 0x100, f: 0x80}, 8)
 
-      assert resultat.statut == :ok
-      assert resultat.state.pc == 0x102, "l'opérande doit être consommé même sans saut"
-      assert resultat.cycles == 8
+      assert result.status == :ok
+      assert result.state.pc == 0x102, "the operand must be consumed even without a jump"
+      assert result.cycles == 8
     end
 
-    test "le même branchement, pris, saute et coûte plus cher" do
-      memoire = programme(%{0x100 => 0x20, 0x101 => 0x04})
+    test "the same branch, taken, jumps and costs more" do
+      memory = program(%{0x100 => 0x20, 0x101 => 0x04})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100, f: 0x00}, 12)
+      result = Run.run!(memory, %State{pc: 0x100, f: 0x00}, 12)
 
-      assert resultat.statut == :ok
-      assert resultat.state.pc == 0x106, "la cible est relative au PC qui suit l'opérande"
-      assert resultat.cycles == 12
+      assert result.status == :ok
+      assert result.state.pc == 0x106, "the target is relative to the PC following the operand"
+      assert result.cycles == 12
     end
 
-    test "un offset de JR négatif recule" do
-      # 0xFE vaut -2 : le saut revient sur l'opcode lui-même.
-      memoire = programme(%{0x100 => 0x18, 0x101 => 0xFE})
+    test "a negative JR offset goes backwards" do
+      # 0xFE is -2: the jump lands back on the opcode itself.
+      memory = program(%{0x100 => 0x18, 0x101 => 0xFE})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100}, 12)
+      result = Run.run!(memory, %State{pc: 0x100}, 12)
 
-      assert resultat.state.pc == 0x100
+      assert result.state.pc == 0x100
     end
 
     test "CALL puis RET reviennent exactement où il faut" do
-      # CALL 0x300, et à 0x300 un RET. L'adresse de retour est celle qui suit
-      # les deux octets d'opérande.
-      memoire = programme(%{0x100 => 0xCD, 0x101 => 0x00, 0x102 => 0x03, 0x300 => 0xC9})
+      # CALL 0x300, and a RET at 0x300. The return address is the one following
+      # the two operand bytes.
+      memory = program(%{0x100 => 0xCD, 0x101 => 0x00, 0x102 => 0x03, 0x300 => 0xC9})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200}, 40)
+      result = Run.run!(memory, %State{pc: 0x100, sp: 0x200}, 40)
 
-      assert resultat.statut == :ok
-      assert resultat.state.pc == 0x103
-      assert resultat.state.sp == 0x200, "la pile doit être rendue"
-      assert resultat.cycles == 40, "24 pour le CALL, 16 pour le RET"
+      assert result.status == :ok
+      assert result.state.pc == 0x103
+      assert result.state.sp == 0x200, "the stack must be given back"
+      assert result.cycles == 40, "24 pour le CALL, 16 pour le RET"
     end
 
-    test "JP HL ne touche pas la mémoire" do
-      memoire = programme(%{0x100 => 0xE9})
+    test "JP HL touches no memory" do
+      memory = program(%{0x100 => 0xE9})
 
-      resultat = Run.run!(memoire, %State{pc: 0x100, h: 0x12, l: 0x34}, 4)
+      result = Run.run!(memory, %State{pc: 0x100, h: 0x12, l: 0x34}, 4)
 
-      assert resultat.state.pc == 0x1234
-      assert resultat.memoire == memoire
+      assert result.state.pc == 0x1234
+      assert result.memory == memory
     end
 
-    test "BIT n pèse bien le bit n, et lui seul" do
-      # Même angle mort que `POP AF` : `BIT` n'écrit que F, donc la première
-      # opération d'ALU venue efface son résultat avant qu'on l'observe. Vérifié
-      # par mutation — décaler le numéro de bit d'un cran laisse l'équivalence
-      # croisée entièrement verte, dans les deux familles.
+    test "BIT n weighs bit n, and only that one" do
+      # The same blind spot as `POP AF`: `BIT` writes only F, so the next ALU
+      # operation erases its result before it is observed. Verified by mutation
+      # -- shifting the bit number by one leaves cross-equivalence entirely
+      # green, in both families.
       #
       # 0xAA vaut 10101010 : Z ne doit se lever que sur les bits pairs. C entre
-      # à 1 et doit ressortir intact, H doit se poser.
+      # comes in at 1 and must come out intact, H must be set.
       for n <- 0..7 do
-        memoire = programme(%{0x100 => 0xCB, 0x101 => 0x40 + n * 8})
+        memory = program(%{0x100 => 0xCB, 0x101 => 0x40 + n * 8})
 
-        resultat = Run.run!(memoire, %State{pc: 0x100, b: 0xAA, f: 0x10}, 8)
+        result = Run.run!(memory, %State{pc: 0x100, b: 0xAA, f: 0x10}, 8)
 
         zero = if rem(n, 2) == 0, do: 0x80, else: 0x00
 
-        assert resultat.state.f == zero + 0x20 + 0x10,
-               "BIT #{n}, B sur 0xAA : F vaut #{Atomboy.CPU.State.flag_string(resultat.state)}"
+        assert result.state.f == zero + 0x20 + 0x10,
+               "BIT #{n}, B sur 0xAA : F vaut #{Atomboy.CPU.State.flag_string(result.state)}"
 
-        assert resultat.state.b == 0xAA, "BIT ne doit pas écrire sa cible"
+        assert result.state.b == 0xAA, "BIT must not write its target"
       end
     end
 
-    test "PC reboucle à 0xFFFF sans déborder" do
-      memoire = :binary.copy(<<0x00>>, 0x10000)
+    test "PC wraps at 0xFFFF without overflowing" do
+      memory = :binary.copy(<<0x00>>, 0x10000)
 
-      resultat = Run.run!(memoire, %State{pc: 0xFFFE}, 12)
+      result = Run.run!(memory, %State{pc: 0xFFFE}, 12)
 
-      assert resultat.statut == :ok
-      assert resultat.state.pc == 1
+      assert result.status == :ok
+      assert result.state.pc == 1
     end
   end
 
-  # Deux familles, parce qu'elles ne prouvent pas la même chose.
+  # Two families, because they do not prove the same thing.
   #
-  # Les programmes **linéaires** excluent tout ce qui détourne PC : l'exécution
-  # balaie alors l'espace d'adressage de bout en bout et chaque opcode émis
+  # **Linear** programs exclude everything that diverts PC: execution then
+  # sweeps the address space end to end and every emitted opcode
   # passe des dizaines de fois. C'est la famille qui donne la *largeur*.
   #
-  # Les programmes **avec sauts** prennent toute la table. Mesuré : ils ne
-  # visitent que 37 à 290 adresses distinctes sur 65 536, parce qu'un `JR -2`
-  # suffit à enfermer PC dans une boucle. Ils ne prouvent donc presque rien sur
-  # la largeur — mais ils sont les seuls à exercer les branchements, la pile en
-  # usage réel et l'auto-modification. C'est la famille qui donne la
+  # Programs **with jumps** take the whole table. Measured: they visit only 37
+  # to 290 distinct addresses out of 65536, because a `JR -2` is enough to trap
+  # PC in a loop. So they prove almost nothing about breadth -- but they are the
+  # only ones exercising branches, the stack in real use and self-modification.
+  # That is the family giving
   # *profondeur*.
   #
-  # Croire que la seconde suffisait était une erreur : « 40 000 instructions »
+  # Believing the second sufficed was a mistake: "40000 instructions"
   # se lit comme une couverture, et n'en est pas une.
-  describe "l'équivalence croisée — programmes linéaires" do
+  describe "cross-equivalence -- linear programs" do
     for seed <- @seeds do
-      test "programme linéaire, graine #{seed}" do
+      test "linear program, seed #{seed}" do
         :rand.seed(:exsss, {unquote(seed), 0, 0})
 
-        memoire = programme_aleatoire(opcodes_lineaires())
-        state = etat_aleatoire()
+        memory = random_program(linear_opcodes())
+        state = random_state()
 
-        {attendu, memoire_oracle, budget, fautif} = oracle(memoire, state, @steps)
+        {expected, oracle_memory, budget, faulty} = oracle(memory, state, @steps)
 
-        resultat = Run.run!(memoire, state, budget)
+        result = Run.run!(memory, state, budget)
 
-        assert resultat.statut == :ok
-        assert resultat.cycles == budget
-        assert resultat.state == attendu
+        assert result.status == :ok
+        assert result.cycles == budget
+        assert result.state == expected
 
         divergences =
           for addr <- 0..0xFFFF,
-              octet_oracle = Flat.read8(memoire_oracle, addr),
-              octet_natif = :binary.at(resultat.memoire, addr),
-              octet_oracle != octet_natif,
-              do: {addr, octet_oracle, octet_natif}
+              oracle_byte = Flat.read8(oracle_memory, addr),
+              native_byte = :binary.at(result.memory, addr),
+              oracle_byte != native_byte,
+              do: {addr, oracle_byte, native_byte}
 
         assert divergences == []
 
-        # Les programmes s'auto-modifient — `LD (HL), r` écrit parfois sur le
+        # The programs self-modify -- `LD (HL), r` sometimes writes onto
         # chemin de PC — et fabriquent alors des opcodes que le natif ne sait
-        # pas encore émettre. L'équivalence porte sur le préfixe sain ; un
-        # cycle de plus doit faire échouer le natif sur *cet* opcode-là.
-        if fautif do
-          suite = Run.run!(memoire, state, budget + 1)
+        # cannot emit yet. Equivalence covers the sane prefix; one cycle more
+        # must make the native side fail on *that* opcode.
+        if faulty do
+          next_result = Run.run!(memory, state, budget + 1)
 
-          assert suite.statut == :opcode_inconnu
-          assert suite.opcode == fautif
+          assert next_result.statut == :unknown_opcode
+          assert next_result.opcode == faulty
         end
       end
     end
 
-    test "un programme linéaire traverse effectivement toute la table" do
-      # Sans cette mesure, la famille linéaire pourrait se rétrécir sans qu'on
-      # le voie — c'est exactement ce qui était arrivé à l'autre.
+    test "a linear program really does cross the whole table" do
+      # Without this measurement the linear family could narrow unnoticed --
+      # which is exactly what had happened to the other one.
       :rand.seed(:exsss, {1, 0, 0})
-      memoire = programme_aleatoire(opcodes_lineaires())
-      {_, _, _, _, vus} = trace(memoire, etat_aleatoire(), @steps)
+      memory = random_program(linear_opcodes())
+      {_, _, _, _, seen} = trace(memory, random_state(), @steps)
 
-      assert MapSet.size(vus) > 200,
-             "seulement #{MapSet.size(vus)} opcodes distincts exécutés sur #{length(opcodes_lineaires())}"
+      assert MapSet.size(seen) > 200,
+             "only #{MapSet.size(seen)} distinct opcodes executed out of #{length(linear_opcodes())}"
     end
   end
 
-  describe "l'équivalence croisée — programmes avec sauts" do
+  describe "cross-equivalence -- programs with jumps" do
     for seed <- @seeds do
-      test "programme avec sauts, graine #{seed}" do
+      test "program with jumps, seed #{seed}" do
         :rand.seed(:exsss, {unquote(seed), 0, 0})
 
-        memoire = programme_aleatoire(opcodes_complets())
-        state = etat_aleatoire()
+        memory = random_program(all_opcodes())
+        state = random_state()
 
-        {attendu, memoire_oracle, budget, fautif} = oracle(memoire, state, @steps)
+        {expected, oracle_memory, budget, faulty} = oracle(memory, state, @steps)
 
-        resultat = Run.run!(memoire, state, budget)
+        result = Run.run!(memory, state, budget)
 
-        assert resultat.statut == :ok
-        assert resultat.cycles == budget
-        assert resultat.state == attendu
+        assert result.status == :ok
+        assert result.cycles == budget
+        assert result.state == expected
 
         divergences =
           for addr <- 0..0xFFFF,
-              octet_oracle = Flat.read8(memoire_oracle, addr),
-              octet_natif = :binary.at(resultat.memoire, addr),
-              octet_oracle != octet_natif,
-              do: {addr, octet_oracle, octet_natif}
+              oracle_byte = Flat.read8(oracle_memory, addr),
+              native_byte = :binary.at(result.memory, addr),
+              oracle_byte != native_byte,
+              do: {addr, oracle_byte, native_byte}
 
         assert divergences == []
 
-        if fautif do
-          suite = Run.run!(memoire, state, budget + 1)
+        if faulty do
+          next_result = Run.run!(memory, state, budget + 1)
 
-          assert suite.statut == :opcode_inconnu
-          assert suite.opcode == fautif
+          assert next_result.statut == :unknown_opcode
+          assert next_result.opcode == faulty
         end
       end
     end
   end
 
-  # Le matériel d'interruption est ce que `loop_test.exs` appelle son principal
-  # client, et les programmes aléatoires ne le servent presque pas : le service
-  # éteint IME, donc il ne se reproduit qu'après un `EI` ou un `RETI`. Mesuré,
-  # trois à sept services sur seize exécutions. D'où des scénarios écrits à la
-  # main, chacun confronté à l'oracle exactement comme les programmes
-  # aléatoires — l'équivalence reste le contrat, on choisit juste les entrées.
+  # The interrupt hardware is what `loop_test.exs` calls its main client, and
+  # random programs barely serve it: the service turns IME off, so it only
+  # happens again after an `EI` or a `RETI`. Measured, three to seven services
+  # across sixteen runs. Hence hand-written scenarios, each checked against the
+  # oracle exactly as a random program is -- equivalence stays the contract, we
+  # merely choose the inputs.
   describe "les interruptions" do
-    test "une source armée détourne l'exécution vers son vecteur" do
+    test "an armed source diverts execution to its vector" do
       # Le bit 2 d'IF est le timer : vecteur 0x50.
-      memoire = programme(%{0x100 => 0x00, 0xFF0F => 0x04, 0xFFFF => 0x1F})
+      memory = program(%{0x100 => 0x00, 0xFF0F => 0x04, 0xFFFF => 0x1F})
       state = %State{pc: 0x100, sp: 0x200, ime: 1}
 
-      resultat = equivalence!(memoire, state, 1)
+      result = equivalence!(memory, state, 1)
 
-      assert resultat.state.pc == 0x50
-      assert resultat.state.ime == 0, "le service éteint IME"
-      assert resultat.state.sp == 0x1FE
-      assert :binary.at(resultat.memoire, 0x1FE) == 0x00, "PC empilé, octet bas"
-      assert :binary.at(resultat.memoire, 0x1FF) == 0x01
-      assert :binary.at(resultat.memoire, 0xFF0F) == 0x00, "le bit servi retombe"
-      assert resultat.cycles == 20
+      assert result.state.pc == 0x50
+      assert result.state.ime == 0, "the service turns IME off"
+      assert result.state.sp == 0x1FE
+      assert :binary.at(result.memory, 0x1FE) == 0x00, "PC pushed, low byte"
+      assert :binary.at(result.memory, 0x1FF) == 0x01
+      assert :binary.at(result.memory, 0xFF0F) == 0x00, "le bit servi retombe"
+      assert result.cycles == 20
     end
 
-    test "la source la plus basse passe en premier" do
-      # Deux sources armées : le bit 1 (LCD STAT, vecteur 0x48) doit gagner, et
+    test "the lowest source goes first" do
+      # Two armed sources: bit 1 (LCD STAT, vector 0x48) must win, and
       # le bit 2 rester en attente.
-      memoire = programme(%{0x100 => 0x00, 0xFF0F => 0x06, 0xFFFF => 0x1F})
+      memory = program(%{0x100 => 0x00, 0xFF0F => 0x06, 0xFFFF => 0x1F})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 1}, 1)
+      result = equivalence!(memory, %State{pc: 0x100, sp: 0x200, ime: 1}, 1)
 
-      assert resultat.state.pc == 0x48
-      assert :binary.at(resultat.memoire, 0xFF0F) == 0x04, "l'autre source attend son tour"
+      assert result.state.pc == 0x48
+      assert :binary.at(result.memory, 0xFF0F) == 0x04, "the other source waits its turn"
     end
 
-    test "une source armée sans autorisation ne détourne rien" do
-      memoire = programme(%{0x100 => 0x00, 0x101 => 0x00, 0xFF0F => 0x1F, 0xFFFF => 0x1F})
+    test "an armed source without enable diverts nothing" do
+      memory = program(%{0x100 => 0x00, 0x101 => 0x00, 0xFF0F => 0x1F, 0xFFFF => 0x1F})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 0}, 2)
+      result = equivalence!(memory, %State{pc: 0x100, sp: 0x200, ime: 0}, 2)
 
-      assert resultat.state.pc == 0x102, "IME éteint : les deux NOP s'exécutent"
+      assert result.state.pc == 0x102, "IME off: both NOPs run"
     end
 
-    test "IE masque ce qu'IF a armé" do
+    test "IE masks what IF armed" do
       # IF arme le timer, IE n'autorise que le vblank : rien ne passe.
-      memoire = programme(%{0x100 => 0x00, 0xFF0F => 0x04, 0xFFFF => 0x01})
+      memory = program(%{0x100 => 0x00, 0xFF0F => 0x04, 0xFFFF => 0x01})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 1}, 1)
+      result = equivalence!(memory, %State{pc: 0x100, sp: 0x200, ime: 1}, 1)
 
-      assert resultat.state.pc == 0x101
-      assert resultat.state.ime == 1
+      assert result.state.pc == 0x101
+      assert result.state.ime == 1
     end
 
-    test "EI arme sans autoriser, et l'état juste après le dit" do
-      # Le budget s'arrête pile après l'EI, avant que le `fetch` suivant ne
-      # promeuve l'armement — le contrôle du budget passe en premier. C'est le
+    test "EI arms without enabling, and the state just after says so" do
+      # The budget stops right after the EI, before the next `fetch` promotes
+      # the arming -- the budget check comes first. That is the
       # seul instant où la distinction est observable, et sans ce test un `EI`
-      # qui allumerait IME directement serait indiscernable : vérifié par
+      # turning IME on directly would be indistinguishable: verified by
       # mutation, il passait les 42 autres tests.
-      memoire = programme(%{0x100 => 0xFB, 0xFFFF => 0x00})
+      memory = program(%{0x100 => 0xFB, 0xFFFF => 0x00})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100}, 1)
+      result = equivalence!(memory, %State{pc: 0x100}, 1)
 
-      assert resultat.state.ime == 0, "EI n'autorise pas encore"
-      assert resultat.state.ime_pending == 1, "il arme"
+      assert result.state.ime == 0, "EI n'autorise pas encore"
+      assert result.state.ime_pending == 1, "il arme"
     end
 
-    test "EI arme, et la promotion se voit au pas suivant" do
-      memoire = programme(%{0x100 => 0xFB, 0x101 => 0x00, 0xFF0F => 0x01, 0xFFFF => 0x01})
+    test "EI arms, and the promotion shows on the next step" do
+      memory = program(%{0x100 => 0xFB, 0x101 => 0x00, 0xFF0F => 0x01, 0xFFFF => 0x01})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200}, 2)
+      result = equivalence!(memory, %State{pc: 0x100, sp: 0x200}, 2)
 
       # Ce que fait exactement l'oracle est son affaire ; ce test exige que le
       # natif en soit indiscernable, et que l'autorisation ait bien pris.
-      assert resultat.state.pc in [0x40, 0x102]
+      assert result.state.pc in [0x40, 0x102]
     end
 
-    test "DI éteint ce qu'un EI venait d'allumer" do
-      # Aucune source armée, sinon le service partirait dès la promotion de
-      # l'EI — c'est-à-dire *avant* que le DI s'exécute. L'armement n'est donc
-      # jamais visible à une frontière d'instruction : `DI` remet `ime_pending`
-      # à zéro par symétrie avec l'oracle, pas parce qu'un programme pourrait
+    test "DI turns off what an EI had just turned on" do
+      # No armed source, otherwise the service would leave as soon as the EI is
+      # promoted -- that is, *before* the DI runs. So the arming is never
+      # visible at an instruction boundary: `DI` clears `ime_pending` for
+      # symmetry with the oracle, not because a program could
       # l'observer.
-      memoire = programme(%{0x100 => 0xFB, 0x101 => 0xF3, 0x102 => 0x00, 0xFFFF => 0x00})
+      memory = program(%{0x100 => 0xFB, 0x101 => 0xF3, 0x102 => 0x00, 0xFFFF => 0x00})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200}, 3)
+      result = equivalence!(memory, %State{pc: 0x100, sp: 0x200}, 3)
 
-      assert resultat.state.ime == 0
-      assert resultat.state.ime_pending == 0
-      assert resultat.state.pc == 0x103
+      assert result.state.ime == 0
+      assert result.state.ime_pending == 0
+      assert result.state.pc == 0x103
     end
 
-    test "RETI rallume IME immédiatement" do
+    test "RETI re-enables IME immediately" do
       # La pile porte 0x0300 comme adresse de retour.
-      memoire = programme(%{0x100 => 0xD9, 0x200 => 0x00, 0x201 => 0x03, 0x300 => 0x00})
+      memory = program(%{0x100 => 0xD9, 0x200 => 0x00, 0x201 => 0x03, 0x300 => 0x00})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200}, 1)
+      result = equivalence!(memory, %State{pc: 0x100, sp: 0x200}, 1)
 
-      assert resultat.state.pc == 0x300
-      assert resultat.state.ime == 1
-      assert resultat.state.sp == 0x202
+      assert result.state.pc == 0x300
+      assert result.state.ime == 1
+      assert result.state.sp == 0x202
     end
 
-    test "HALT dort par pas de quatre cycles tant que rien n'attend" do
-      memoire = programme(%{0x100 => 0x76, 0xFF0F => 0x00, 0xFFFF => 0x00})
+    test "HALT sleeps in four-cycle steps while nothing is pending" do
+      memory = program(%{0x100 => 0x76, 0xFF0F => 0x00, 0xFFFF => 0x00})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100}, 40)
+      result = equivalence!(memory, %State{pc: 0x100}, 40)
 
-      assert resultat.state.halted, "toujours endormi"
-      assert resultat.state.pc == 0x101, "PC ne bouge plus"
+      assert result.state.halted, "still asleep"
+      assert result.state.pc == 0x101, "PC no longer moves"
     end
 
-    test "HALT se réveille sur une source armée, même IME éteint" do
-      memoire = programme(%{0x100 => 0x76, 0x101 => 0x00, 0xFF0F => 0x01, 0xFFFF => 0x01})
+    test "HALT wakes on an armed source, even with IME off" do
+      memory = program(%{0x100 => 0x76, 0x101 => 0x00, 0xFF0F => 0x01, 0xFFFF => 0x01})
 
-      resultat = equivalence!(memoire, %State{pc: 0x100, sp: 0x200, ime: 0}, 3)
+      result = equivalence!(memory, %State{pc: 0x100, sp: 0x200, ime: 0}, 3)
 
-      refute resultat.state.halted, "le réveil ne demande pas IME"
-      assert resultat.state.pc == 0x102
+      refute result.state.halted, "waking does not need IME"
+      assert result.state.pc == 0x102
     end
   end
 
-  describe "la taille du code" do
-    test "l'interpréteur reste très en deçà de l'icache du C6" do
-      memoire = :binary.copy(<<0x00>>, 0x10000)
-      image = Interp.image(memoire, %State{}, 1)
+  describe "code size" do
+    test "the interpreter stays well under the C6 cache" do
+      memory = :binary.copy(<<0x00>>, 0x10000)
+      image = Interp.image(memory, %State{}, 1)
 
-      # `table_base` ouvre la section de données : tout ce qui précède est du
-      # code. C'est ce chiffre-là qui devra tenir dans 32 Ko une fois les 501
-      # opcodes émis.
+      # `table_base` opens the data section: everything before it is code. That
+      # is the number that has to fit in 32 KB.
       code = image.labels[:table_base]
 
       assert code < 32 * 1024,
-             "le code fait #{code} octets — l'icache du C6 en fait 32 768"
+             "the code is #{code} bytes -- the C6 cache is 32768"
     end
   end
 
-  # ══ L'équivalence, en une ligne ══════════════════════════════════════════════
+  # ══ Equivalence, in one line ═════════════════════════════════════════════════
 
-  # Exécute `steps` pas d'oracle, rejoue le même budget en natif, et exige que
-  # rien ne les distingue — état, cycles, et les 65 536 octets. Rend le résultat
-  # natif pour que l'appelant puisse en plus affirmer des faits précis.
-  defp equivalence!(memoire, state, steps) do
-    {attendu, memoire_oracle, budget, _fautif} = oracle(memoire, state, steps)
+  # Runs `steps` oracle steps, replays the same budget natively, and demands
+  # nothing tells them apart -- state, cycles, and all 65536 bytes. Returns the
+  # native result so the caller can additionally assert precise facts.
+  defp equivalence!(memory, state, steps) do
+    {expected, oracle_memory, budget, _faulty} = oracle(memory, state, steps)
 
-    resultat = Run.run!(memoire, state, budget)
+    result = Run.run!(memory, state, budget)
 
-    assert resultat.statut == :ok
-    assert resultat.cycles == budget
-    assert resultat.state == attendu
+    assert result.status == :ok
+    assert result.cycles == budget
+    assert result.state == expected
 
     divergences =
       for addr <- 0..0xFFFF,
-          octet_oracle = Flat.read8(memoire_oracle, addr),
-          octet_natif = :binary.at(resultat.memoire, addr),
-          octet_oracle != octet_natif,
-          do: {addr, octet_oracle, octet_natif}
+          oracle_byte = Flat.read8(oracle_memory, addr),
+          native_byte = :binary.at(result.memory, addr),
+          oracle_byte != native_byte,
+          do: {addr, oracle_byte, native_byte}
 
     assert divergences == []
 
-    resultat
+    result
   end
 
-  # ══ Génération ═══════════════════════════════════════════════════════════════
+  # ══ Generation ═══════════════════════════════════════════════════════════════
 
-  # Une mémoire de 64 Ko remplie de 0xE3 — un encodage qui n'existe pas sur le
-  # SM83 — avec quelques octets posés là où on les veut. Le remplissage sert de
-  # garde : si l'exécution déborde du programme voulu, elle s'arrête et le dit,
+  # A 64 KB memory filled with 0xE3 -- an encoding that does not exist on the
+  # SM83 -- with a few bytes placed where we want them. The filler is a guard:
+  # if execution runs past the intended program it stops and says so,
   # au lieu de courir dans du bruit.
   #
-  # C'était HALT jusqu'à l'étape 8. Depuis que HALT est implémenté, il
-  # endormirait le processeur au lieu de l'arrêter — une garde qui ne garde
+  # It was HALT until stage eight. Now that HALT is implemented it would put
+  # the processor to sleep instead of stopping it -- a guard that guards
   # plus rien est pire qu'une absence de garde.
-  defp programme(octets) do
-    for addr <- 0..0xFFFF, into: <<>>, do: <<Map.get(octets, addr, 0xE3)>>
+  defp program(bytes) do
+    for addr <- 0..0xFFFF, into: <<>>, do: <<Map.get(bytes, addr, 0xE3)>>
   end
 
-  # Un octet par adresse, tiré du vivier donné — chaque tirage est donc un
-  # programme valide de bout en bout, qui s'auto-modifie, empile et dépile.
-  defp programme_aleatoire(opcodes) do
+  # One byte per address, drawn from the given pool -- so each draw is a valid
+  # program end to end, which self-modifies, pushes and pops.
+  defp random_program(opcodes) do
     0..0xFFFF
     |> Enum.map(fn _addr -> Enum.random(opcodes) end)
     |> :binary.list_to_bin()
   end
 
-  # Tout ce que le natif dispatche depuis un octet d'opcode, préfixe CB compris.
-  defp opcodes_complets, do: for({nil, op} <- Emit.couverture(), do: op)
+  # Everything the native side dispatches from an opcode byte, CB prefix too.
+  defp all_opcodes, do: for({nil, op} <- Emit.coverage(), do: op)
 
-  # Le même vivier privé de tout ce qui détourne PC. L'exécution avance alors
-  # d'une instruction à la suivante et fait le tour des 64 Ko, ce qui est la
-  # seule façon d'exercer chaque opcode émis un grand nombre de fois.
-  defp opcodes_lineaires do
-    sauts =
+  # The same pool minus everything that diverts PC. Execution then moves from
+  # one instruction to the next and tours the 64 KB, which is the only way to
+  # exercise every emitted opcode a great many times.
+  defp linear_opcodes do
+    jumps =
       for %Insn{prefix: nil, mnemonic: m, opcode: op} <- Table.base(),
           m in [:jr, :jp, :call, :ret, :rst],
           do: op
 
-    opcodes_complets() -- sauts
+    all_opcodes() -- jumps
   end
 
-  defp etat_aleatoire do
+  defp random_state do
     %State{
       a: :rand.uniform(256) - 1,
-      # F : quatre bits hauts seulement, comme le matériel.
+      # F: the top four bits only, as on hardware.
       f: (:rand.uniform(16) - 1) * 16,
       b: :rand.uniform(256) - 1,
       c: :rand.uniform(256) - 1,
@@ -586,56 +584,54 @@ defmodule Atomboy.NativeInterpTest do
       l: :rand.uniform(256) - 1,
       sp: :rand.uniform(0x10000) - 1,
       pc: :rand.uniform(0x10000) - 1,
-      # Depuis l'étape 8, l'état d'interruption fait partie du tirage. Mesuré :
-      # cela ne produit que trois à sept services sur les seize exécutions,
-      # parce que le service éteint IME et que seuls EI et RETI le rallument.
-      # Les programmes aléatoires ne prouvent donc presque rien ici — c'est aux
-      # scénarios ci-dessus de le faire. `halted` reste hors du tirage : une
-      # graine qui démarre endormie sans source armée dort ses 5 000 pas et ne
+      # Since stage eight the interrupt state is part of the draw. Measured:
+      # that yields only three to seven services across the sixteen runs,
+      # because the service turns IME off and only EI and RETI turn it back on.
+      # So random programs prove almost nothing here -- the scenarios above do
+      # that. `halted` stays out of the draw: a seed starting asleep with no
+      # armed source sleeps its 5000 steps and
       # teste rien du tout.
       ime: :rand.uniform(2) - 1,
       ime_pending: :rand.uniform(2) - 1
     }
   end
 
-  # N pas d'oracle sur une mémoire plate initialisée depuis le programme. Rend
-  # `{état, mémoire, budget_en_cycles, opcode_fautif | nil}`.
+  # N oracle steps over a flat memory initialised from the program. Returns
+  # `{state, memory, budget_in_cycles, faulty_opcode | nil}`.
   #
-  # Le budget est la somme exacte des cycles de ces pas : si le natif comptait
-  # autrement, il exécuterait un nombre différent d'instructions et les états
-  # divergeraient. L'oracle s'arrête de lui-même dès que PC désigne un opcode
-  # hors de ce que le natif sait émettre — sinon il continuerait seul, et la
-  # divergence dirait « le natif s'est arrêté » plutôt que « le natif s'est
-  # trompé », ce qui est une tout autre information.
-  defp oracle(memoire, state, steps) do
-    {st, mem, cycles, fautif, _vus} = trace(memoire, state, steps)
-    {st, mem, cycles, fautif}
+  # The budget is the exact sum of those steps' cycles: if the native side
+  # counted differently it would run a different number of instructions and the
+  # states would diverge. The oracle stops by itself as soon as PC points at an
+  # opcode outside what the native side can emit -- otherwise it would run on
+  # alone, and the divergence would say "the native side stopped" rather than
+  # "the native side got it wrong", which is entirely different information.
+  defp oracle(memory, state, steps) do
+    {st, mem, cycles, faulty, _seen} = trace(memory, state, steps)
+    {st, mem, cycles, faulty}
   end
 
-  # La même chose, plus l'ensemble des opcodes réellement exécutés — ce qui
+  # The same thing, plus the set of opcodes actually executed -- which
   # permet de mesurer la largeur d'une famille de programmes au lieu de la
   # supposer.
-  defp trace(memoire, state, steps) do
+  defp trace(memory, state, steps) do
     plate =
-      Flat.new(
-        for {byte, addr} <- Enum.with_index(:binary.bin_to_list(memoire)), do: {addr, byte}
-      )
+      Flat.new(for {byte, addr} <- Enum.with_index(:binary.bin_to_list(memory)), do: {addr, byte})
 
-    boucle(state, plate, 0, steps, MapSet.new())
+    loop_steps(state, plate, 0, steps, MapSet.new())
   end
 
-  defp boucle(st, mem, cycles, 0, vus), do: {st, mem, cycles, nil, vus}
+  defp loop_steps(st, mem, cycles, 0, seen), do: {st, mem, cycles, nil, seen}
 
-  # L'arrêt se fait sur exception plutôt que par pré-vérification de l'opcode :
-  # la table étant entièrement émise, ce que le natif refuse et ce que l'oracle
-  # refuse coïncident exactement. Et la pré-vérification lisait l'octet sous PC
-  # même quand le processeur dormait ou servait une interruption, donc au mauvais
+  # Stopping happens on exception rather than by pre-checking the opcode: with
+  # the table fully emitted, what the native side refuses and what the oracle
+  # refuses coincide exactly. And the pre-check read the byte under PC even when
+  # the processor was asleep or servicing an interrupt, so in the wrong
   # endroit. C'est la structure de `loop_test.exs`.
-  defp boucle(st, mem, cycles, steps, vus) do
-    vus = if st.halted, do: vus, else: MapSet.put(vus, Flat.read8(mem, st.pc))
+  defp loop_steps(st, mem, cycles, steps, seen) do
+    seen = if st.halted, do: seen, else: MapSet.put(seen, Flat.read8(mem, st.pc))
     {suite, mem, pas} = Atomboy.CPU.tick(st, mem)
-    boucle(suite, mem, cycles + pas, steps - 1, vus)
+    loop_steps(suite, mem, cycles + pas, steps - 1, seen)
   rescue
-    error in Atomboy.CPU.Unimplemented -> {st, mem, cycles, error.opcode, vus}
+    error in Atomboy.CPU.Unimplemented -> {st, mem, cycles, error.opcode, seen}
   end
 end

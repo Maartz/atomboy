@@ -1,60 +1,59 @@
 defmodule Atomboy.Native.Bus do
   @moduledoc """
-  Les accès mémoire, isolés — la couture où la cartouche entrera un jour.
+  Memory access, isolated -- the seam where the cartridge will one day go.
 
-  `Atomboy.CPU.Loop` et `Atomboy.CPU.CartLoop` sortent du même générateur et ne
-  diffèrent **que** par leurs deux fonctions d'accès mémoire : l'une voit un
-  espace plat de 64 Ko, l'autre y greffe les banques MBC, la RAM de sauvegarde
-  et les registres d'entrée-sortie. Ce module est l'équivalent natif de cette
-  frontière, et il existe dès maintenant pour la même raison — le jour où le
-  natif devra parler à une vraie cartouche, c'est le seul fichier qui grossira.
+  `Atomboy.CPU.Loop` and `Atomboy.CPU.CartLoop` come out of the same generator
+  and differ **only** in their two memory accessors: one sees a flat 64 KB
+  space, the other grafts MBC banks, save RAM and I/O registers onto it. This
+  module is the native equivalent of that boundary, and it exists now for the
+  same reason -- the day the native side has to talk to a real cartridge, this
+  is the only file that grows.
 
-  Aujourd'hui il ne fait rien d'autre qu'ajouter la base des 64 Ko à une adresse
-  de 16 bits. C'est précisément ce qu'on veut : la mémoire plate est le contrat
-  que les vecteurs SM83 valident.
+  Today it does nothing but add the 64 KB base to a 16-bit address. That is
+  exactly what we want: flat memory is the contract the SM83 vectors validate.
 
-  ## Le registre d'adresse
+  ## The address register
 
-  `t1` sert de temporaire à chaque accès. Un appelant peut donc y placer
-  l'adresse elle-même — `add t1, mem, t1` reste correct — mais ne doit rien y
-  garder à travers un accès.
+  `t1` is the temporary for every access. A caller may therefore hold the
+  address there -- `add t1, mem, t1` stays correct -- but must keep nothing in
+  it across an access.
   """
 
   alias Atomboy.Native.Asm
   alias Atomboy.Native.Regs
   alias Atomboy.Native.RV32
 
-  @doc "Lit l'octet à `adresse` dans `dest`."
-  @spec lire(RV32.reg(), RV32.reg()) :: [Asm.item()]
-  def lire(adresse, dest) do
+  @doc "Reads the byte at `address` into `dest`."
+  @spec read(RV32.reg(), RV32.reg()) :: [Asm.item()]
+  def read(address, dest) do
     [
-      RV32.add(:t1, Regs.mem(), adresse),
+      RV32.add(:t1, Regs.mem(), address),
       RV32.lbu(dest, :t1, 0)
     ]
   end
 
-  @doc "Écrit `source` à `adresse`. Seuls les huit bits bas partent — `sb` s'en charge."
-  @spec ecrire(RV32.reg(), RV32.reg()) :: [Asm.item()]
-  def ecrire(adresse, source) do
+  @doc "Writes `source` at `address`. Only the low eight bits go -- `sb` sees to that."
+  @spec write(RV32.reg(), RV32.reg()) :: [Asm.item()]
+  def write(address, source) do
     [
-      RV32.add(:t1, Regs.mem(), adresse),
+      RV32.add(:t1, Regs.mem(), address),
       RV32.sb(source, :t1, 0)
     ]
   end
 
   @doc """
-  Lit le mot de deux octets à `adresse`, petit-boutien, dans `dest`.
+  Reads the two-byte little-endian word at `address` into `dest`.
 
-  L'octet haut est à `adresse + 1` **replié sur 16 bits** : une pile posée à
-  `0xFFFF` reprend son octet haut à l'adresse 0, et le matériel fait exactement
-  cela. Écrase `t1`, `t2` et `t3` ; `dest` ne doit être aucun des trois.
+  The high byte sits at `address + 1` **wrapped to 16 bits**: a stack at
+  `0xFFFF` takes its high byte from address 0, and that is what the hardware
+  does. Clobbers `t1`, `t2` and `t3`; `dest` must be none of the three.
   """
-  @spec lire16(RV32.reg(), RV32.reg()) :: [Asm.item()]
-  def lire16(adresse, dest) do
+  @spec read16(RV32.reg(), RV32.reg()) :: [Asm.item()]
+  def read16(address, dest) do
     [
-      RV32.add(:t1, Regs.mem(), adresse),
+      RV32.add(:t1, Regs.mem(), address),
       RV32.lbu(dest, :t1, 0),
-      suivante(adresse),
+      next_address(address),
       RV32.add(:t1, Regs.mem(), :t3),
       RV32.lbu(:t2, :t1, 0),
       RV32.slli(:t2, :t2, 8),
@@ -63,35 +62,35 @@ defmodule Atomboy.Native.Bus do
   end
 
   @doc """
-  Écrit `source` sur deux octets à `adresse`, octet bas d'abord.
+  Writes `source` as two bytes at `address`, low byte first.
 
-  Même repli à 16 bits que `lire16/2`, et `adresse` en ressort intacte — ce qui
-  compte pour `PUSH`, dont l'adresse est SP lui-même.
+  Same 16-bit wrap as `read16/2`, and `address` comes out untouched -- which is
+  what lets `PUSH` pass SP itself.
   """
-  @spec ecrire16(RV32.reg(), RV32.reg()) :: [Asm.item()]
-  def ecrire16(adresse, source) do
+  @spec write16(RV32.reg(), RV32.reg()) :: [Asm.item()]
+  def write16(address, source) do
     [
-      RV32.add(:t1, Regs.mem(), adresse),
+      RV32.add(:t1, Regs.mem(), address),
       RV32.sb(source, :t1, 0),
-      suivante(adresse),
+      next_address(address),
       RV32.add(:t1, Regs.mem(), :t3),
       RV32.srli(:t2, source, 8),
       RV32.sb(:t2, :t1, 0)
     ]
   end
 
-  defp suivante(adresse) do
+  defp next_address(address) do
     [
-      RV32.addi(:t3, adresse, 1),
+      RV32.addi(:t3, address, 1),
       RV32.and_(:t3, :t3, Regs.mask16())
     ]
   end
 
   @doc """
-  Déplace SP de `delta`, replié sur 16 bits — le geste commun à la pile.
+  Moves SP by `delta`, wrapped to 16 bits -- the gesture the stack shares.
   """
-  @spec deplacer_pile(integer()) :: [Asm.item()]
-  def deplacer_pile(delta) do
+  @spec move_stack(integer()) :: [Asm.item()]
+  def move_stack(delta) do
     [
       RV32.addi(Regs.sp(), Regs.sp(), delta),
       RV32.and_(Regs.sp(), Regs.sp(), Regs.mask16())
@@ -99,37 +98,37 @@ defmodule Atomboy.Native.Bus do
   end
 
   @doc """
-  Compose dans `dest` l'adresse désignée par une paire indirecte.
+  Composes into `dest` the address an indirect pair designates.
 
-  Pour `HL` c'est une copie, et c'est là que le choix d'empaqueter HL dans un
-  seul registre 16 bits se paie : la forme séparée demanderait un décalage et un
-  ou logique à chaque `(HL)`, c'est-à-dire sur une colonne entière de la table
-  plus l'intégralité du bloc CB.
+  For `HL` it is a copy, and that is where packing HL into a single 16-bit
+  register pays: the split form would need a shift and an or on every `(HL)`,
+  that is, on a whole column of the table plus the entire CB block.
   """
-  @spec adresse({:ind, atom()} | :hl_ind, RV32.reg()) :: [Asm.item()]
-  def adresse(:hl_ind, dest), do: [RV32.mv(dest, Regs.hl())]
-  def adresse({:ind, hl}, dest) when hl in [:hl_inc, :hl_dec], do: [RV32.mv(dest, Regs.hl())]
-  def adresse({:ind, :bc}, dest), do: paire(Regs.b(), Regs.c(), dest)
-  def adresse({:ind, :de}, dest), do: paire(Regs.d(), Regs.e(), dest)
+  @spec address({:ind, atom()} | :hl_ind, RV32.reg()) :: [Asm.item()]
+  def address(:hl_ind, dest), do: [RV32.mv(dest, Regs.hl())]
+  def address({:ind, hl}, dest) when hl in [:hl_inc, :hl_dec], do: [RV32.mv(dest, Regs.hl())]
+  def address({:ind, :bc}, dest), do: pair(Regs.b(), Regs.c(), dest)
+  def address({:ind, :de}, dest), do: pair(Regs.d(), Regs.e(), dest)
 
-  defp paire(haut, bas, dest) do
+  defp pair(high, low, dest) do
     [
-      RV32.slli(dest, haut, 8),
-      RV32.or_(dest, dest, bas)
+      RV32.slli(dest, high, 8),
+      RV32.or_(dest, dest, low)
     ]
   end
 
   @doc """
-  L'ajustement de HL que traînent `LD (HL+), A` et `LD (HL-), A`.
+  The HL adjustment `LD (HL+), A` and `LD (HL-), A` drag along.
 
-  Il vient **après** l'accès : l'adresse est celle d'avant l'incrément.
+  It comes **after** the access: the address is the one from before the
+  increment.
   """
-  @spec ajuster({:ind, atom()}) :: [Asm.item()]
-  def ajuster({:ind, :hl_inc}), do: pas(1)
-  def ajuster({:ind, :hl_dec}), do: pas(-1)
-  def ajuster({:ind, _}), do: []
+  @spec adjust({:ind, atom()}) :: [Asm.item()]
+  def adjust({:ind, :hl_inc}), do: step(1)
+  def adjust({:ind, :hl_dec}), do: step(-1)
+  def adjust({:ind, _}), do: []
 
-  defp pas(delta) do
+  defp step(delta) do
     [
       RV32.addi(Regs.hl(), Regs.hl(), delta),
       RV32.and_(Regs.hl(), Regs.hl(), Regs.mask16())
@@ -137,14 +136,14 @@ defmodule Atomboy.Native.Bus do
   end
 
   @doc """
-  L'adresse de la page haute : `0xFF00 + offset`.
+  The high-page address: `0xFF00 + offset`.
 
-  `0xFF00` ne tient pas dans un immédiat de 12 bits, mais retrancher 256 puis
-  replier sur 16 bits donne exactement le même résultat pour un offset d'un
-  octet — deux instructions au lieu de trois.
+  `0xFF00` does not fit a 12-bit immediate, but subtracting 256 and folding back
+  to 16 bits gives exactly the same result for a one-byte offset -- two
+  instructions instead of three.
   """
-  @spec page_haute(RV32.reg(), RV32.reg()) :: [Asm.item()]
-  def page_haute(offset, dest) do
+  @spec high_page(RV32.reg(), RV32.reg()) :: [Asm.item()]
+  def high_page(offset, dest) do
     [
       RV32.addi(dest, offset, -256),
       RV32.and_(dest, dest, Regs.mask16())

@@ -1,20 +1,20 @@
 defmodule Atomboy.Native.Qemu do
   @moduledoc """
-  Lance une image sous `qemu-system-riscv32` et récupère ce qu'elle a émis.
+  Runs an image under `qemu-system-riscv32` and collects what it emitted.
 
-  La sortie série part dans un fichier plutôt que sur l'entrée-sortie standard :
-  le protocole de résultats est binaire, et `-nographic` mêle au flux les
-  messages de qemu lui-même. Un fichier donne des octets propres.
+  Serial output goes to a file rather than to standard output: the result
+  protocol is binary, and `-nographic` interleaves qemu's own messages into the
+  stream. A file gives clean bytes.
 
-  Un délai de garde est indispensable. Un interpréteur en cours d'écriture boucle
-  — c'est le mode de panne le plus courant du chantier — et `System.cmd/3` n'a
-  aucun moyen d'interrompre. D'où le port, le `os_pid`, et le `kill`.
+  A watchdog is not optional. An interpreter under construction loops -- it is
+  the most common failure mode of this work -- and `System.cmd/3` has no way to
+  interrupt anything. Hence the port, the `os_pid` and the `kill`.
   """
 
   @executable "qemu-system-riscv32"
   @timeout 30_000
 
-  @typedoc "Le résultat d'une exécution."
+  @typedoc "The outcome of one run."
   @type result :: %{
           status: :ok | :timeout,
           exit_status: integer() | nil,
@@ -22,16 +22,16 @@ defmodule Atomboy.Native.Qemu do
           duration_us: non_neg_integer()
         }
 
-  @doc "qemu est-il installé ? Les tests qui en dépendent s'excluent sinon."
+  @doc "Is qemu installed? Tests that need it exclude themselves otherwise."
   @spec available?() :: boolean()
   def available?, do: System.find_executable(@executable) != nil
 
   @doc """
-  Exécute une image et renvoie ce qui est sorti par le port série.
+  Runs an image and returns whatever came out of the serial port.
 
-  Options : `:timeout` en millisecondes, `:icount` pour activer le comptage
-  déterministe d'instructions (nécessaire à la lecture du CSR `instret`), et
-  `:dir` pour choisir où déposer les fichiers temporaires.
+  Options: `:timeout` in milliseconds, `:icount` to enable deterministic
+  instruction counting (required to read the `instret` CSR), and `:dir` to
+  choose where temporary files land.
   """
   @spec run(binary(), keyword()) :: result()
   def run(image, opts \\ []) when is_binary(image) do
@@ -77,7 +77,7 @@ defmodule Atomboy.Native.Qemu do
   end
 
   defp spawn_qemu(args, timeout) do
-    executable = System.find_executable(@executable) || raise "#{@executable} introuvable"
+    executable = System.find_executable(@executable) || raise "#{@executable} not found"
 
     port =
       Port.open({:spawn_executable, executable}, [
@@ -101,8 +101,8 @@ defmodule Atomboy.Native.Qemu do
     end
   end
 
-  # Fermer le port ne suffit pas : qemu ne lit pas son entrée standard et
-  # survivrait à la fermeture. Il faut le signal.
+  # Closing the port is not enough: qemu never reads its standard input and
+  # would survive the close. It takes the signal.
   defp kill(port) do
     case Port.info(port, :os_pid) do
       {:os_pid, pid} -> System.cmd("kill", ["-9", Integer.to_string(pid)], stderr_to_stdout: true)

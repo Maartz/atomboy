@@ -1,39 +1,39 @@
 defmodule Atomboy.Native.Interp do
   @moduledoc """
-  L'interpréteur SM83, assemblé — pilote, fetch, table de saut, gestionnaires.
+  The SM83 interpreter, assembled -- driver, fetch, jump table, handlers.
 
-  ## Le dispatch, enfin en temps constant
+  ## Dispatch, finally in constant time
 
-  `Atomboy.CPU.Gen` dispatche par un arbre binaire de comparaisons entières.
-  Ce n'est pas un choix : le JIT d'AtomVM compile un `select_val` en balayage
-  linéaire, et le coût mesuré grimpait d'un facteur 10,6 entre le premier opcode
-  de la table et le cent-quatre-vingtième. Sur du RISC-V nu la contrainte
-  disparaît, et le dispatch redevient ce qu'il aurait toujours dû être : un
-  décalage, une addition, un chargement, un saut. Neuf instructions du budget
-  jusqu'au gestionnaire, quel que soit l'opcode.
+  `Atomboy.CPU.Gen` dispatches through a binary tree of integer comparisons.
+  That is not a choice: AtomVM's JIT compiles a `select_val` as a linear scan,
+  and the measured cost climbed by a factor of 10.6 between the table's first
+  opcode and its hundred-and-eightieth. On bare RISC-V the constraint vanishes,
+  and dispatch becomes what it always should have been: a shift, an add, a load,
+  a jump. Nine instructions from the budget check to the handler, whatever the
+  opcode.
 
-  ## L'ordre du fetch est observable
+  ## The fetch's order is observable
 
-  Budget, puis promotion d'un EI armé, puis HALT, puis service d'interruption,
-  puis dispatch — c'est l'ordre de `Atomboy.CPU.Loop.fetch/17`, et le recopier
-  n'est pas une politesse. Toute permutation diverge de l'oracle sur les
-  programmes qui arment un EI juste avant une interruption, et c'est le test
-  d'équivalence qui le dira, plusieurs semaines après la faute.
+  Budget, then promoting an armed EI, then HALT, then interrupt service, then
+  dispatch -- that is `Atomboy.CPU.Loop.fetch/17`'s order, and copying it is not
+  politeness. Any permutation diverges from the oracle on programs arming an EI
+  just before an interrupt, and the equivalence test is what will say so, weeks
+  after the mistake.
 
-  Les trois bits d'IME, HALT et EI-armé tiennent dans un seul registre pour que
-  le chemin rapide les écarte d'un `bnez` unique : hors gestionnaire
-  d'interruption, où IME est éteint, le coût est nul. Quand IME est allumé —
-  l'état normal d'un jeu — chaque instruction paie la lecture d'IF et d'IE,
-  exactement comme `Atomboy.CPU.Loop` la paie aujourd'hui. Mettre en cache
-  `IF & IE` et l'invalider aux écritures est l'optimisation évidente ; elle
-  vient après le premier chiffre honnête, pas avant.
+  The three bits for IME, HALT and armed-EI share one register so the fast path
+  clears all three with a single `bnez`: outside an interrupt handler, where IME
+  is off, the cost is nothing. When IME is on -- a game's normal state -- every
+  instruction pays a read of IF and IE, exactly as `Atomboy.CPU.Loop` pays it
+  today. Caching `IF & IE` and invalidating it on writes is the obvious
+  optimisation; it comes after the first honest number, not before.
 
-  ## Le protocole
+  ## The protocol
 
-  L'image porte l'état initial, le budget et les 64 Ko de mémoire ; elle rend un
-  enregistrement de 20 octets suivi des 64 Ko finaux, par le port série. Rien ne
-  transite pendant l'exécution : tout est cuit dans l'image, tout ressort à la
-  fin. Un harnais sans dialogue est un harnais qui ne peut pas se désynchroniser.
+  The image carries the initial state, the budget and the 64 KB of memory; it
+  returns a 24-byte record followed by the final 64 KB, over the serial port.
+  Nothing crosses during execution: everything is baked into the image and
+  everything comes out at the end. A harness with no dialogue is a harness that
+  cannot lose sync.
   """
 
   import Bitwise
@@ -49,53 +49,53 @@ defmodule Atomboy.Native.Interp do
   alias Atomboy.Native.Regs
   alias Atomboy.Native.RV32
 
-  @ime Regs.controle().ime
-  @halted Regs.controle().halted
-  @pending Regs.controle().pending
+  @ime Regs.control_bits().ime
+  @halted Regs.control_bits().halted
+  @pending Regs.control_bits().pending
 
   @magic 0xA5
-  @taille_enregistrement 24
+  @record_size 24
   @instret 0xC02
-  @memoire 0x10000
+  @memory 0x10000
 
-  # `etat_non_supporte` a disparu avec l'étape 8 : il n'existe plus d'état que
-  # l'invité refuse d'exécuter.
-  @statuts %{ok: 0, opcode_inconnu: 1}
+  # `unsupported_state` disappeared with stage eight: there is no longer a state
+  # the guest refuses to run.
+  @statuses %{ok: 0, unknown_opcode: 1}
 
-  @doc "Les codes de statut que l'invité peut rapporter."
-  @spec statuts() :: %{atom() => 0..255}
-  def statuts, do: @statuts
+  @doc "The status codes the guest can report."
+  @spec statuses() :: %{atom() => 0..255}
+  def statuses, do: @statuses
 
-  @doc "La taille de l'enregistrement de résultat, avant le vidage mémoire."
-  @spec taille_enregistrement() :: pos_integer()
-  def taille_enregistrement, do: @taille_enregistrement
+  @doc "The size of the result record, before the memory dump."
+  @spec record_size() :: pos_integer()
+  def record_size, do: @record_size
 
-  @doc "L'octet qui ouvre un enregistrement de résultat."
+  @doc "The byte that opens a result record."
   @spec magic() :: 0..255
   def magic, do: @magic
 
   @doc """
-  Assemble une image qui exécute `budget` T-cycles depuis `state` sur `memoire`.
+  Assembles an image running `budget` T-cycles from `state` over `memory`.
 
-  `memoire` fait 64 Ko : c'est l'espace d'adressage complet, à plat. C'est le
-  contrat de `Atomboy.CPU.Loop`, pas celui de `CartLoop` — ni MBC, ni MMIO, ni
-  banque. Précisément le contrat que les vecteurs SM83 valident déjà.
+  `memory` is 64 KB: the complete address space, flat. That is
+  `Atomboy.CPU.Loop`'s contract, not `CartLoop`'s -- no MBC, no MMIO, no
+  banking. Precisely the contract the SM83 vectors already validate.
   """
   @spec image(binary(), State.t(), pos_integer()) :: Asm.assembled()
-  def image(memoire, %State{} = state, budget) when byte_size(memoire) == @memoire do
+  def image(memory, %State{} = state, budget) when byte_size(memory) == @memory do
     Image.build(
-      [pilote(), fetch(), fetch_lent(), sorties(), gestionnaires(), ALU.routines()],
-      donnees(memoire, state, budget)
+      [driver(), fetch(), slow_fetch(), exits(), handlers(), ALU.routines()],
+      data(memory, state, budget)
     )
   end
 
   # ══ Le pilote ════════════════════════════════════════════════════════════════
 
-  defp pilote do
+  defp driver do
     [
-      Asm.label(:pilote),
+      Asm.label(:driver),
       Asm.la(Regs.dispatch(), :table_base),
-      Asm.la(Regs.mem(), :memoire_gb),
+      Asm.la(Regs.mem(), :memory_gb),
       RV32.li(Regs.mask16(), 0xFFFF),
       RV32.li(Regs.cycles(), 0),
       Asm.la(:t2, :etat_initial),
@@ -105,8 +105,8 @@ defmodule Atomboy.Native.Interp do
       RV32.lbu(Regs.c(), :t2, 3),
       RV32.lbu(Regs.d(), :t2, 4),
       RV32.lbu(Regs.e(), :t2, 5),
-      # H et L arrivent séparés dans l'en-tête et se rejoignent ici : c'est le
-      # seul endroit du natif où la paire se fabrique.
+      # H and L arrive split in the header and join here: the only place on the
+      # native side where the pair is built.
       RV32.lbu(:t0, :t2, 6),
       RV32.lbu(:t1, :t2, 7),
       RV32.slli(:t0, :t0, 8),
@@ -115,7 +115,7 @@ defmodule Atomboy.Native.Interp do
       RV32.lhu(Regs.pc(), :t2, 10),
       RV32.lbu(Regs.control(), :t2, 12),
       RV32.lw(Regs.budget(), :t2, 16),
-      # La ligne de base du compteur d'instructions retirées. Sous
+      # The baseline of the retired-instruction counter. Under
       # `qemu -icount shift=0` il est exact ; sans, il rend une valeur factice,
       # et c'est pourquoi le banc impose l'option.
       RV32.csrrs(:s9, @instret, :zero),
@@ -128,9 +128,9 @@ defmodule Atomboy.Native.Interp do
   defp fetch do
     [
       Asm.label(:fetch),
-      Asm.bgeu(Regs.cycles(), Regs.budget(), :vers_materialise),
-      Asm.bnez(Regs.control(), :vers_lent),
-      Asm.label(:rapide),
+      Asm.bgeu(Regs.cycles(), Regs.budget(), :to_materialise),
+      Asm.bnez(Regs.control(), :to_slow),
+      Asm.label(:fast),
       RV32.add(:t0, Regs.mem(), Regs.pc()),
       RV32.lbu(Regs.opcode(), :t0, 0),
       RV32.addi(Regs.pc(), Regs.pc(), 1),
@@ -140,91 +140,92 @@ defmodule Atomboy.Native.Interp do
       RV32.lw(:t0, :t0, 0),
       RV32.jr(:t0),
 
-      # Les deux tremplins vivent juste derrière le `jr`, qui ne retombe jamais
-      # dedans. Leur place n'est pas indifférente : un branchement conditionnel
-      # ne porte qu'à ±4 Ko, et les gestionnaires finiront par occuper bien plus
-      # que cela. Sauter d'abord tout près, puis loin, met la portée hors de
-      # cause définitivement.
-      Asm.label(:vers_materialise),
+      # The two trampolines sit right behind the `jr`, which never falls into
+      # them. Their placement is not indifferent: a conditional branch only
+      # reaches +/-4 KB, and the handlers will end up occupying far more than
+      # that. Jumping close first, then far, puts range out of the question for
+      # good.
+      Asm.label(:to_materialise),
       Asm.j(:materialise),
-      Asm.label(:vers_lent),
-      Asm.j(:fetch_lent)
+      Asm.label(:to_slow),
+      Asm.j(:slow_fetch)
     ]
   end
 
   # ══ Le chemin lent ═══════════════════════════════════════════════════════════
   #
   # L'ordre est celui de `Atomboy.CPU.Loop.fetch/17`, clause pour clause :
-  # promotion d'un EI armé, puis HALT, puis service d'interruption, puis
-  # dispatch. Le recopier n'est pas une politesse — un programme qui arme un EI
-  # juste avant qu'une interruption tombe distingue les permutations, et c'est
-  # le genre de faute qui se manifeste des semaines plus tard.
+  # promoting an armed EI, then HALT, then interrupt service, then dispatch.
+  # Copying it is not politeness -- a program arming an EI just before an
+  # interrupt lands tells the permutations apart, and that is the kind of mistake
+  # that surfaces weeks later.
   #
-  # Chaque étape repasse par `fetch` plutôt que d'enchaîner : un EI promu doit
-  # pouvoir déclencher le service dans la foulée, et un réveil de HALT aussi.
-  defp fetch_lent do
+  # Each step re-enters `fetch` rather than falling through: a promoted EI must
+  # be able to trigger a service in the same breath, and so must a wake from
+  # HALT.
+  defp slow_fetch do
     [
-      Asm.label(:fetch_lent),
+      Asm.label(:slow_fetch),
 
-      # EI armé : IME s'allume, l'armement retombe.
+      # Armed EI: IME turns on, the arming falls away.
       RV32.andi(:t0, Regs.control(), @pending),
-      Asm.beqz(:t0, :lent_halt),
+      Asm.beqz(:t0, :slow_halt),
       RV32.ori(Regs.control(), Regs.control(), @ime),
       RV32.andi(Regs.control(), Regs.control(), bnot(@pending)),
       Asm.j(:fetch),
 
-      # HALT : le processeur dort par pas de 4 T tant que rien n'attend. Le
-      # réveil est gratuit et ne dépend pas d'IME — un HALT se réveille même
-      # interruptions masquées, seul le service demande IME.
-      Asm.label(:lent_halt),
+      # HALT: the processor sleeps in 4 T steps while nothing is pending. Waking
+      # is free and does not depend on IME -- a HALT wakes even with interrupts
+      # masked; only the service needs IME.
+      Asm.label(:slow_halt),
       RV32.andi(:t0, Regs.control(), @halted),
-      Asm.beqz(:t0, :lent_irq),
-      Asm.call(:irq_en_attente),
-      Asm.bnez(:t1, :lent_reveil),
+      Asm.beqz(:t0, :slow_irq),
+      Asm.call(:pending_irq),
+      Asm.bnez(:t1, :slow_wake),
       RV32.addi(Regs.cycles(), Regs.cycles(), 4),
       Asm.j(:fetch),
-      Asm.label(:lent_reveil),
+      Asm.label(:slow_wake),
       RV32.andi(Regs.control(), Regs.control(), bnot(@halted)),
       Asm.j(:fetch),
 
-      # Reste IME seul. Sans source en attente, l'instruction s'exécute
-      # normalement — d'où le retour dans le chemin rapide plutôt qu'un saut.
-      Asm.label(:lent_irq),
-      Asm.call(:irq_en_attente),
-      Asm.beqz(:t1, :rapide),
+      # Only IME is left. With no pending source the instruction runs normally
+      # -- hence a return into the fast path rather than a jump.
+      Asm.label(:slow_irq),
+      Asm.call(:pending_irq),
+      Asm.beqz(:t1, :fast),
       service(),
-      irq_en_attente()
+      pending_irq()
     ]
   end
 
-  # Le service : PC part sur la pile, IME s'éteint, le vecteur prend la main.
+  # The service: PC goes onto the stack, IME turns off, the vector takes over.
   # 20 T, et l'on repasse par `fetch` — jamais par le dispatch.
   defp service do
     [
-      # Le bit le plus bas armé, isolé par le complément à deux.
+      # The lowest armed bit, isolated by two's complement.
       RV32.sub(:t4, :zero, :t1),
       RV32.and_(:t4, :t1, :t4),
 
-      # IF est lu **avant** les empilements, comme dans l'oracle : si la pile
-      # tombe sur 0xFF0F, c'est la valeur d'avant qui est masquée et réécrite.
-      # Le détail se lit mal dans `loop.ex:140-144` — le `ram` de la troisième
-      # écriture est celui d'entrée, pas celui du tuyau — et il compte.
+      # IF is sampled **before** the pushes, as in the oracle: if the stack lands
+      # on 0xFF0F, it is the earlier value that gets masked and written back.
+      # The detail reads badly in `loop.ex:140-144` -- the `ram` in the third
+      # write is the incoming one, not the piped one -- and it matters.
       RV32.lbu(:t6, :t0, 0),
 
-      # Le vecteur : 0x40 + 8 × l'index du bit.
+      # The vector: 0x40 + 8 * the bit's index.
       RV32.li(:a0, 0x40),
       RV32.mv(:a1, :t4),
-      Asm.label(:vecteur_boucle),
+      Asm.label(:vector_loop),
       RV32.andi(:t3, :a1, 1),
-      Asm.bnez(:t3, :vecteur_pret),
+      Asm.bnez(:t3, :vector_ready),
       RV32.srli(:a1, :a1, 1),
       RV32.addi(:a0, :a0, 8),
-      Asm.j(:vecteur_boucle),
-      Asm.label(:vecteur_pret),
-      Bus.deplacer_pile(-2),
-      Bus.ecrire16(Regs.sp(), Regs.pc()),
+      Asm.j(:vector_loop),
+      Asm.label(:vector_ready),
+      Bus.move_stack(-2),
+      Bus.write16(Regs.sp(), Regs.pc()),
 
-      # Le bit servi retombe dans IF.
+      # The serviced bit falls out of IF.
       RV32.li(:t0, 0xFF0F),
       RV32.add(:t0, Regs.mem(), :t0),
       RV32.xori(:t1, :t4, 0xFF),
@@ -237,15 +238,15 @@ defmodule Atomboy.Native.Interp do
     ]
   end
 
-  # Rend dans `t1` les sources armées et autorisées, et laisse dans `t0`
+  # Returns in `t1` the armed and enabled sources, and leaves in `t0`
   # l'adresse de IF — dont le service se ressert.
-  defp irq_en_attente do
+  defp pending_irq do
     [
-      Asm.label(:irq_en_attente),
+      Asm.label(:pending_irq),
       RV32.li(:t0, 0xFF0F),
       RV32.add(:t0, Regs.mem(), :t0),
       RV32.lbu(:t1, :t0, 0),
-      # 0xFFFF - 0xFF0F : IE se lit au même pointeur, décalé.
+      # 0xFFFF - 0xFF0F: IE reads off the same pointer, displaced.
       RV32.lbu(:t2, :t0, 0xF0),
       RV32.and_(:t1, :t1, :t2),
       RV32.andi(:t1, :t1, 0x1F),
@@ -255,99 +256,99 @@ defmodule Atomboy.Native.Interp do
 
   # ══ Les sorties ══════════════════════════════════════════════════════════════
 
-  defp sorties do
+  defp exits do
     [
       Asm.label(:materialise),
-      RV32.li(:t2, @statuts.ok),
-      Asm.j(:rapport),
-      Asm.label(:opcode_inconnu),
-      RV32.li(:t2, @statuts.opcode_inconnu),
-      rapport(),
-      vidage()
+      RV32.li(:t2, @statuses.ok),
+      Asm.j(:report),
+      Asm.label(:unknown_opcode),
+      RV32.li(:t2, @statuses.unknown_opcode),
+      report(),
+      dump()
     ]
   end
 
-  # `putc` n'écrase que t0 et t1 : t2 porte le statut d'un bout à l'autre, a1
-  # l'opcode, et tous les registres d'état survivent.
-  defp rapport do
+  # `putc` only clobbers t0 and t1: t2 carries the status throughout, a1 the
+  # opcode, and every state register survives.
+  defp report do
     [
-      Asm.label(:rapport),
-      # Lu avant tout le reste : le rapport lui-même ne doit pas compter.
+      Asm.label(:report),
+      # Read before anything else: the report itself must not count.
       RV32.csrrs(:s10, @instret, :zero),
       RV32.sub(:s10, :s10, :s9),
-      octet(RV32.li(:a0, @magic)),
-      octet(RV32.mv(:a0, Regs.a())),
-      octet(RV32.mv(:a0, Regs.f())),
-      octet(RV32.mv(:a0, Regs.b())),
-      octet(RV32.mv(:a0, Regs.c())),
-      octet(RV32.mv(:a0, Regs.d())),
-      octet(RV32.mv(:a0, Regs.e())),
-      octet(RV32.srli(:a0, Regs.hl(), 8)),
-      octet(RV32.andi(:a0, Regs.hl(), 0xFF)),
-      octet(RV32.mv(:a0, Regs.sp())),
-      octet(RV32.srli(:a0, Regs.sp(), 8)),
-      octet(RV32.mv(:a0, Regs.pc())),
-      octet(RV32.srli(:a0, Regs.pc(), 8)),
-      octet(RV32.mv(:a0, Regs.control())),
-      octet(RV32.mv(:a0, Regs.cycles())),
-      octet(RV32.srli(:a0, Regs.cycles(), 8)),
-      octet(RV32.srli(:a0, Regs.cycles(), 16)),
-      octet(RV32.srli(:a0, Regs.cycles(), 24)),
-      octet(RV32.mv(:a0, :t2)),
-      octet(RV32.mv(:a0, Regs.opcode())),
-      octet(RV32.mv(:a0, :s10)),
-      octet(RV32.srli(:a0, :s10, 8)),
-      octet(RV32.srli(:a0, :s10, 16)),
-      octet(RV32.srli(:a0, :s10, 24))
+      byte_out(RV32.li(:a0, @magic)),
+      byte_out(RV32.mv(:a0, Regs.a())),
+      byte_out(RV32.mv(:a0, Regs.f())),
+      byte_out(RV32.mv(:a0, Regs.b())),
+      byte_out(RV32.mv(:a0, Regs.c())),
+      byte_out(RV32.mv(:a0, Regs.d())),
+      byte_out(RV32.mv(:a0, Regs.e())),
+      byte_out(RV32.srli(:a0, Regs.hl(), 8)),
+      byte_out(RV32.andi(:a0, Regs.hl(), 0xFF)),
+      byte_out(RV32.mv(:a0, Regs.sp())),
+      byte_out(RV32.srli(:a0, Regs.sp(), 8)),
+      byte_out(RV32.mv(:a0, Regs.pc())),
+      byte_out(RV32.srli(:a0, Regs.pc(), 8)),
+      byte_out(RV32.mv(:a0, Regs.control())),
+      byte_out(RV32.mv(:a0, Regs.cycles())),
+      byte_out(RV32.srli(:a0, Regs.cycles(), 8)),
+      byte_out(RV32.srli(:a0, Regs.cycles(), 16)),
+      byte_out(RV32.srli(:a0, Regs.cycles(), 24)),
+      byte_out(RV32.mv(:a0, :t2)),
+      byte_out(RV32.mv(:a0, Regs.opcode())),
+      byte_out(RV32.mv(:a0, :s10)),
+      byte_out(RV32.srli(:a0, :s10, 8)),
+      byte_out(RV32.srli(:a0, :s10, 16)),
+      byte_out(RV32.srli(:a0, :s10, 24))
     ]
   end
 
-  # `sb` ne pose que les huit bits bas : rien à masquer avant d'émettre.
-  defp octet(charge), do: [charge, Asm.call(:putc)]
+  # `sb` only lays down the low eight bits: nothing to mask before emitting.
+  defp byte_out(load), do: [load, Asm.call(:putc)]
 
-  defp vidage do
+  defp dump do
     [
-      Asm.label(:vidage),
+      Asm.label(:dump),
       RV32.mv(:t3, Regs.mem()),
-      RV32.li(:t4, @memoire),
-      Asm.label(:vidage_boucle),
-      Asm.beqz(:t4, :vidage_fin),
+      RV32.li(:t4, @memory),
+      Asm.label(:dump_loop),
+      Asm.beqz(:t4, :dump_done),
       RV32.lbu(:a0, :t3, 0),
       Asm.call(:putc),
       RV32.addi(:t3, :t3, 1),
       RV32.addi(:t4, :t4, -1),
-      Asm.j(:vidage_boucle),
-      Asm.label(:vidage_fin),
+      Asm.j(:dump_loop),
+      Asm.label(:dump_done),
       Asm.j(:poweroff)
     ]
   end
 
   # ══ Les gestionnaires ════════════════════════════════════════════════════════
 
-  defp gestionnaires do
+  defp handlers do
     base =
       for %Insn{prefix: nil} = insn <- Table.base(),
-          (corps = Emit.body(insn)) != :non_supporté do
-        [Asm.label(etiquette(insn.opcode)), corps]
+          (corps = Emit.body(insn)) != :unsupported do
+        [Asm.label(label(insn.opcode)), corps]
       end
 
     etendus =
       for %Insn{prefix: :cb} = insn <- Table.extended(),
-          (corps = Emit.body(insn)) != :non_supporté do
-        [Asm.label(etiquette_cb(insn.opcode)), corps]
+          (corps = Emit.body(insn)) != :unsupported do
+        [Asm.label(label_cb(insn.opcode)), corps]
       end
 
-    [prefixe(), base, etendus]
+    [prefix(), base, etendus]
   end
 
-  # Le préfixe 0xCB n'est pas une instruction : il relit un octet et saute dans
-  # la seconde table. Les deux tables étant contiguës, la seconde s'atteint par
-  # un déplacement constant de 1024 dans le `lw` — la table de base fait 256
-  # entrées de quatre octets, et 1024 tient dans l'immédiat d'un chargement.
+  # The 0xCB prefix is not an instruction: it reads another byte and jumps into
+  # the second table. The two tables being contiguous, the second is reached
+  # through a constant displacement of 1024 in the `lw` -- the base table is 256
+  # four-byte entries, and 1024 fits a load's immediate.
   #
-  # Aucun cycle n'est compté ici : la table donne pour chaque instruction
-  # étendue un coût qui inclut déjà le fetch du préfixe.
-  defp prefixe do
+  # No cycles are counted here: for each extended instruction the table gives a
+  # cost that already includes the prefix fetch.
+  defp prefix do
     [
       Asm.label(:h_cb),
       RV32.add(:t0, Regs.mem(), Regs.pc()),
@@ -361,62 +362,61 @@ defmodule Atomboy.Native.Interp do
     ]
   end
 
-  # ══ Les données ══════════════════════════════════════════════════════════════
+  # ══ The data ═════════════════════════════════════════════════════════════════
 
-  defp donnees(memoire, state, budget) do
+  defp data(memory, state, budget) do
     [
       {:align, 4},
       Asm.label(:table_base),
       table_base(),
-      # Contiguë, sans alignement intercalaire : le préfixe compte sur un
-      # déplacement de 1024 exactement.
+      # Contiguous, with no alignment in between: the prefix relies on a
+      # displacement of exactly 1024.
       Asm.label(:table_cb),
       table_cb(),
       {:align, 4},
       Asm.label(:etat_initial),
-      entete(state, budget),
+      header(state, budget),
       {:align, 4},
-      Asm.label(:memoire_gb),
-      memoire
+      Asm.label(:memory_gb),
+      memory
     ]
   end
 
-  # Les 256 entrées existent toujours, même pour un opcode que l'étape en cours
-  # ne sait pas émettre : c'est ce qui permet au dispatch d'être inconditionnel.
-  # Un opcode absent atterrit sur un gestionnaire qui le rapporte, jamais dans
-  # du code qui ne lui était pas destiné.
+  # All 256 entries always exist, even for an opcode the current stage cannot
+  # emit: that is what lets dispatch be unconditional. A missing opcode lands on
+  # a handler that reports it, never in code that was not meant for it.
   defp table_base do
-    couverts = couverts(nil)
+    covered = covered(nil)
 
     for opcode <- 0..0xFF do
       cond do
-        opcode == Emit.prefixe_cb() and Emit.prefixe_couvert?() -> {:addr, :h_cb}
-        MapSet.member?(couverts, opcode) -> {:addr, etiquette(opcode)}
-        true -> {:addr, :opcode_inconnu}
+        opcode == Emit.cb_prefix() and Emit.prefix_covered?() -> {:addr, :h_cb}
+        MapSet.member?(covered, opcode) -> {:addr, label(opcode)}
+        true -> {:addr, :unknown_opcode}
       end
     end
   end
 
   defp table_cb do
-    couverts = couverts(:cb)
+    covered = covered(:cb)
 
     for opcode <- 0..0xFF do
-      if MapSet.member?(couverts, opcode) do
-        {:addr, etiquette_cb(opcode)}
+      if MapSet.member?(covered, opcode) do
+        {:addr, label_cb(opcode)}
       else
-        {:addr, :opcode_inconnu}
+        {:addr, :unknown_opcode}
       end
     end
   end
 
-  defp couverts(prefixe) do
-    MapSet.new(for {^prefixe, opcode} <- Emit.couverture(), do: opcode)
+  defp covered(prefixe) do
+    MapSet.new(for {^prefixe, opcode} <- Emit.coverage(), do: opcode)
   end
 
-  defp etiquette(opcode), do: :"h_#{Integer.to_string(opcode, 16)}"
-  defp etiquette_cb(opcode), do: :"cb_#{Integer.to_string(opcode, 16)}"
+  defp label(opcode), do: :"h_#{Integer.to_string(opcode, 16)}"
+  defp label_cb(opcode), do: :"cb_#{Integer.to_string(opcode, 16)}"
 
-  defp entete(%State{} = state, budget) do
+  defp header(%State{} = state, budget) do
     control =
       state.ime + if(state.halted, do: 2, else: 0) + state.ime_pending * 4
 
