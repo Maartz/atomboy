@@ -1,24 +1,24 @@
 defmodule Potion.DSLTest do
   @moduledoc """
-  Le langage, vérifié aux deux bouts : dans l'émulateur, et dans `mix compile`.
+  The language, checked at both ends: in the emulator, and in `mix compile`.
 
-  Un DSL qui compile vers du matériel a deux façons de mentir. La première est
-  d'émettre des octets qui ne font pas ce que le jeu dit : le seul juge en est
-  la console, donc les jeux de ce fichier sont *joués* — bootés dans
-  `Atomboy.Screen`, frames déroulées, pad simulé, pixels relus. La seconde est
-  d'accepter une phrase qu'il ne sait pas traduire, et de la traduire quand
-  même, ou à moitié : le seul juge en est le compilateur, donc les refus sont
-  testés en compilant vraiment des modules — `Code.compile_string`, pas un appel
-  direct au compilo — parce que c'est là que le programmeur les rencontrera.
+  A DSL that compiles down to hardware has two ways of lying. The first is to
+  emit bytes that do not do what the game says: the only judge of that is the
+  console, so the games in this file are *played* — booted in `Atomboy.Screen`,
+  frames unrolled, pad simulated, pixels read back. The second is to accept a
+  sentence it cannot translate, and translate it anyway, or halfway: the only
+  judge of that is the compiler, so the refusals are tested by really compiling
+  modules — `Code.compile_string`, not a direct call into the compiler — because
+  that is where the programmer will meet them.
 
-  Le jeu `Hero` est mot pour mot celui du moduledoc de `Potion`. C'est
-  volontaire : la vitrine du langage est aussi son test principal, et elle ne
-  peut donc pas pourrir.
+  The `Hero` game is word for word the one in `Potion`'s moduledoc. That is
+  deliberate: the language's showcase is also its main test, and so it cannot
+  rot.
 
-  Le calendrier du démarrage est celui du noyau (voir `Potion.RuntimeTest`) :
-  l'init prend deux frames, l'acteur tourne pour la première fois au vblank de
-  la troisième, et le DMA publie son OAM à la suivante. On déroule cinq frames
-  avant de regarder l'état, six avant de regarder l'écran.
+  The startup timetable is the kernel's (see `Potion.RuntimeTest`): the init
+  takes two frames, the actor runs for the first time at the third one's vblank,
+  and the DMA publishes its OAM at the next. We unroll five frames before looking
+  at the state, six before looking at the screen.
   """
 
   use ExUnit.Case, async: true
@@ -29,19 +29,19 @@ defmodule Potion.DSLTest do
 
   doctest Potion.Compiler
 
-  # Les nappes du joypad, telles que `Atomboy.Joypad.set/3` les veut : un
-  # quartet par nappe, à 1 = relâché. Le matériel est actif à zéro, et c'est le
-  # noyau qui remet les touches à l'endroit dans sa cellule de pad.
-  @relache 0x0F
-  @droite 0x0F - 0x01
-  @gauche 0x0F - 0x02
-  @haut 0x0F - 0x04
-  @bas 0x0F - 0x08
+  # The joypad rows, as `Atomboy.Joypad.set/3` wants them: one nibble per row,
+  # at 1 = released. The hardware is active at zero, and it is the kernel that
+  # puts the keys the right way round in its pad cell.
+  @released 0x0F
+  @right 0x0F - 0x01
+  @left 0x0F - 0x02
+  @up 0x0F - 0x04
+  @down 0x0F - 0x08
 
-  @depart_x 80
-  @depart_y 72
+  @start_x 80
+  @start_y 72
 
-  # ── Le jeu de la surface fixée ──────────────────────────────────────────────
+  # ── The game of the fixed surface ───────────────────────────────────────────
 
   defmodule Hero do
     @moduledoc false
@@ -60,149 +60,152 @@ defmodule Potion.DSLTest do
     end
   end
 
-  # Un second jeu, pour les formes que le héros n'exerce pas : une affectation
-  # sèche, un littéral et une variable mélangés dans un même `sprite`, une
-  # entrée d'OAM autre que la première, et un bloc `if` à plusieurs énoncés.
-  defmodule Melange do
+  # A second game, for the forms the hero does not exercise: a bare assignment, a
+  # literal and a variable mixed inside one `sprite`, an OAM entry other than the
+  # first, and an `if` block with several statements.
+  defmodule Mixed do
     @moduledoc false
     use Potion
 
-    defactor :melange do
-      variables largeur: 10, hauteur: 20
+    defactor :mixed do
+      variables width: 10, height: 20
 
       every_frame do
-        largeur = 5
+        width = 5
 
         if pressed?(:a) do
-          largeur = largeur + 1
-          hauteur = hauteur + 2
+          width = width + 1
+          height = height + 2
         end
 
-        sprite(1, x: largeur, y: 40, tile: 3)
-        sprite(2, x: 100, y: hauteur, tile: 0)
+        sprite(1, x: width, y: 40, tile: 3)
+        sprite(2, x: 100, y: height, tile: 0)
       end
     end
   end
 
-  describe "le jeu de la surface fixée" do
-    test "la ROM boote et le sprite est un carré au centre de l'écran" do
-      {pixels, _state, _ram} = deroule(Hero, 6, render: true)
+  describe "the game of the fixed surface" do
+    test "the ROM boots and the sprite is a square in the middle of the screen" do
+      {pixels, _state, _ram} = run_frames(Hero, 6, render: true)
 
       assert byte_size(pixels) == 160 * 144
 
-      # Un carré de huit sur huit, dont le coin haut-gauche est exactement à la
-      # position écrite dans le jeu — c'est le décalage matériel de l'OAM que le
-      # compilateur a payé pour nous.
-      assert non_blancs(pixels) == boite(@depart_x, @depart_y)
-      # Couleur 3 par OBP0 : la plus sombre des quatre.
-      assert :binary.at(pixels, @depart_y * 160 + @depart_x) == 3
+      # An eight-by-eight square, whose top-left corner is exactly at the
+      # position written in the game — that is the OAM's hardware offset, which
+      # the compiler paid for us.
+      assert non_white(pixels) == box(@start_x, @start_y)
+      # Colour 3 through OBP0: the darkest of the four.
+      assert :binary.at(pixels, @start_y * 160 + @start_x) == 3
     end
 
-    test "Droite déplace le sprite, et l'OAM suit" do
-      {_pixels, state, ram} = deroule(Hero, 5)
-      adresses = Hero.addresses()
+    test "Right moves the sprite, and the OAM follows" do
+      {_pixels, state, ram} = run_frames(Hero, 5)
+      addresses = Hero.addresses()
 
-      {_state, ram} = frames(Hero, state, Joypad.set(ram, @droite, @relache), 4)
+      {_state, ram} = frames(Hero, state, Joypad.set(ram, @right, @released), 4)
 
-      assert Map.get(ram, adresses.x) == @depart_x + 4
-      assert Map.get(ram, adresses.y) == @depart_y
+      assert Map.get(ram, addresses.x) == @start_x + 4
+      assert Map.get(ram, addresses.y) == @start_y
 
-      # L'OAM réelle est d'une frame en retard : le DMA publie au vblank ce que
-      # l'acteur a écrit dans le miroir au vblank précédent.
-      assert Map.get(ram, 0xFE01) == @depart_x + 3 + 8
-      assert Map.get(ram, 0xFE00) == @depart_y + 16
+      # The real OAM is one frame behind: the DMA publishes at the vblank what
+      # the actor wrote into the mirror at the previous vblank.
+      assert Map.get(ram, 0xFE01) == @start_x + 3 + 8
+      assert Map.get(ram, 0xFE00) == @start_y + 16
     end
 
-    test "Gauche, Haut et Bas déplacent le sprite dans leur sens" do
-      {_pixels, state, ram} = deroule(Hero, 5)
-      adresses = Hero.addresses()
+    test "Left, Up and Down move the sprite each in their own direction" do
+      {_pixels, state, ram} = run_frames(Hero, 5)
+      addresses = Hero.addresses()
 
-      {state, ram} = frames(Hero, state, Joypad.set(ram, @gauche, @relache), 3)
-      assert position(ram, adresses) == {@depart_x - 3, @depart_y}
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @left, @released), 3)
+      assert position(ram, addresses) == {@start_x - 3, @start_y}
 
-      {state, ram} = frames(Hero, state, Joypad.set(ram, @haut, @relache), 5)
-      assert position(ram, adresses) == {@depart_x - 3, @depart_y - 5}
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @up, @released), 5)
+      assert position(ram, addresses) == {@start_x - 3, @start_y - 5}
 
-      {state, ram} = frames(Hero, state, Joypad.set(ram, @bas, @relache), 2)
-      assert position(ram, adresses) == {@depart_x - 3, @depart_y - 3}
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @down, @released), 2)
+      assert position(ram, addresses) == {@start_x - 3, @start_y - 3}
 
-      # Relâché, plus rien ne bouge : chaque `if` est un JR par-dessus son bloc,
-      # pas un état retenu.
-      {_state, ram} = frames(Hero, state, Joypad.set(ram, @relache, @relache), 4)
-      assert position(ram, adresses) == {@depart_x - 3, @depart_y - 3}
+      # Released, nothing moves any more: each `if` is a JR over its block, not a
+      # state held on to.
+      {_state, ram} = frames(Hero, state, Joypad.set(ram, @released, @released), 4)
+      assert position(ram, addresses) == {@start_x - 3, @start_y - 3}
     end
 
-    test "le sprite déplacé est là où le pad l'a mis, à l'écran" do
-      {_pixels, state, ram} = deroule(Hero, 5)
+    test "the moved sprite is where the pad put it, on screen" do
+      {_pixels, state, ram} = run_frames(Hero, 5)
 
-      {state, ram} = frames(Hero, state, Joypad.set(ram, @droite, @relache), 6)
-      {state, ram} = frames(Hero, state, Joypad.set(ram, @bas, @relache), 3)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @right, @released), 6)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @down, @released), 3)
 
-      # Touches relâchées, une frame de battement : ce que l'écran montre est en
-      # retard de deux vblanks sur l'acteur — le DMA publie au vblank ce que
-      # l'acteur avait écrit au vblank précédent, et les lignes visibles d'une
-      # frame précèdent son vblank. Sur un sprite immobile ça ne se voit pas ;
-      # sur un sprite qui vient de bouger, il faut laisser le tuyau se vider.
-      {state, ram} = frames(Hero, state, Joypad.set(ram, @relache, @relache), 1)
+      # Keys released, one beat frame: what the screen shows is two vblanks
+      # behind the actor — the DMA publishes at the vblank what the actor had
+      # written at the previous vblank, and a frame's visible lines come before
+      # its vblank. On a still sprite it does not show; on a sprite that has just
+      # moved, the pipe has to be let drain.
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @released, @released), 1)
       {pixels, _state, _ram} = Screen.frame(state, Hero.rom(), ram, true)
 
-      assert non_blancs(pixels) == boite(@depart_x + 6, @depart_y + 3)
+      assert non_white(pixels) == box(@start_x + 6, @start_y + 3)
     end
   end
 
-  describe "les valeurs initiales" do
-    test "les cellules allouées portent 80 et 72, sans que rien ne soit touché" do
-      {_pixels, state, ram} = deroule(Hero, 5)
-      adresses = Hero.addresses()
+  describe "the initial values" do
+    test "the allocated cells carry 80 and 72, without anything being touched" do
+      {_pixels, state, ram} = run_frames(Hero, 5)
+      addresses = Hero.addresses()
 
-      assert Map.get(ram, adresses.x) == @depart_x
-      assert Map.get(ram, adresses.y) == @depart_y
+      assert Map.get(ram, addresses.x) == @start_x
+      assert Map.get(ram, addresses.y) == @start_y
 
-      # Et elles y restent : le drapeau « installé » a été levé au premier tour,
-      # donc les valeurs de départ ne sont pas reposées à chaque frame — sans
-      # quoi aucun jeu ne pourrait bouger.
+      # And there they stay: the "installed" flag was raised on the first turn,
+      # so the starting values are not laid down again on every frame — without
+      # which no game could move.
       {_state, ram} = frames(Hero, state, ram, 10)
 
-      assert Map.get(ram, adresses.x) == @depart_x
-      assert Map.get(ram, adresses.y) == @depart_y
+      assert Map.get(ram, addresses.x) == @start_x
+      assert Map.get(ram, addresses.y) == @start_y
     end
 
-    test "l'allocation est celle que le compilateur promet" do
-      # Dans l'ordre de déclaration, à partir de la première adresse que le
-      # noyau laisse à l'acteur.
-      assert Hero.addresses() == %{x: Potion.Runtime.actor_state(), y: Potion.Runtime.actor_state() + 1}
+    test "the allocation is the one the compiler promises" do
+      # In declaration order, starting at the first address the kernel leaves to
+      # the actor.
+      assert Hero.addresses() == %{
+               x: Potion.Runtime.actor_state(),
+               y: Potion.Runtime.actor_state() + 1
+             }
 
-      # Le drapeau vient après, et le jeu ne le voit pas : il n'est pas dans
-      # `adresses/0`, mais il est bien à 0xC102 et il est levé.
-      {_pixels, _state, ram} = deroule(Hero, 5)
+      # The flag comes after, and the game does not see it: it is not in
+      # `addresses/0`, but it is indeed at 0xC102 and it is raised.
+      {_pixels, _state, ram} = run_frames(Hero, 5)
       assert Map.get(ram, Potion.Runtime.actor_state() + 2) == 0x01
     end
   end
 
-  describe "le programme engendré" do
-    test "il est inspectable, et le noyau y a nommé l'acteur" do
-      programme = Hero.program()
+  describe "the generated program" do
+    test "it is inspectable, and the kernel has named the actor in it" do
+      program = Hero.program()
 
-      assert is_list(programme)
-      assert {:label, :actor} in programme
+      assert is_list(program)
+      assert {:label, :actor} in program
 
-      adresses = Assembler.addresses(programme, origin: 0x0150)
+      addresses = Assembler.addresses(program, origin: 0x0150)
 
-      assert adresses.init == 0x0150
-      assert Map.has_key?(adresses, :actor)
-      assert adresses.actor > adresses.main_loop
+      assert addresses.init == 0x0150
+      assert Map.has_key?(addresses, :actor)
+      assert addresses.actor > addresses.main_loop
 
-      # Les étiquettes du compilateur, toutes préfixées : une par `if`, plus
-      # celle de l'installation.
-      assert Map.has_key?(adresses, :potion_installed)
+      # The compiler's labels, all prefixed: one per `if`, plus the one for the
+      # installation.
+      assert Map.has_key?(addresses, :potion_installed)
 
-      for n <- 0..3, do: assert(Map.has_key?(adresses, :"potion_end_#{n}"))
+      for n <- 0..3, do: assert(Map.has_key?(addresses, :"potion_end_#{n}"))
 
-      # Et le fragment finit par le RET que le noyau exige.
-      assert List.last(programme) == {:ret}
+      # And the fragment ends with the RET the kernel demands.
+      assert List.last(program) == {:ret}
     end
 
-    test "la ROM fait 32 Ko et porte le nom du module" do
+    test "the ROM is 32 KB and carries the module's name" do
       rom = Hero.rom()
 
       assert byte_size(rom) == 0x8000
@@ -210,8 +213,8 @@ defmodule Potion.DSLTest do
     end
   end
 
-  describe "le compilateur, sans macro" do
-    test "un `quote` et une allocation suffisent à obtenir un fragment" do
+  describe "the compiler, without a macro" do
+    test "a `quote` and an allocation are enough to obtain a fragment" do
       allocation = Potion.Compiler.allocate(x: 80)
 
       fragment =
@@ -222,9 +225,9 @@ defmodule Potion.DSLTest do
           allocation
         )
 
-      # L'installation, la condition, l'incrément, le RET — sans `defmodule`,
-      # sans `use`, sans hôte. Le compilateur est une fonction sur des arbres,
-      # et c'est ce qui le rend débogable à la main.
+      # The installation, the condition, the increment, the RET — with no
+      # `defmodule`, no `use`, no host. The compiler is a function over trees,
+      # and that is what makes it debuggable by hand.
       assert {:ld, :a, {:mem, allocation.installed}} == hd(fragment)
       assert {:label, :potion_installed} in fragment
       assert {:bit, 0, :a} in fragment
@@ -233,80 +236,80 @@ defmodule Potion.DSLTest do
     end
   end
 
-  describe "un littéral et une variable dans le même sprite" do
-    test "les deux entrées d'OAM portent ce que le jeu a écrit" do
-      {_pixels, state, ram} = deroule(Melange, 5)
-      adresses = Melange.addresses()
+  describe "a literal and a variable in the same sprite" do
+    test "both OAM entries carry what the game wrote" do
+      {_pixels, state, ram} = run_frames(Mixed, 5)
+      addresses = Mixed.addresses()
 
-      # `largeur = 5` est une affectation sèche : elle écrase la valeur
-      # initiale, à chaque frame.
-      assert Map.get(ram, adresses.largeur) == 5
-      assert Map.get(ram, adresses.hauteur) == 20
+      # `width = 5` is a bare assignment: it overwrites the initial value, on
+      # every frame.
+      assert Map.get(ram, addresses.width) == 5
+      assert Map.get(ram, addresses.height) == 20
 
-      # L'entrée 1 : x par variable, y et tuile par littéraux. Les décalages du
-      # matériel sont là, calculés à la compilation pour les littéraux et à
-      # l'exécution pour les variables.
+      # Entry 1: x from a variable, y and tile from literals. The hardware
+      # offsets are there, computed at compile time for the literals and at run
+      # time for the variables.
       assert oam(ram, 1) == [40 + 16, 5 + 8, 3, 0]
-      # L'entrée 2 : l'inverse — x littéral, y par variable.
+      # Entry 2: the other way round — x a literal, y from a variable.
       assert oam(ram, 2) == [20 + 16, 100 + 8, 0, 0]
-      # Et l'entrée 0, que ce jeu n'écrit pas, est restée le zéro de l'init.
+      # And entry 0, which this game does not write, stayed the init's zero.
       assert oam(ram, 0) == [0, 0, 0, 0]
 
-      # Un bloc `if` à deux énoncés : les deux passent, ou aucun.
-      {_state, ram} = frames(Melange, state, Joypad.set(ram, @relache, @relache - 0x01), 3)
+      # An `if` block with two statements: both go through, or neither.
+      {_state, ram} = frames(Mixed, state, Joypad.set(ram, @released, @released - 0x01), 3)
 
-      assert Map.get(ram, adresses.largeur) == 6
-      assert Map.get(ram, adresses.hauteur) == 20 + 6
+      assert Map.get(ram, addresses.width) == 6
+      assert Map.get(ram, addresses.height) == 20 + 6
     end
   end
 
-  # ══ Les refus, à la compilation ══════════════════════════════════════════════
+  # ══ The refusals, at compile time ════════════════════════════════════════════
 
-  describe "ce que le v0 refuse de compiler" do
-    test "une expression hors du sous-ensemble" do
-      message = refuse!("Refus.Multiplication", "variables x: 1", "x = x * 2")
+  describe "what the v0 refuses to compile" do
+    test "an expression outside the subset" do
+      message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
 
-      assert message =~ "hors du sous-ensemble du v0"
+      assert message =~ "outside the v0 subset"
       assert message =~ "x * 2"
       assert message =~ "x = x + 1"
     end
 
-    test "une addition de deux variables — le v0 n'a pas de politique de registres" do
-      message = refuse!("Refus.DeuxVariables", "variables x: 1, y: 2", "x = x + y")
+    test "an addition of two variables — the v0 has no register policy" do
+      message = reject!("Rejected.TwoVariables", "variables x: 1, y: 2", "x = x + y")
 
-      assert message =~ "hors du sous-ensemble du v0"
-      assert message =~ "littéral entier de 0 à 255"
+      assert message =~ "outside the v0 subset"
+      assert message =~ "integer literal from 0 to 255"
     end
 
-    test "une touche inconnue" do
+    test "an unknown key" do
       message =
-        refuse!("Refus.Touche", "variables x: 1", "if pressed?(:turbo), do: x = x + 1")
+        reject!("Rejected.Key", "variables x: 1", "if pressed?(:turbo), do: x = x + 1")
 
-      assert message =~ "touche inconnue : :turbo"
+      assert message =~ "unknown key: :turbo"
       assert message =~ ":select"
     end
 
-    test "une variable non déclarée" do
-      message = refuse!("Refus.Fantome", "variables x: 1", "y = y + 1")
+    test "an undeclared variable" do
+      message = reject!("Rejected.Ghost", "variables x: 1", "y = y + 1")
 
-      assert message =~ "variable non déclarée : :y"
-      assert message =~ "Déclarées : :x (0xC100)"
+      assert message =~ "undeclared variable: :y"
+      assert message =~ "Declared: :x (0xC100)"
       assert message =~ "variables y: 0"
     end
 
-    test "une variable non déclarée dans un sprite" do
+    test "an undeclared variable inside a sprite" do
       message =
-        refuse!("Refus.SpriteFantome", "variables x: 1", "sprite(0, x: x, y: z, tile: 0)")
+        reject!("Rejected.SpriteGhost", "variables x: 1", "sprite(0, x: x, y: z, tile: 0)")
 
-      assert message =~ "variable non déclarée : :z"
+      assert message =~ "undeclared variable: :z"
     end
 
-    test "deux acteurs dans le même module" do
+    test "two actors in the same module" do
       source = """
-      defmodule Refus.DeuxActeurs do
+      defmodule Rejected.TwoActors do
         use Potion
 
-        defactor :premier do
+        defactor :first do
           every_frame do
             sprite(0, x: 10, y: 10, tile: 0)
           end
@@ -320,66 +323,66 @@ defmodule Potion.DSLTest do
       end
       """
 
-      message = compile_refusee!(source)
+      message = refuse_compile!(source)
 
-      assert message =~ "second acteur"
+      assert message =~ "second actor"
       assert message =~ ":second"
-      assert message =~ "n'a qu'un slot"
+      assert message =~ "has only one slot"
     end
 
-    test "un numéro de sprite hors des quarante entrées de l'OAM" do
-      message = refuse!("Refus.Oam", "variables x: 1", "sprite(40, x: x, y: 10, tile: 0)")
+    test "a sprite number outside the forty OAM entries" do
+      message = reject!("Rejected.Oam", "variables x: 1", "sprite(40, x: x, y: 10, tile: 0)")
 
-      assert message =~ "entrée d'OAM hors plage : 40"
-      assert message =~ "0 à 39"
+      assert message =~ "OAM entry out of range: 40"
+      assert message =~ "0 to 39"
     end
 
-    test "un numéro de sprite qui n'est pas un littéral" do
+    test "a sprite number that is not a literal" do
       message =
-        refuse!("Refus.OamVariable", "variables n: 1", "sprite(n, x: 10, y: 10, tile: 0)")
+        reject!("Rejected.OamVariable", "variables n: 1", "sprite(n, x: 10, y: 10, tile: 0)")
 
-      assert message =~ "n'est pas un littéral"
+      assert message =~ "is not a literal"
     end
 
-    test "un `if` avec une branche que le v0 ne compile pas" do
+    test "an `if` with a branch the v0 does not compile" do
       message =
-        refuse!(
-          "Refus.Sinon",
+        reject!(
+          "Rejected.Else",
           "variables x: 1",
-          "if pressed?(:a), do: x = x + 1, sinon: x = x - 1"
+          "if pressed?(:a), do: x = x + 1, else: x = x - 1"
         )
 
-      assert message =~ "branche que le v0 ne compile pas"
-      assert message =~ "sinon"
+      assert message =~ "branch the v0 does not compile"
+      assert message =~ "else"
     end
 
-    test "un acteur sans every_frame" do
+    test "an actor without every_frame" do
       source = """
-      defmodule Refus.SansFrame do
+      defmodule Rejected.NoFrame do
         use Potion
 
-        defactor :inerte do
+        defactor :inert do
           variables x: 1
         end
       end
       """
 
-      assert compile_refusee!(source) =~ "acteur sans `every_frame`"
+      assert refuse_compile!(source) =~ "actor without `every_frame`"
     end
 
-    test "une valeur initiale qui ne tient pas dans un octet" do
-      message = refuse!("Refus.Trop", "variables x: 300", "x = x + 1")
+    test "an initial value that does not fit in a byte" do
+      message = reject!("Rejected.TooBig", "variables x: 300", "x = x + 1")
 
-      assert message =~ "valeur initiale hors d'un octet"
+      assert message =~ "initial value outside a byte"
     end
 
-    test "un énoncé inconnu dans le corps de l'acteur" do
+    test "an unknown statement in the actor's body" do
       source = """
-      defmodule Refus.Enonce do
+      defmodule Rejected.Statement do
         use Potion
 
-        defactor :bavard do
-          IO.puts("bonjour")
+        defactor :chatty do
+          IO.puts("hello")
 
           every_frame do
             sprite(0, x: 10, y: 10, tile: 0)
@@ -388,90 +391,89 @@ defmodule Potion.DSLTest do
       end
       """
 
-      assert compile_refusee!(source) =~ "énoncé inconnu"
+      assert refuse_compile!(source) =~ "unknown statement"
     end
 
-    test "`variables` employé hors d'un defactor" do
+    test "`variables` used outside a defactor" do
       source = """
-      defmodule Refus.Egare do
+      defmodule Rejected.Stray do
         use Potion
         variables x: 1
       end
       """
 
-      assert compile_refusee!(source) =~ "hors d'un `defactor`"
+      assert refuse_compile!(source) =~ "outside a `defactor`"
     end
   end
 
-  # ══ Le harnais ═══════════════════════════════════════════════════════════════
+  # ══ The harness ══════════════════════════════════════════════════════════════
 
-  # `nombre` frames depuis le boot ; la dernière rendue si demandé.
-  defp deroule(jeu, nombre, opts \\ []) do
-    rom = jeu.rom()
+  # `count` frames since boot; the last one rendered if asked for.
+  defp run_frames(game, count, opts \\ []) do
+    rom = game.rom()
     render? = Keyword.get(opts, :render, false)
 
-    Enum.reduce(1..nombre, {<<>>, Screen.boot_state(rom), Screen.boot_ram(rom)}, fn n,
-                                                                                    {_pixels,
-                                                                                     state,
-                                                                                     ram} ->
-      Screen.frame(state, rom, ram, render? and n == nombre)
+    Enum.reduce(1..count, {<<>>, Screen.boot_state(rom), Screen.boot_ram(rom)}, fn n,
+                                                                                   {_pixels,
+                                                                                    state, ram} ->
+      Screen.frame(state, rom, ram, render? and n == count)
     end)
   end
 
-  # Des frames de plus, depuis un état en vol et une RAM que le monde extérieur
-  # vient éventuellement de toucher.
-  defp frames(jeu, state, ram, nombre) do
-    rom = jeu.rom()
+  # Further frames, from a state in flight and a RAM the outside world may just
+  # have touched.
+  defp frames(game, state, ram, count) do
+    rom = game.rom()
 
-    Enum.reduce(1..nombre, {state, ram}, fn _n, {state, ram} ->
+    Enum.reduce(1..count, {state, ram}, fn _n, {state, ram} ->
       {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
       {state, ram}
     end)
   end
 
-  defp position(ram, adresses), do: {Map.get(ram, adresses.x), Map.get(ram, adresses.y)}
+  defp position(ram, addresses), do: {Map.get(ram, addresses.x), Map.get(ram, addresses.y)}
 
-  defp oam(ram, entree), do: for(i <- 0..3, do: Map.get(ram, 0xFE00 + 4 * entree + i))
+  defp oam(ram, entry), do: for(i <- 0..3, do: Map.get(ram, 0xFE00 + 4 * entry + i))
 
-  defp non_blancs(pixels) do
+  defp non_white(pixels) do
     for i <- 0..(byte_size(pixels) - 1),
         :binary.at(pixels, i) != 0,
         into: MapSet.new(),
         do: {rem(i, 160), div(i, 160)}
   end
 
-  defp boite(x, y) do
-    for ligne <- y..(y + 7), colonne <- x..(x + 7), into: MapSet.new(), do: {colonne, ligne}
+  defp box(x, y) do
+    for line <- y..(y + 7), column <- x..(x + 7), into: MapSet.new(), do: {column, line}
   end
 
-  # ── Compiler un jeu pour de vrai, et attendre qu'il soit refusé ─────────────
+  # ── Compiling a game for real, and expecting it to be refused ───────────────
 
-  # Le refus se joue à la compilation du module hôte : ces tests compilent donc
-  # du texte, comme `mix compile` le ferait. Un appel direct à `Potion.Compiler`
-  # testerait la même exception, mais pas le chemin par lequel un programmeur la
-  # rencontre — et c'est ce chemin qui est la promesse du langage.
-  defp refuse!(module, declarations, enonce) do
-    compile_refusee!("""
+  # The refusal happens when the host module compiles: these tests therefore
+  # compile text, the way `mix compile` would. A direct call into
+  # `Potion.Compiler` would test the same exception, but not the path along which
+  # a programmer meets it — and that path is the language's promise.
+  defp reject!(module, declarations, statement) do
+    refuse_compile!("""
     defmodule #{module} do
       use Potion
 
-      defactor :fautif do
+      defactor :offender do
         #{declarations}
 
         every_frame do
-          #{enonce}
+          #{statement}
         end
       end
     end
     """)
   end
 
-  defp compile_refusee!(source) do
-    erreur =
+  defp refuse_compile!(source) do
+    error =
       assert_raise Potion.CompileError, fn ->
         ExUnit.CaptureIO.capture_io(:stderr, fn -> Code.compile_string(source) end)
       end
 
-    erreur.message
+    error.message
   end
 end

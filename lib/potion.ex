@@ -1,12 +1,12 @@
 defmodule Potion.CompileError do
   @moduledoc """
-  Ce que le v0 ne sait pas compiler, dit à la compilation du module hôte.
+  What the v0 cannot compile, said while the host module compiles.
 
-  Cette exception est levée pendant l'expansion des macros de `Potion` —
-  c'est-à-dire pendant que `mix compile` lit le fichier du jeu. Un jeu qui
-  compile est donc un jeu dont chaque ligne a un équivalent en instructions
-  SM83 ; il n'existe pas de « Potion qui plante à l'exécution » pour cette
-  classe de fautes, parce qu'à l'exécution il n'y a plus qu'une cartouche.
+  This exception is raised during the expansion of the `Potion` macros — that is,
+  while `mix compile` is reading the game's file. A game that compiles is
+  therefore a game every line of which has an equivalent in SM83 instructions;
+  there is no such thing as "Potion crashing at run time" for this class of
+  mistakes, because at run time there is nothing left but a cartridge.
   """
 
   defexception [:message]
@@ -14,12 +14,12 @@ end
 
 defmodule Potion do
   @moduledoc """
-  Un langage de jeu qui compile en cartouche.
+  A game language that compiles into a cartridge.
 
-  Potion est de l'Elixir. On écrit un module, on l'ajoute au projet, `mix
-  compile` le lit — et il en sort 32 Ko d'octets qu'une Game Boy exécute :
+  Potion is Elixir. You write a module, add it to the project, `mix compile`
+  reads it — and out come 32 KB of bytes a Game Boy executes:
 
-      defmodule MonJeu do
+      defmodule MyGame do
         use Potion
 
         defactor :hero do
@@ -35,104 +35,104 @@ defmodule Potion do
         end
       end
 
-      MonJeu.rom()        # la ROM, binaire, 32 768 octets
-      MonJeu.program()  # le programme assembleur, pour le lire
-      MonJeu.addresses()   # où vivent x et y en WRAM
+      MyGame.rom()        # the ROM, binary, 32,768 bytes
+      MyGame.program()    # the assembler program, for reading
+      MyGame.addresses()  # where x and y live in WRAM
 
-  Ces onze lignes font un carré noir au milieu de l'écran, qui se déplace au
-  pouce. Elles ne font rien d'autre — et c'est tout l'objet du v0 : que la
-  chaîne entière tienne debout, de la macro à l'OAM, avant de grossir.
+  Those eleven lines make a black square in the middle of the screen, which moves
+  under your thumb. They do nothing else — and that is the whole point of the v0:
+  that the entire chain should stand up, from the macro to the OAM, before it
+  grows.
 
-  ## La surface est de l'Elixir, la sémantique est celle de la console
+  ## The surface is Elixir, the semantics are the console's
 
-  C'est le seul contrat du langage, et il faut le prendre au mot. `x = x + 1`
-  s'écrit comme en Elixir, se lit comme en Elixir, et ne veut pas dire la même
-  chose :
+  It is the language's only contract, and it must be taken literally. `x = x + 1`
+  is written as in Elixir, reads as in Elixir, and does not mean the same thing:
 
-    * `x` n'est pas une liaison, c'est **une cellule de WRAM**. Le compilateur
-      lui donne une adresse dans la page que le noyau réserve à l'acteur, et
-      `x = x + 1` compile en `LD A, (x)` / `ADD A, 1` / `LD (x), A`.
-    * l'arithmétique est **sur huit bits, et elle enroule**. 255 + 1 fait 0, et
-      aucun test ne le rattrape : il n'y a pas de place dans une frame pour
-      vérifier ce que le silicium fait déjà.
-    * une affectation est **un effet**, pas une nouvelle valeur. Deux `x = …`
-      dans une frame écrivent deux fois la même cellule, et la seconde gagne.
+    * `x` is not a binding, it is **a cell of WRAM**. The compiler gives it an
+      address in the page the kernel reserves for the actor, and `x = x + 1`
+      compiles into `LD A, (x)` / `ADD A, 1` / `LD (x), A`.
+    * the arithmetic is **eight bits, and it wraps**. 255 + 1 makes 0, and no
+      check catches it: there is no room in a frame to verify what the silicon
+      already does.
+    * an assignment is **an effect**, not a new value. Two `x = …` in one frame
+      write the same cell twice, and the second one wins.
 
-  Rien de tout cela n'est un compromis regrettable. C'est ce qu'un jeu Game Boy
-  *est*, et un langage qui prétendrait le contraire mentirait sur la machine
-  qu'il pilote — au prix, tôt ou tard, d'une frame perdue à émuler une sémantique
-  qui n'a pas cours.
+  None of this is a regrettable compromise. It is what a Game Boy game *is*, and
+  a language claiming otherwise would be lying about the machine it drives — at
+  the cost, sooner or later, of a frame lost to emulating semantics that do not
+  apply.
 
-  Ce qui ne se traduit pas se refuse, et se refuse **à la compilation** : `x = x
-  * 2` fait échouer `mix compile` avec une `Potion.CompileError` qui montre
-  l'AST rejeté et énumère ce que le v0 sait faire. Une ROM qui compile est une
-  ROM dont chaque ligne existe en SM83.
+  What does not translate is refused, and refused **at compile time**: `x = x *
+  2` makes `mix compile` fail with a `Potion.CompileError` that shows the
+  rejected AST and lists what the v0 can do. A ROM that compiles is a ROM every
+  line of which exists in SM83.
 
-  ## La filiation
+  ## The lineage
 
-  L'idée n'est pas neuve, et son précédent est glorieux : GOOL, le langage que
-  Andy Gavin a écrit pour *Crash Bandicoot* — un Lisp compilé vers du bytecode
-  pour la PlayStation, où chaque personnage était un acteur avec son état et son
-  code de frame. Naughty Dog n'a pas écrit un moteur avec des scripts par-dessus
-  ; ils ont écrit un langage dont les phrases *sont* le jeu, et un compilateur
-  qui les fait tenir dans la console.
+  The idea is not new, and its precedent is a glorious one: GOOL, the language
+  Andy Gavin wrote for *Crash Bandicoot* — a Lisp compiled to bytecode for the
+  PlayStation, where every character was an actor with its own state and its own
+  frame code. Naughty Dog did not write an engine with scripts on top; they wrote
+  a language whose sentences *are* the game, and a compiler that makes them fit
+  inside the console.
 
-  Potion reprend la forme — l'acteur, l'état nommé, le code appelé une fois par
-  frame — sur une machine cinquante fois plus petite, et depuis un hôte qui sait
-  déjà lire des arbres : les macros d'Elixir font le travail que Gavin faisait
-  avec les macros de son Lisp.
+  Potion takes up the same shape — the actor, the named state, the code called
+  once per frame — on a machine fifty times smaller, and from a host that already
+  knows how to read trees: Elixir's macros do the work Gavin did with the macros
+  of his Lisp.
 
-  ## L'acteur
+  ## The actor
 
-  Un `defactor` déclare trois choses, dont deux sont facultatives :
+  A `defactor` declares three things, two of which are optional:
 
       defactor :hero do
-        variables x: 80, y: 72     # les cellules de WRAM, et leurs valeurs de départ
-        every_frame do            # le code appelé une fois par frame, par le noyau
+        variables x: 80, y: 72    # the WRAM cells, and their starting values
+        every_frame do            # the code called once per frame, by the kernel
           …
         end
       end
 
-  Les valeurs initiales ne sont pas posées « au démarrage » : un acteur n'a pas
-  de démarrage, le noyau l'appelle une fois par frame et c'est tout. Le
-  compilateur alloue donc une cellule de plus — le drapeau « installé », que le
-  jeu ne déclare pas et ne voit jamais — et fait reconnaître à la première frame
-  qu'elle est la première. `Potion.Compiler` détaille ce pattern.
+  The initial values are not laid down "at startup": an actor has no startup, the
+  kernel calls it once per frame and that is all. The compiler therefore
+  allocates one extra cell — the "installed" flag, which the game neither
+  declares nor ever sees — and lets the first frame recognise that it is the
+  first. `Potion.Compiler` details that pattern.
 
-  Le v0 n'accepte **qu'un acteur par module** : l'ordonnanceur du noyau n'a
-  qu'un slot, et un second `defactor` compilerait un jeu dont la moitié ne
-  tournerait jamais. Le jour où l'ordonnanceur en aura plusieurs, la macro les
-  acceptera sans que la surface change.
+  The v0 accepts **only one actor per module**: the kernel's scheduler has a
+  single slot, and a second `defactor` would compile a game half of which would
+  never run. The day the scheduler has several, the macro will accept them
+  without the surface changing.
 
-  ## Ce que le v0 compile
+  ## What the v0 compiles
 
-      x = 5                              une constante dans une cellule
-      x = y                              une cellule dans une autre
-      x = x + 1                          huit bits, qui enroulent
+      x = 5                              a constant into a cell
+      x = y                              one cell into another
+      x = x + 1                          eight bits, which wrap
       x = y - 3
 
-      if pressed?(touche), do: …          :right :left :up :down :a :b :select :start
-      if pressed?(:a) do                  un bloc, plusieurs énoncés
+      if pressed?(key), do: …            :right :left :up :down :a :b :select :start
+      if pressed?(:a) do                 a block, several statements
         x = x + 1
         y = y - 1
       end
 
-      sprite(n, x: …, y: …, tile: …)    l'entrée n de l'OAM miroir, n littéral de 0 à 39
+      sprite(n, x: …, y: …, tile: …)    entry n of the mirror OAM, n a literal from 0 to 39
 
-  `sprite` écrit dans l'OAM miroir du noyau — jamais dans l'OAM réelle, qui
-  n'est écrivable que pendant le vblank. Les décalages du matériel (Y+16, X+8)
-  sont ajoutés par le compilateur : `sprite(0, x: 80, y: 72, …)` place le coin
-  haut-gauche du sprite au pixel (80, 72) de l'écran, et non seize lignes plus
-  bas. Les attributs sont mis à zéro.
+  `sprite` writes into the kernel's mirror OAM — never into the real OAM, which
+  is only writable during the vblank. The hardware offsets (Y+16, X+8) are added
+  by the compiler: `sprite(0, x: 80, y: 72, …)` puts the sprite's top-left corner
+  at pixel (80, 72) of the screen, and not sixteen lines further down. The
+  attributes are zeroed.
 
-  ## Les modules
+  ## The modules
 
-    * `Potion.Compiler` — l'AST restreint vers le fragment assembleur, et tous
-      les messages de refus.
-    * `Potion.Runtime` — le runtime : l'init, le vblank, le DMA, le pad, la
-      boucle qui appelle l'acteur.
-    * `Potion.Assembler` — les tuples vers les octets.
-    * `Potion.ROM` — la cartouche de 32 Ko, en-tête et sommes comprises.
+    * `Potion.Compiler` — the restricted AST into an assembler fragment, and all
+      the refusal messages.
+    * `Potion.Runtime` — the runtime: the init, the vblank, the DMA, the pad, the
+      loop that calls the actor.
+    * `Potion.Assembler` — the tuples into bytes.
+    * `Potion.ROM` — the 32 KB cartridge, header and checksums included.
   """
 
   alias Potion.Assembler
@@ -140,11 +140,11 @@ defmodule Potion do
   alias Potion.CompileError
   alias Potion.Runtime
 
-  # Quinze caractères, c'est ce que l'en-tête de cartouche loge.
-  @titre_max 15
+  # Fifteen characters is what the cartridge header holds.
+  @title_max 15
 
   @doc """
-  Ouvre le langage dans le module hôte : `defactor` et ses deux mots.
+  Opens the language inside the host module: `defactor` and its two words.
   """
   defmacro __using__(_opts) do
     quote do
@@ -153,54 +153,54 @@ defmodule Potion do
   end
 
   @doc """
-  Déclare l'acteur du module, et lui donne `rom/0`, `programme/0`, `adresses/0`.
+  Declares the module's actor, and gives it `rom/0`, `program/0`, `addresses/0`.
 
-  Tout le travail se fait ici, pendant l'expansion : le corps est lu comme un
-  arbre, les variables sont allouées, le corps de `every_frame` est compilé, et
-  le programme complet est assemblé une fois pour vérifier qu'il tient. Ce qui
-  survit à tout cela est une liste de tuples gravée dans le module — les
-  fonctions engendrées ne compilent plus rien, elles rendent une valeur.
+  All the work happens here, during expansion: the body is read as a tree, the
+  variables are allocated, the `every_frame` body is compiled, and the complete
+  program is assembled once to check that it fits. What survives all that is a
+  list of tuples engraved into the module — the generated functions no longer
+  compile anything, they return a value.
   """
-  defmacro defactor(nom, do: corps) do
+  defmacro defactor(name, do: body) do
     module = __CALLER__.module
-    nom = nom!(nom, module)
-    unique!(module, nom)
+    name = name!(name, module)
+    unique!(module, name)
 
-    {declarations, every_frame} = decoupe!(corps, nom)
+    {declarations, every_frame} = split!(body, name)
     allocation = Compiler.allocate(declarations)
     fragment = Compiler.compile(every_frame, allocation)
-    verifie!(fragment, nom)
+    verify!(fragment, name)
 
-    Module.put_attribute(module, :potion_acteur, nom)
+    Module.put_attribute(module, :potion_actor, name)
 
     quote do
       @doc """
-      Le programme assembleur complet — le noyau, puis l'acteur `#{inspect(unquote(nom))}`.
+      The complete assembler program — the kernel, then the actor `#{inspect(unquote(name))}`.
 
-      Au format de `Potion.Assembler` : une liste de tuples, qu'on peut lire,
-      découper, ou passer à `Potion.Assembler.adresses/2` pour savoir où tout
-      est tombé.
+      In the `Potion.Assembler` format: a list of tuples, which can be read,
+      sliced, or passed to `Potion.Assembler.addresses/2` to find out where
+      everything landed.
       """
       def program do
         Potion.Runtime.program(unquote(Macro.escape(fragment)))
       end
 
       @doc """
-      La ROM, 32 768 octets, prête à graver ou à donner à `Atomboy.Screen`.
+      The ROM, 32,768 bytes, ready to burn or to hand to `Atomboy.Screen`.
       """
       def rom do
         Potion.ROM.build(program(),
           vblank: :vblank,
-          title: unquote(titre(module))
+          title: unquote(title(module))
         )
       end
 
       @doc """
-      Où vivent les variables du jeu, en WRAM.
+      Where the game's variables live, in WRAM.
 
-      Un jeu Potion n'a pas de variables au sens du BEAM : il a des cellules.
-      Les voici, pour qui veut les lire depuis l'extérieur — un émulateur, un
-      test, un débogueur.
+      A Potion game has no variables in the BEAM sense: it has cells. Here they
+      are, for whoever wants to read them from the outside — an emulator, a test,
+      a debugger.
       """
       def addresses do
         unquote(Macro.escape(allocation.cells))
@@ -209,182 +209,182 @@ defmodule Potion do
   end
 
   @doc """
-  Les cellules de WRAM du jeu et leurs valeurs de départ.
+  The game's WRAM cells and their starting values.
 
       variables x: 80, y: 72
 
-  Ne s'emploie qu'à l'intérieur d'un `defactor`, où elle n'est pas exécutée
-  mais lue : `defactor` prend l'arbre tel quel et le passe au compilateur.
+  Only used inside a `defactor`, where it is not executed but read: `defactor`
+  takes the tree as it stands and hands it to the compiler.
   """
   defmacro variables(declarations) do
-    hors_acteur!("variables", Macro.to_string({:variables, [], [declarations]}))
+    outside_actor!("variables", Macro.to_string({:variables, [], [declarations]}))
   end
 
   @doc """
-  Le code appelé une fois par frame, par la boucle du noyau.
+  The code called once per frame, by the kernel's loop.
 
       every_frame do
         if pressed?(:right), do: x = x + 1
         sprite(0, x: x, y: y, tile: 0)
       end
 
-  Ne s'emploie qu'à l'intérieur d'un `defactor`. Voir `Potion` pour ce que le
-  v0 accepte dedans.
+  Only used inside a `defactor`. See `Potion` for what the v0 accepts in there.
   """
-  defmacro every_frame(_blocs) do
-    hors_acteur!("every_frame", "every_frame do … end")
+  defmacro every_frame(_blocks) do
+    outside_actor!("every_frame", "every_frame do … end")
   end
 
-  # ══ La lecture de l'arbre de l'acteur ════════════════════════════════════════
+  # ══ Reading the actor's tree ═════════════════════════════════════════════════
 
-  defp nom!(nom, _module) when is_atom(nom), do: nom
+  defp name!(name, _module) when is_atom(name), do: name
 
-  defp nom!(autre, module) do
+  defp name!(other, module) do
     raise CompileError, """
-    nom d'acteur qui n'est pas un atome, dans #{inspect(module)} :
+    actor name that is not an atom, in #{inspect(module)}:
 
-        #{Macro.to_string(autre)}
+        #{Macro.to_string(other)}
 
-    AST refusé : #{inspect(autre)}
+    Rejected AST: #{inspect(other)}
 
-    La forme est `defactor :hero do … end`. Le nom est écrit sur place, comme \
-    celui d'une fonction — il ne se calcule pas.
+    The form is `defactor :hero do … end`. The name is written on the spot, like \
+    a function's — it is not computed.
     """
   end
 
-  defp unique!(module, nom) do
-    case Module.get_attribute(module, :potion_acteur) do
+  defp unique!(module, name) do
+    case Module.get_attribute(module, :potion_actor) do
       nil ->
         :ok
 
-      premier ->
+      first ->
         raise CompileError, """
-        second acteur dans #{inspect(module)} : #{inspect(nom)}, après #{inspect(premier)}.
+        second actor in #{inspect(module)}: #{inspect(name)}, after #{inspect(first)}.
 
-        L'ordonnanceur du v0 n'a qu'un slot — le noyau appelle un seul `CALL` par \
-        frame, et #{inspect(premier)} l'occupe. #{inspect(nom)} ne tournerait \
-        jamais, ce qui est la pire façon de ne pas marcher.
+        The v0 scheduler has only one slot — the kernel makes a single `CALL` per \
+        frame, and #{inspect(first)} occupies it. #{inspect(name)} would never \
+        run, which is the worst possible way of not working.
 
-        En attendant un ordonnanceur à plusieurs slots : un acteur par module, et \
-        une ROM par module.
+        Until there is a multi-slot scheduler: one actor per module, and one ROM \
+        per module.
         """
     end
   end
 
-  # Le corps d'un `defactor` : au plus un `variables`, exactement un
-  # `every_frame`, et rien d'autre. Les deux ne sont pas expansés — ce sont des
-  # formes que cette fonction reconnaît, pas du code qui tourne.
-  defp decoupe!(corps, nom) do
-    corps
-    |> enonces()
-    |> Enum.reduce({nil, nil}, fn enonce, {declarations, every_frame} ->
-      case enonce do
+  # The body of a `defactor`: at most one `variables`, exactly one `every_frame`,
+  # and nothing else. Neither is expanded — they are forms this function
+  # recognises, not code that runs.
+  defp split!(body, name) do
+    body
+    |> statements()
+    |> Enum.reduce({nil, nil}, fn statement, {declarations, every_frame} ->
+      case statement do
         {:variables, _, _} when declarations != nil ->
-          doublon!("variables", nom)
+          duplicate!("variables", name)
 
         {:every_frame, _, _} when every_frame != nil ->
-          doublon!("every_frame", nom)
+          duplicate!("every_frame", name)
 
         {:variables, _, [decl]} ->
           {decl, every_frame}
 
-        {:every_frame, _, [[do: bloc]]} ->
-          {declarations, {:corps, bloc}}
+        {:every_frame, _, [[do: block]]} ->
+          {declarations, {:body, block}}
 
-        autre ->
+        other ->
           raise CompileError, """
-          énoncé inconnu dans `defactor #{inspect(nom)}` :
+          unknown statement in `defactor #{inspect(name)}`:
 
-              #{Macro.to_string(autre)}
+              #{Macro.to_string(other)}
 
-          AST refusé : #{inspect(autre)}
+          Rejected AST: #{inspect(other)}
 
-          Le corps d'un acteur ne contient que deux formes :
+          An actor's body contains two forms and no others:
 
               variables x: 80, y: 72
               every_frame do … end
 
-          Le code du jeu va dans `every_frame` ; c'est lui que le noyau appelle.
+          The game's code goes into `every_frame`; that is what the kernel calls.
           """
       end
     end)
     |> case do
       {_declarations, nil} ->
         raise CompileError, """
-        acteur sans `every_frame` : #{inspect(nom)}
+        actor without `every_frame`: #{inspect(name)}
 
-        Un acteur est du code appelé une fois par frame. Sans `every_frame`, le \
-        noyau appellerait un `RET` soixante fois par seconde et l'écran resterait \
-        vide.
+        An actor is code called once per frame. Without `every_frame`, the kernel \
+        would be calling a `RET` sixty times a second and the screen would stay \
+        empty.
 
-            defactor #{inspect(nom)} do
+            defactor #{inspect(name)} do
               every_frame do
                 sprite(0, x: 80, y: 72, tile: 0)
               end
             end
         """
 
-      {declarations, {:corps, bloc}} ->
-        {declarations || [], bloc}
+      {declarations, {:body, block}} ->
+        {declarations || [], block}
     end
   end
 
-  defp enonces({:__block__, _, liste}), do: liste
-  defp enonces(nil), do: []
-  defp enonces(seul), do: [seul]
+  defp statements({:__block__, _, list}), do: list
+  defp statements(nil), do: []
+  defp statements(single), do: [single]
 
-  defp doublon!(mot, nom) do
+  defp duplicate!(word, name) do
     raise CompileError, """
-    `#{mot}` écrit deux fois dans `defactor #{inspect(nom)}`.
+    `#{word}` written twice in `defactor #{inspect(name)}`.
 
-    Un acteur a un seul état et un seul code de frame. Deux `#{mot}` ne diraient \
-    pas lequel compte — et le v0 préfère refuser que choisir à votre place.
+    An actor has a single state and a single frame body. Two `#{word}` would not \
+    say which one counts — and the v0 would rather refuse than choose on your \
+    behalf.
     """
   end
 
-  # L'assemblage à blanc : le fragment est-il un programme ? Le noyau vérifie le
-  # RET final, l'assembleur les étiquettes et les portées de saut. Le faire ici
-  # plutôt qu'au premier appel de `rom/0` est tout le bénéfice d'un langage
-  # compilé : un `if` dont le bloc dépasse la portée d'un JR se voit dans `mix
-  # compile`, pas trois semaines plus tard sur une flashcart.
-  defp verifie!(fragment, nom) do
+  # The dry run of the assembly: is the fragment a program? The kernel checks the
+  # closing RET, the assembler the labels and the jump ranges. Doing it here
+  # rather than on the first call to `rom/0` is the whole benefit of a compiled
+  # language: an `if` whose block overshoots the range of a JR shows up in `mix
+  # compile`, not three weeks later on a flashcart.
+  defp verify!(fragment, name) do
     Assembler.assemble(Runtime.program(fragment), origin: 0x0150)
     :ok
   rescue
-    erreur in ArgumentError ->
+    error in ArgumentError ->
       reraise CompileError,
               [
                 message: """
-                l'acteur #{inspect(nom)} ne s'assemble pas.
+                the actor #{inspect(name)} does not assemble.
 
-                #{erreur.message}
+                #{error.message}
 
-                Le corps a été compilé, mais le fragment qui en sort n'est pas un \
-                programme valide. Si le message parle d'un saut hors de portée, \
-                c'est un bloc `if` trop gros : JR ne saute qu'à 127 octets, et le \
-                v0 ne connaît que JR.
+                The body compiled, but the fragment that came out of it is not a \
+                valid program. If the message speaks of a jump out of range, it is \
+                an `if` block that is too big: JR only jumps 127 bytes, and the v0 \
+                knows nothing but JR.
                 """
               ],
               __STACKTRACE__
   end
 
-  defp titre(module) do
+  defp title(module) do
     module
     |> Module.split()
     |> List.last()
     |> String.upcase()
-    |> String.slice(0, @titre_max)
+    |> String.slice(0, @title_max)
   end
 
-  defp hors_acteur!(mot, forme) do
+  defp outside_actor!(word, form) do
     raise CompileError, """
-    `#{mot}` employé hors d'un `defactor`.
+    `#{word}` used outside a `defactor`.
 
-    Cette forme n'est pas du code : c'est une partie de la déclaration d'un \
-    acteur, que `defactor` lit dans son arbre. Elle n'a de sens qu'ici :
+    This form is not code: it is part of an actor's declaration, which `defactor` \
+    reads from its tree. It only makes sense here:
 
         defactor :hero do
-          #{forme}
+          #{form}
         end
     """
   end

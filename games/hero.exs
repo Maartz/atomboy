@@ -1,11 +1,11 @@
-# Le premier jeu Potion : un héros carré qui marche au pouce.
+# The first Potion game: a square hero who walks under your thumb.
 #
 #     mix run games/hero.exs
 #
-# écrit `games/hero.gb` — une vraie cartouche de 32 Ko, à ouvrir dans
-# Atomboy.app, dans le terminal (`bin/play games/hero.gb`), ou à graver sur
-# une flashcart. Modifier ce fichier et relancer la commande suffit : le
-# compilateur refuse à la compilation ce que la console ne sait pas faire.
+# writes `games/hero.gb` — a real 32 KB cartridge, to open in Atomboy.app, in
+# the terminal (`bin/play games/hero.gb`), or to burn onto a flashcart. Editing
+# this file and running the command again is all it takes: the compiler refuses
+# at compile time whatever the console cannot do.
 
 defmodule Hero do
   use Potion
@@ -23,6 +23,6 @@ defmodule Hero do
   end
 end
 
-chemin = Path.join(__DIR__, "hero.gb")
-File.write!(chemin, Hero.rom())
-IO.puts("#{chemin} — #{byte_size(Hero.rom())} octets, prêt à jouer.")
+path = Path.join(__DIR__, "hero.gb")
+File.write!(path, Hero.rom())
+IO.puts("#{path} — #{byte_size(Hero.rom())} bytes, ready to play.")

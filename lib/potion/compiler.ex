@@ -1,62 +1,58 @@
 defmodule Potion.Compiler do
   @moduledoc """
-  Le compilateur du v0 : d'un AST Elixir restreint à un fragment SM83.
+  The v0 compiler: from a restricted Elixir AST to an SM83 fragment.
 
-  Ce module ne connaît aucune macro. Il reçoit l'AST que `Potion` a capturé,
-  une allocation de cellules, et rend une liste d'éléments au format de
-  `Potion.Assembler`. C'est donc un compilateur qu'on peut appeler à la main,
-  dans une console, sur un morceau de `quote` — et c'est voulu : un compilateur
-  qui ne s'atteindrait qu'à travers `defmodule` ne se déboguerait qu'à travers
-  `defmodule`.
+  This module knows no macros. It receives the AST that `Potion` captured, an
+  allocation of cells, and returns a list of elements in the `Potion.Assembler`
+  format. It is therefore a compiler that can be called by hand, in a console, on
+  a piece of `quote` — and that is deliberate: a compiler only reachable through
+  `defmodule` could only be debugged through `defmodule`.
 
-  ## L'allocation
+  ## The allocation
 
-  Une variable du jeu est **une cellule de WRAM**, pas un registre et pas une
-  liaison. Les cellules sont prises dans l'ordre de déclaration à partir de
-  `Potion.Runtime.actor_state()` :
+  A game variable is **a cell of WRAM**, not a register and not a binding. Cells
+  are taken in declaration order starting at `Potion.Runtime.actor_state()`:
 
       variables x: 80, y: 72
 
       0xC100  x
       0xC101  y
-      0xC102  le drapeau « installé »
+      0xC102  the "installed" flag
 
-  Le drapeau est la cellule que le jeu ne déclare pas et ne voit jamais. Il
-  répond à un problème que le BEAM n'a pas : *où poser les valeurs initiales ?*
-  Il n'y a pas de « démarrage » dans un acteur — le noyau l'appelle une fois
-  par frame, un point c'est tout. La première frame doit donc se reconnaître
-  elle-même, et le seul état sur lequel elle peut compter est le zéro que l'init
-  a laissé dans la page. L'acteur lit le drapeau : à zéro, il pose les valeurs
-  initiales et lève le drapeau ; ensuite il passe. C'est le pattern de l'acteur
-  écrit à la main dans `Potion.RuntimeTest`, généré.
+  The flag is the cell the game does not declare and never sees. It answers a
+  problem the BEAM does not have: *where do the initial values go?* There is no
+  "startup" in an actor — the kernel calls it once per frame, full stop. The
+  first frame must therefore recognise itself, and the only state it can count on
+  is the zero the init left in the page. The actor reads the flag: at zero, it
+  lays down the initial values and raises the flag; afterwards it walks past. It
+  is the hand-written actor pattern from `Potion.RuntimeTest`, generated.
 
-  ## L'arithmétique
+  ## The arithmetic
 
-  Le v0 compile trois formes d'affectation, et rien d'autre :
+  The v0 compiles three forms of assignment, and nothing else:
 
       x = 5          LD A, 5        / LD (x), A
       x = y          LD A, (y)      / LD (x), A
       x = x + 1      LD A, (x)      / ADD A, 1 / LD (x), A
       x = y - 3      LD A, (y)      / SUB A, 3 / LD (x), A
 
-  Ces quatre lignes disent toute la sémantique : un octet, qui enroule. `x = x
-  + 1` sur 255 rend 0, parce que `ADD A, 1` sur 255 rend 0. Aucune vérification
-  n'est émise — il n'y a pas de place pour en émettre, et un jeu Game Boy compte
-  sur l'enroulement plus souvent qu'il ne s'en méfie.
+  Those four lines state the whole semantics: one byte, which wraps. `x = x + 1`
+  on 255 gives 0, because `ADD A, 1` on 255 gives 0. No check is emitted — there
+  is no room to emit one, and a Game Boy game relies on wrapping more often than
+  it guards against it.
 
-  Tout le reste est refusé à la compilation du module hôte. `x = x * 2` ne
-  compile pas parce que le SM83 n'a pas de multiplication ; `x = x + y` ne
-  compile pas parce que l'addition mémoire-à-mémoire demande de sauver A ou
-  d'utiliser HL, et que le v0 n'a pas de politique de registres. Le second
-  reviendra ; le premier deviendra une boucle d'additions le jour où le langage
-  saura en écrire une.
+  Everything else is refused when the host module compiles. `x = x * 2` does not
+  compile because the SM83 has no multiplication; `x = x + y` does not compile
+  because memory-to-memory addition requires saving A or using HL, and the v0 has
+  no register policy. The second will come back; the first will become a loop of
+  additions the day the language knows how to write one.
 
-  ## Les étiquettes engendrées
+  ## The generated labels
 
-  Toutes préfixées `potion_` et numérotées. Le noyau pose `:actor` juste avant
-  le fragment et n'y touche plus ; ce préfixe garde les deux espaces de noms
-  disjoints, ce que l'assembleur vérifierait de toute façon — il refuse une
-  étiquette dupliquée.
+  All prefixed `potion_` and numbered. The kernel places `:actor` right before
+  the fragment and never touches it again; this prefix keeps the two namespaces
+  disjoint, which the assembler would check anyway — it refuses a duplicate
+  label.
   """
 
   alias Potion.Assembler
@@ -64,7 +60,7 @@ defmodule Potion.Compiler do
   alias Potion.Runtime
 
   @typedoc """
-  Où vit l'état de l'acteur : une cellule par variable, plus le drapeau.
+  Where the actor's state lives: one cell per variable, plus the flag.
   """
   @type allocation :: %{
           cells: %{atom() => non_neg_integer()},
@@ -73,26 +69,26 @@ defmodule Potion.Compiler do
           installed: non_neg_integer()
         }
 
-  # Les bits de la cellule du pad, tels que `Potion.Runtime.read_pad/0` les range.
-  # Cette liste est la seule traduction du langage vers le matériel qui ne soit
-  # pas dérivée : le noyau documente les bits, on les nomme.
-  @touches [right: 0, left: 1, up: 2, down: 3, a: 4, b: 5, select: 6, start: 7]
+  # The bits of the pad cell, as `Potion.Runtime.read_pad/0` files them. This
+  # list is the only translation from the language to the hardware that is not
+  # derived: the kernel documents the bits, we name them.
+  @keys [right: 0, left: 1, up: 2, down: 3, a: 4, b: 5, select: 6, start: 7]
 
-  # L'OAM en compte quarante, et le DMA les publie toutes.
-  @entrees_oam 40
+  # The OAM holds forty of them, and the DMA publishes them all.
+  @oam_entries 40
 
-  # 0xC100-0xC1FF : la page que le noyau laisse à l'acteur.
-  @page_etat 0x100
+  # 0xC100-0xC1FF: the page the kernel leaves to the actor.
+  @state_page 0x100
 
-  # ══ L'allocation ═════════════════════════════════════════════════════════════
+  # ══ The allocation ═══════════════════════════════════════════════════════════
 
   @doc """
-  Place les variables déclarées en WRAM, dans l'ordre où elles sont écrites.
+  Places the declared variables in WRAM, in the order they are written.
 
-  Le drapeau « installé » vient juste après la dernière, et c'est pour cela
-  qu'il est calculé ici plutôt que posé à une adresse fixe : une adresse fixe
-  serait un trou au milieu de la page de l'acteur, et le jour où le langage
-  saura allouer autre chose que des octets, ce trou serait à contourner.
+  The "installed" flag comes right after the last one, and that is why it is
+  computed here rather than fixed at a set address: a fixed address would be a
+  hole in the middle of the actor's page, and the day the language knows how to
+  allocate something other than bytes, that hole would have to be worked around.
 
       iex> Potion.Compiler.allocate(x: 80, y: 72).cells
       %{x: 0xC100, y: 0xC101}
@@ -102,49 +98,49 @@ defmodule Potion.Compiler do
   """
   @spec allocate(keyword()) :: allocation()
   def allocate(declarations) do
-    liste = declarations!(declarations)
-    noms = Keyword.keys(liste)
+    list = declarations!(declarations)
+    names = Keyword.keys(list)
 
-    doublons!(noms, declarations)
-    capacite!(noms, declarations)
+    duplicates!(names, declarations)
+    capacity!(names, declarations)
 
-    cellules =
-      noms
+    cells =
+      names
       |> Enum.with_index()
-      |> Map.new(fn {nom, rang} -> {nom, Runtime.actor_state() + rang} end)
+      |> Map.new(fn {name, rank} -> {name, Runtime.actor_state() + rank} end)
 
     %{
-      cells: cellules,
-      order: noms,
-      initial: Map.new(liste),
-      installed: Runtime.actor_state() + length(noms)
+      cells: cells,
+      order: names,
+      initial: Map.new(list),
+      installed: Runtime.actor_state() + length(names)
     }
   end
 
   defp declarations!(declarations) when is_list(declarations) do
     Enum.each(declarations, fn
-      {nom, valeur} when is_atom(nom) and is_integer(valeur) and valeur in 0..255 ->
+      {name, value} when is_atom(name) and is_integer(value) and value in 0..255 ->
         :ok
 
-      {nom, valeur} when is_atom(nom) ->
+      {name, value} when is_atom(name) ->
         raise CompileError, """
-        valeur initiale hors d'un octet, dans `variables` : #{inspect(nom)}
+        initial value outside a byte, in `variables`: #{inspect(name)}
 
-            #{Macro.to_string(valeur)}
+            #{Macro.to_string(value)}
 
-        AST refusé : #{inspect(valeur)}
+        Rejected AST: #{inspect(value)}
 
-        Une variable Potion est une cellule de WRAM : sa valeur initiale est un \
-        littéral entier de 0 à 255. Elle est posée telle quelle au premier tour, \
-        sans calcul — il n'y a personne pour calculer avant que l'acteur ne \
-        tourne.
+        A Potion variable is a cell of WRAM: its initial value is an integer \
+        literal from 0 to 255. It is laid down as it stands on the first turn, \
+        with no computation — there is nobody to compute anything before the \
+        actor runs.
         """
 
-      autre ->
+      other ->
         raise CompileError, """
-        déclaration mal formée dans `variables` : #{inspect(autre)}
+        malformed declaration in `variables`: #{inspect(other)}
 
-        `variables` attend une liste à mots-clés, chaque nom recevant un octet :
+        `variables` expects a keyword list, each name receiving one byte:
 
             variables x: 80, y: 72
         """
@@ -153,70 +149,70 @@ defmodule Potion.Compiler do
     declarations
   end
 
-  defp declarations!(autre) do
+  defp declarations!(other) do
     raise CompileError, """
-    `variables` attend une liste à mots-clés, reçu :
+    `variables` expects a keyword list, got:
 
-        #{Macro.to_string(autre)}
+        #{Macro.to_string(other)}
 
-    AST refusé : #{inspect(autre)}
+    Rejected AST: #{inspect(other)}
 
-    La forme est `variables x: 80, y: 72` — un nom, un octet, et une cellule de \
-    WRAM par nom.
+    The form is `variables x: 80, y: 72` — a name, a byte, and one cell of WRAM \
+    per name.
     """
   end
 
-  defp doublons!(noms, declarations) do
-    case noms -- Enum.uniq(noms) do
+  defp duplicates!(names, declarations) do
+    case names -- Enum.uniq(names) do
       [] ->
         :ok
 
-      repetes ->
+      repeated ->
         raise CompileError, """
-        variable déclarée deux fois : #{Enum.map_join(Enum.uniq(repetes), ", ", &inspect/1)}
+        variable declared twice: #{Enum.map_join(Enum.uniq(repeated), ", ", &inspect/1)}
 
             #{Macro.to_string(declarations)}
 
-        Chaque nom vaut une cellule de WRAM, et deux déclarations du même nom \
-        ne diraient pas laquelle porte la valeur initiale.
+        Each name is worth one cell of WRAM, and two declarations of the same \
+        name would not say which one carries the initial value.
         """
     end
   end
 
-  defp capacite!(noms, declarations) do
-    if length(noms) + 1 > @page_etat do
+  defp capacity!(names, declarations) do
+    if length(names) + 1 > @state_page do
       raise CompileError, """
-      trop de variables : #{length(noms)} déclarées, #{@page_etat - 1} au plus.
+      too many variables: #{length(names)} declared, #{@state_page - 1} at most.
 
           #{Macro.to_string(declarations)}
 
-      Le noyau laisse à l'acteur la page 0x#{hexa(Runtime.actor_state())}-0x#{hexa(Runtime.actor_state() + @page_etat - 1)}, \
-      soit #{@page_etat} cellules dont une pour le drapeau « installé ».
+      The kernel leaves the actor page 0x#{hex(Runtime.actor_state())}-0x#{hex(Runtime.actor_state() + @state_page - 1)}, \
+      that is #{@state_page} cells, one of which holds the "installed" flag.
       """
     end
   end
 
-  # ══ La compilation ═══════════════════════════════════════════════════════════
+  # ══ The compilation ══════════════════════════════════════════════════════════
 
   @doc """
-  L'AST du corps de `every_frame` et une allocation, en un fragment d'acteur.
+  The AST of an `every_frame` body plus an allocation, into an actor fragment.
 
-  Le fragment finit par `{:ret}` : c'est un `CALL` qui l'atteint, une fois par
-  frame, et `Potion.Runtime.program/1` refuse un acteur qui ne rendrait pas la
-  main.
+  The fragment ends with `{:ret}`: it is a `CALL` that reaches it, once per
+  frame, and `Potion.Runtime.program/1` refuses an actor that would not hand
+  control back.
   """
   @spec compile(Macro.t(), allocation()) :: [Assembler.element()]
-  def compile(corps, allocation) do
-    {corps_compile, _compteur} = bloc(corps, allocation, 0)
-    installation(allocation) ++ corps_compile ++ [{:ret}]
+  def compile(body, allocation) do
+    {compiled, _counter} = block(body, allocation, 0)
+    install(allocation) ++ compiled ++ [{:ret}]
   end
 
-  # Le premier tour : poser les valeurs initiales, puis ne plus jamais y revenir.
-  # Sans variable il n'y a rien à installer, et le drapeau reste une cellule
-  # inerte — on n'émet pas six octets pour garder un état dont personne ne veut.
-  defp installation(%{order: []}), do: []
+  # The first turn: lay down the initial values, then never come back to them.
+  # With no variables there is nothing to install, and the flag stays an inert
+  # cell — we do not emit six bytes to keep a state nobody wants.
+  defp install(%{order: []}), do: []
 
-  defp installation(allocation) do
+  defp install(allocation) do
     [
       {:ld, :a, {:mem, allocation.installed}},
       {:and, :a, :a},
@@ -224,338 +220,338 @@ defmodule Potion.Compiler do
       {:ld, :a, 0x01},
       {:ld, {:mem, allocation.installed}, :a}
     ] ++
-      Enum.flat_map(allocation.order, fn nom ->
+      Enum.flat_map(allocation.order, fn name ->
         [
-          {:ld, :a, allocation.initial[nom]},
-          {:ld, {:mem, allocation.cells[nom]}, :a}
+          {:ld, :a, allocation.initial[name]},
+          {:ld, {:mem, allocation.cells[name]}, :a}
         ]
       end) ++
       [{:label, :potion_installed}]
   end
 
-  # Un bloc : les énoncés à la file, le compteur d'étiquettes passant de l'un à
-  # l'autre. Il ressort du bloc parce que deux `if` frères ne peuvent pas
-  # partager une étiquette de fin.
-  defp bloc(corps, allocation, compteur) do
-    corps
-    |> enonces()
-    |> Enum.reduce({[], compteur}, fn enonce, {acc, compteur} ->
-      {elements, compteur} = enonce(enonce, allocation, compteur)
-      {acc ++ elements, compteur}
+  # A block: the statements one after another, the label counter passing from one
+  # to the next. It comes back out of the block because two sibling `if`s cannot
+  # share an end label.
+  defp block(body, allocation, counter) do
+    body
+    |> statements()
+    |> Enum.reduce({[], counter}, fn statement, {acc, counter} ->
+      {elements, counter} = statement(statement, allocation, counter)
+      {acc ++ elements, counter}
     end)
   end
 
-  defp enonces({:__block__, _, liste}), do: liste
-  defp enonces(nil), do: []
-  defp enonces(seul), do: [seul]
+  defp statements({:__block__, _, list}), do: list
+  defp statements(nil), do: []
+  defp statements(single), do: [single]
 
-  # ── Une affectation ─────────────────────────────────────────────────────────
+  # ── An assignment ───────────────────────────────────────────────────────────
 
-  defp enonce({:=, _, [cible, expression]} = enonce, allocation, compteur) do
-    adresse = cellule!(cible, allocation, enonce)
-    {charge(expression, allocation, enonce) ++ [{:ld, {:mem, adresse}, :a}], compteur}
+  defp statement({:=, _, [target, expression]} = statement, allocation, counter) do
+    address = cell!(target, allocation, statement)
+    {load(expression, allocation, statement) ++ [{:ld, {:mem, address}, :a}], counter}
   end
 
-  # ── Une condition sur le pad ────────────────────────────────────────────────
+  # ── A condition on the pad ──────────────────────────────────────────────────
 
-  defp enonce({:if, _, [condition, blocs]} = enonce, allocation, compteur) do
-    bit = touche!(condition, enonce)
-    corps = corps_du_si!(blocs, enonce)
-    fin = :"potion_end_#{compteur}"
-    {interieur, compteur} = bloc(corps, allocation, compteur + 1)
+  defp statement({:if, _, [condition, blocks]} = statement, allocation, counter) do
+    bit = key!(condition, statement)
+    body = if_body!(blocks, statement)
+    done = :"potion_end_#{counter}"
+    {inner, counter} = block(body, allocation, counter + 1)
 
     elements =
       [
         {:ld, :a, {:mem, Runtime.pad()}},
         {:bit, bit, :a},
-        {:jr, :z, {:label, fin}}
-      ] ++ interieur ++ [{:label, fin}]
+        {:jr, :z, {:label, done}}
+      ] ++ inner ++ [{:label, done}]
 
-    {elements, compteur}
+    {elements, counter}
   end
 
-  # ── Une entrée d'OAM ────────────────────────────────────────────────────────
+  # ── An OAM entry ────────────────────────────────────────────────────────────
 
-  defp enonce({:sprite, _, [indice, champs]} = enonce, allocation, compteur) do
-    base = Runtime.oam_mirror() + 4 * entree!(indice, enonce)
-    {x, y, tuile} = champs!(champs, enonce)
+  defp statement({:sprite, _, [index, fields]} = statement, allocation, counter) do
+    base = Runtime.oam_mirror() + 4 * entry!(index, statement)
+    {x, y, tile} = fields!(fields, statement)
 
     elements =
-      champ(y, 16, base, allocation, enonce) ++
-        champ(x, 8, base + 1, allocation, enonce) ++
-        champ(tuile, 0, base + 2, allocation, enonce) ++
+      field(y, 16, base, allocation, statement) ++
+        field(x, 8, base + 1, allocation, statement) ++
+        field(tile, 0, base + 2, allocation, statement) ++
         [{:xor, :a, :a}, {:ld, {:mem, base + 3}, :a}]
 
-    {elements, compteur}
+    {elements, counter}
   end
 
-  defp enonce(autre, _allocation, _compteur), do: refus!(autre)
+  defp statement(other, _allocation, _counter), do: reject!(other)
 
-  # Un octet d'OAM : la valeur, décalée du décalage matériel. Sur un littéral le
-  # décalage est fait ici — le processeur n'a pas à additionner ce que le
-  # compilateur sait déjà. Sur une variable il coûte deux octets, et il enroule
-  # comme le reste.
-  defp champ(source, decalage, adresse, allocation, enonce) do
-    charge = valeur_de_sprite(source, decalage, allocation, enonce)
-    charge ++ [{:ld, {:mem, adresse}, :a}]
+  # One byte of OAM: the value, shifted by the hardware offset. On a literal the
+  # shift happens here — the processor need not add what the compiler already
+  # knows. On a variable it costs two bytes, and it wraps like everything else.
+  defp field(source, offset, address, allocation, statement) do
+    load = sprite_value(source, offset, allocation, statement)
+    load ++ [{:ld, {:mem, address}, :a}]
   end
 
-  defp valeur_de_sprite(litteral, decalage, _allocation, _enonce) when is_integer(litteral) do
-    [{:ld, :a, Integer.mod(litteral + decalage, 0x100)}]
+  defp sprite_value(literal, offset, _allocation, _statement) when is_integer(literal) do
+    [{:ld, :a, Integer.mod(literal + offset, 0x100)}]
   end
 
-  defp valeur_de_sprite({nom, _, contexte}, decalage, allocation, enonce)
-       when is_atom(nom) and is_atom(contexte) do
-    charge = [{:ld, :a, {:mem, cellule!(nom, allocation, enonce)}}]
-    if decalage == 0, do: charge, else: charge ++ [{:add, :a, decalage}]
+  defp sprite_value({name, _, context}, offset, allocation, statement)
+       when is_atom(name) and is_atom(context) do
+    load = [{:ld, :a, {:mem, cell!(name, allocation, statement)}}]
+    if offset == 0, do: load, else: load ++ [{:add, :a, offset}]
   end
 
-  defp valeur_de_sprite(autre, _decalage, _allocation, enonce) do
+  defp sprite_value(other, _offset, _allocation, statement) do
     raise CompileError, """
-    champ de `sprite` hors du sous-ensemble du v0 :
+    `sprite` field outside the v0 subset:
 
-        #{Macro.to_string(autre)}
+        #{Macro.to_string(other)}
 
-    AST refusé : #{inspect(autre)}
+    Rejected AST: #{inspect(other)}
 
-    Dans #{souligne(enonce)}, `x:`, `y:` et `tile:` prennent une variable \
-    déclarée ou un littéral de 0 à 255. Un calcul se fait avant, dans une \
-    variable.
+    In #{one_line(statement)}, `x:`, `y:` and `tile:` take a declared variable \
+    or a literal from 0 to 255. A computation happens before, in a variable.
     """
   end
 
-  # ── Le côté droit d'une affectation ─────────────────────────────────────────
+  # ── The right-hand side of an assignment ────────────────────────────────────
 
-  defp charge(litteral, _allocation, enonce) when is_integer(litteral) do
-    [{:ld, :a, octet!(litteral, enonce)}]
+  defp load(literal, _allocation, statement) when is_integer(literal) do
+    [{:ld, :a, byte!(literal, statement)}]
   end
 
-  defp charge({nom, _, contexte}, allocation, enonce) when is_atom(nom) and is_atom(contexte) do
-    [{:ld, :a, {:mem, cellule!(nom, allocation, enonce)}}]
+  defp load({name, _, context}, allocation, statement)
+       when is_atom(name) and is_atom(context) do
+    [{:ld, :a, {:mem, cell!(name, allocation, statement)}}]
   end
 
-  defp charge({operateur, _, [gauche, droite]}, allocation, enonce)
-       when operateur in [:+, :-] do
-    charge(gauche, allocation, enonce) ++
-      [{arithmetique(operateur), :a, octet!(droite, enonce)}]
+  defp load({operator, _, [left, right]}, allocation, statement)
+       when operator in [:+, :-] do
+    load(left, allocation, statement) ++
+      [{arithmetic(operator), :a, byte!(right, statement)}]
   end
 
-  defp charge(autre, _allocation, _enonce), do: refus!(autre)
+  defp load(other, _allocation, _statement), do: reject!(other)
 
-  defp arithmetique(:+), do: :add
-  defp arithmetique(:-), do: :sub
+  defp arithmetic(:+), do: :add
+  defp arithmetic(:-), do: :sub
 
-  # Le terme de droite d'un `+` ou d'un `-` : un littéral, jamais une variable.
-  # Une addition mémoire-à-mémoire demanderait de garder un opérande quelque
-  # part pendant qu'on charge l'autre, donc une politique de registres, donc un
-  # compilateur d'un autre calibre.
-  defp octet!(valeur, _enonce) when is_integer(valeur) and valeur in 0..255, do: valeur
+  # The right-hand term of a `+` or a `-`: a literal, never a variable. A
+  # memory-to-memory addition would require keeping one operand somewhere while
+  # the other is loaded, hence a register policy, hence a compiler of another
+  # calibre.
+  defp byte!(value, _statement) when is_integer(value) and value in 0..255, do: value
 
-  defp octet!(autre, enonce) do
+  defp byte!(other, statement) do
     raise CompileError, """
-    opérande hors du sous-ensemble du v0 :
+    operand outside the v0 subset:
 
-        #{Macro.to_string(autre)}
+        #{Macro.to_string(other)}
 
-    AST refusé : #{inspect(autre)}
+    Rejected AST: #{inspect(other)}
 
-    Dans #{souligne(enonce)}, seul un littéral entier de 0 à 255 est accepté à \
-    cette place. Le v0 compile `x = 5`, `x = y`, `x = x + 1` et `x = y - 3` — \
-    une variable, un signe, une constante.
+    In #{one_line(statement)}, only an integer literal from 0 to 255 is accepted \
+    in this place. The v0 compiles `x = 5`, `x = y`, `x = x + 1` and `x = y - 3` \
+    — a variable, a sign, a constant.
     """
   end
 
-  # ── La cellule d'une variable ───────────────────────────────────────────────
+  # ── The cell of a variable ──────────────────────────────────────────────────
 
-  defp cellule!({nom, _, contexte}, allocation, enonce)
-       when is_atom(nom) and is_atom(contexte) do
-    cellule!(nom, allocation, enonce)
+  defp cell!({name, _, context}, allocation, statement)
+       when is_atom(name) and is_atom(context) do
+    cell!(name, allocation, statement)
   end
 
-  defp cellule!(nom, allocation, enonce) when is_atom(nom) do
+  defp cell!(name, allocation, statement) when is_atom(name) do
     case allocation.cells do
-      %{^nom => adresse} ->
-        adresse
+      %{^name => address} ->
+        address
 
       _ ->
         raise CompileError, """
-        variable non déclarée : #{inspect(nom)}, dans #{souligne(enonce)}
+        undeclared variable: #{inspect(name)}, in #{one_line(statement)}
 
-        #{declarees(allocation)}
+        #{declared(allocation)}
 
-        Une variable Potion n'apparaît pas en s'écrivant : elle est une cellule \
-        de WRAM, et c'est `variables` qui décide où. Ajoutez-la :
+        A Potion variable does not spring into being by being written: it is a \
+        cell of WRAM, and it is `variables` that decides where. Add it:
 
-            variables #{nom}: 0
+            variables #{name}: 0
         """
     end
   end
 
-  defp cellule!(autre, _allocation, enonce) do
+  defp cell!(other, _allocation, statement) do
     raise CompileError, """
-    cible d'affectation qui n'est pas une variable :
+    assignment target that is not a variable:
 
-        #{Macro.to_string(autre)}
+        #{Macro.to_string(other)}
 
-    AST refusé : #{inspect(autre)}
+    Rejected AST: #{inspect(other)}
 
-    Dans #{souligne(enonce)}, le côté gauche d'un `=` doit être le nom d'une \
-    variable déclarée par `variables`. Le v0 n'a ni filtrage, ni structure, ni \
-    liaison — un `=` est une écriture dans une cellule.
+    In #{one_line(statement)}, the left-hand side of an `=` must be the name of a \
+    variable declared by `variables`. The v0 has no pattern matching, no \
+    structures and no bindings — an `=` is a write into a cell.
     """
   end
 
-  defp declarees(%{order: []}), do: "Ce jeu ne déclare aucune variable."
+  defp declared(%{order: []}), do: "This game declares no variables."
 
-  defp declarees(%{order: noms, cells: cellules}) do
-    "Déclarées : " <>
-      Enum.map_join(noms, ", ", fn nom -> "#{inspect(nom)} (0x#{hexa(cellules[nom])})" end)
+  defp declared(%{order: names, cells: cells}) do
+    "Declared: " <>
+      Enum.map_join(names, ", ", fn name -> "#{inspect(name)} (0x#{hex(cells[name])})" end)
   end
 
-  # ── La touche d'un `if` ─────────────────────────────────────────────────────
+  # ── The key of an `if` ──────────────────────────────────────────────────────
 
-  defp touche!({:pressed?, _, [touche]}, enonce) when is_atom(touche) do
-    case Keyword.fetch(@touches, touche) do
+  defp key!({:pressed?, _, [key]}, statement) when is_atom(key) do
+    case Keyword.fetch(@keys, key) do
       {:ok, bit} ->
         bit
 
       :error ->
         raise CompileError, """
-        touche inconnue : #{inspect(touche)}, dans #{souligne(enonce)}
+        unknown key: #{inspect(key)}, in #{one_line(statement)}
 
-        Le pad d'une Game Boy en a huit, et le noyau les range dans un octet :
-        #{Enum.map_join(@touches, "\n", fn {nom, bit} -> "  #{inspect(nom)} — bit #{bit}" end)}
+        A Game Boy pad has eight of them, and the kernel files them into a byte:
+        #{Enum.map_join(@keys, "\n", fn {name, bit} -> "  #{inspect(name)} — bit #{bit}" end)}
         """
     end
   end
 
-  defp touche!(condition, enonce) do
+  defp key!(condition, statement) do
     raise CompileError, """
-    condition hors du sous-ensemble du v0 :
+    condition outside the v0 subset:
 
         #{Macro.to_string(condition)}
 
-    AST refusé : #{inspect(condition)}
+    Rejected AST: #{inspect(condition)}
 
-    Dans #{souligne(enonce)}, `if` ne teste qu'une touche du pad, sous la forme \
-    `if pressed?(:right), do: ...`. Le v0 n'a pas de comparaison ; le pad est le \
-    seul monde extérieur qu'un acteur puisse interroger.
+    In #{one_line(statement)}, `if` only tests a pad key, in the form \
+    `if pressed?(:right), do: ...`. The v0 has no comparison; the pad is the \
+    only outside world an actor can question.
     """
   end
 
-  defp corps_du_si!(blocs, enonce) do
-    case blocs do
-      [do: corps] ->
-        corps
+  defp if_body!(blocks, statement) do
+    case blocks do
+      [do: body] ->
+        body
 
-      autres when is_list(autres) ->
+      others when is_list(others) ->
         raise CompileError, """
-        branche que le v0 ne compile pas : \
-        #{Enum.map_join(Keyword.keys(autres) -- [:do], ", ", &inspect/1)}
+        branch the v0 does not compile: \
+        #{Enum.map_join(Keyword.keys(others) -- [:do], ", ", &inspect/1)}
 
-            #{souligne(enonce)}
+            #{one_line(statement)}
 
-        Un `if` du v0 n'a qu'un `do:` — pas de `else:`. Le contraire \
-        s'écrit avec un second `if` sur une autre touche, en attendant que le \
-        langage sache sauter par-dessus deux blocs.
+        A v0 `if` has only a `do:` — no `else:`. The opposite case is written \
+        with a second `if` on another key, until the language knows how to jump \
+        over two blocks.
         """
 
-      autre ->
+      other ->
         raise CompileError, """
-        `if` mal formé :
+        malformed `if`:
 
-            #{Macro.to_string(autre)}
+            #{Macro.to_string(other)}
 
-        AST refusé : #{inspect(autre)}
+        Rejected AST: #{inspect(other)}
 
-        La forme est `if pressed?(:right), do: x = x + 1`, ou la même avec un \
-        bloc `do ... end`.
+        The form is `if pressed?(:right), do: x = x + 1`, or the same with a \
+        `do ... end` block.
         """
     end
   end
 
-  # ── L'entrée d'OAM et ses champs ────────────────────────────────────────────
+  # ── The OAM entry and its fields ────────────────────────────────────────────
 
-  defp entree!(indice, _enonce) when is_integer(indice) and indice in 0..(@entrees_oam - 1)//1 do
-    indice
+  defp entry!(index, _statement)
+       when is_integer(index) and index in 0..(@oam_entries - 1)//1 do
+    index
   end
 
-  defp entree!(indice, enonce) when is_integer(indice) do
+  defp entry!(index, statement) when is_integer(index) do
     raise CompileError, """
-    entrée d'OAM hors plage : #{indice}, dans #{souligne(enonce)}
+    OAM entry out of range: #{index}, in #{one_line(statement)}
 
-    L'OAM d'une Game Boy compte #{@entrees_oam} entrées, numérotées de 0 à \
-    #{@entrees_oam - 1} — quatre octets chacune, de \
-    0x#{hexa(Runtime.oam_mirror())} à \
-    0x#{hexa(Runtime.oam_mirror() + 4 * @entrees_oam - 1)} dans le miroir du noyau.
+    A Game Boy's OAM holds #{@oam_entries} entries, numbered 0 to \
+    #{@oam_entries - 1} — four bytes each, from \
+    0x#{hex(Runtime.oam_mirror())} to \
+    0x#{hex(Runtime.oam_mirror() + 4 * @oam_entries - 1)} in the kernel's mirror.
 
-    L'entrée #{indice} tomberait hors de cette plage, et le DMA ne la publierait \
-    donc jamais : elle écraserait les cellules du noyau — la cellule du pad est \
-    à 0x#{hexa(Runtime.pad())} — ou l'état de l'acteur.
+    Entry #{index} would land outside that range, so the DMA would never publish \
+    it: it would overwrite the kernel's cells — the pad cell is at \
+    0x#{hex(Runtime.pad())} — or the actor's state.
     """
   end
 
-  defp entree!(autre, enonce) do
+  defp entry!(other, statement) do
     raise CompileError, """
-    numéro de sprite qui n'est pas un littéral :
+    sprite number that is not a literal:
 
-        #{Macro.to_string(autre)}
+        #{Macro.to_string(other)}
 
-    AST refusé : #{inspect(autre)}
+    Rejected AST: #{inspect(other)}
 
-    Dans #{souligne(enonce)}, le premier argument de `sprite` doit être un \
-    entier écrit sur place, de 0 à #{@entrees_oam - 1} : c'est lui qui donne \
-    l'adresse de l'entrée dans le miroir, et cette adresse est décidée à la \
-    compilation. Un sprite choisi à l'exécution demanderait une indexation que \
-    le v0 n'a pas.
+    In #{one_line(statement)}, the first argument of `sprite` must be an integer \
+    written on the spot, from 0 to #{@oam_entries - 1}: it is what gives the \
+    address of the entry in the mirror, and that address is decided at compile \
+    time. A sprite chosen at run time would require an indexing the v0 does not \
+    have.
     """
   end
 
-  @champs [:x, :y, :tile]
+  @fields [:x, :y, :tile]
 
-  defp champs!(champs, enonce) when is_list(champs) do
-    with true <- Keyword.keyword?(champs),
-         [] <- Enum.sort(Keyword.keys(champs)) -- Enum.sort(@champs),
-         [] <- Enum.sort(@champs) -- Enum.sort(Keyword.keys(champs)),
-         [] <- Keyword.keys(champs) -- Enum.uniq(Keyword.keys(champs)) do
-      {champs[:x], champs[:y], champs[:tile]}
+  defp fields!(fields, statement) when is_list(fields) do
+    with true <- Keyword.keyword?(fields),
+         [] <- Enum.sort(Keyword.keys(fields)) -- Enum.sort(@fields),
+         [] <- Enum.sort(@fields) -- Enum.sort(Keyword.keys(fields)),
+         [] <- Keyword.keys(fields) -- Enum.uniq(Keyword.keys(fields)) do
+      {fields[:x], fields[:y], fields[:tile]}
     else
-      _ -> champs_refuses!(champs, enonce)
+      _ -> fields_rejected!(fields, statement)
     end
   end
 
-  defp champs!(champs, enonce), do: champs_refuses!(champs, enonce)
+  defp fields!(fields, statement), do: fields_rejected!(fields, statement)
 
-  defp champs_refuses!(champs, enonce) do
+  defp fields_rejected!(fields, statement) do
     raise CompileError, """
-    champs de `sprite` mal formés :
+    malformed `sprite` fields:
 
-        #{Macro.to_string(champs)}
+        #{Macro.to_string(fields)}
 
-    AST refusé : #{inspect(champs)}
+    Rejected AST: #{inspect(fields)}
 
-    Dans #{souligne(enonce)}, `sprite` attend exactement `x:`, `y:` et `tile:` \
-    — chacun une fois. Les attributs sont mis à zéro par le compilateur : le v0 \
-    n'a qu'une palette d'objets, et ni miroir ni priorité.
+    In #{one_line(statement)}, `sprite` expects exactly `x:`, `y:` and `tile:` \
+    — each once. The attributes are zeroed by the compiler: the v0 has only one \
+    object palette, and neither mirroring nor priority.
     """
   end
 
-  # ── Le refus général ────────────────────────────────────────────────────────
+  # ── The general refusal ─────────────────────────────────────────────────────
 
-  defp refus!(enonce) do
+  defp reject!(statement) do
     raise CompileError, """
-    énoncé hors du sous-ensemble du v0 :
+    statement outside the v0 subset:
 
-        #{Macro.to_string(enonce)}
+        #{Macro.to_string(statement)}
 
-    AST refusé : #{inspect(enonce)}
+    Rejected AST: #{inspect(statement)}
 
-    Dans `every_frame`, le v0 compile exactement ceci :
+    Inside `every_frame`, the v0 compiles exactly this:
 
-        x = 5              une constante dans une cellule
-        x = y              une cellule dans une autre
-        x = x + 1          arithmétique 8 bits qui enroule
-        x = y - 3          la même, dans l'autre sens
+        x = 5              a constant into a cell
+        x = y              one cell into another
+        x = x + 1          8-bit arithmetic, which wraps
+        x = y - 3          the same, the other way
 
         if pressed?(:right), do: x = x + 1
         if pressed?(:a) do
@@ -565,23 +561,22 @@ defmodule Potion.Compiler do
 
         sprite(0, x: x, y: y, tile: 0)
 
-    La surface est de l'Elixir ; la sémantique est celle de la console. Ce qui \
-    ne se traduit pas en quelques instructions SM83 ne se compile pas — pas \
-    encore.
+    The surface is Elixir; the semantics are the console's. What does not \
+    translate into a handful of SM83 instructions does not compile — not yet.
     """
   end
 
-  # L'énoncé fautif, ramené à une ligne : dans un `if` déplié sur cinq lignes,
-  # le message tiendrait la moitié de l'écran.
-  defp souligne(enonce) do
-    enonce
+  # The offending statement, brought back to a single line: in an `if` unfolded
+  # over five lines, the message would take up half the screen.
+  defp one_line(statement) do
+    statement
     |> Macro.to_string()
     |> String.split("\n")
     |> case do
-      [seul] -> "`#{seul}`"
-      [premiere | _] -> "`#{premiere} …`"
+      [single] -> "`#{single}`"
+      [first | _] -> "`#{first} …`"
     end
   end
 
-  defp hexa(valeur), do: valeur |> Integer.to_string(16) |> String.pad_leading(4, "0")
+  defp hex(value), do: value |> Integer.to_string(16) |> String.pad_leading(4, "0")
 end

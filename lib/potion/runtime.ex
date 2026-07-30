@@ -1,87 +1,88 @@
 defmodule Potion.Runtime do
   @moduledoc """
-  Le runtime SM83 de Potion, écrit comme donnée.
+  Potion's SM83 runtime, written as data.
 
-  Un jeu Potion n'est pas un programme qui s'exécuterait tout seul : c'est un
-  *acteur* — quelques dizaines d'octets qui lisent un pad et déplacent un
-  sprite. Tout ce qui sépare ces octets d'une console qui affiche quelque chose
-  est ici : allumer l'écran, tenir l'OAM, battre au rythme du vblank, appeler
-  l'acteur une fois par frame.
+  A Potion game is not a program that would run on its own: it is an *actor* —
+  a few dozen bytes that read a pad and move a sprite. Everything that separates
+  those bytes from a console displaying something is here: turning the screen on,
+  keeping the OAM, beating to the rhythm of the vblank, calling the actor once
+  per frame.
 
-  Ce module n'émet aucun octet. Il retourne des **fragments de programme** au
-  format de `Potion.Assembler` — des listes de tuples. Le noyau est donc une
-  valeur, qu'on peut concaténer, inspecter, découper, et dont une partie se
-  fait assembler séparément pour être recopiée ailleurs en mémoire (la routine
-  DMA, plus bas). Un noyau écrit en octets à la main n'aurait aucune de ces
-  propriétés.
+  This module emits no bytes. It returns **program fragments** in the
+  `Potion.Assembler` format — lists of tuples. The kernel is therefore a value,
+  which can be concatenated, inspected, sliced, and part of which gets assembled
+  separately to be copied elsewhere in memory (the DMA routine, further down). A
+  kernel written out as bytes by hand would have none of these properties.
 
-  ## La carte mémoire
+  ## The memory map
 
-      0xC000-0xC09F   l'OAM miroir — les 40 entrées de sprites, en WRAM
-      0xC0A0          l'état du pad, recomposé chaque frame
-      0xC0A1          le drapeau « frame prête »
-      0xC0A2-0xC0FF   réservé au noyau
-      0xC100-0xC1FF   l'état de l'acteur — effacé au démarrage, libre ensuite
-      0xDFFF          le sommet de la pile
-      0xFF80-0xFF89   la routine DMA, recopiée en HRAM par l'init
+      0xC000-0xC09F   the OAM mirror — the 40 sprite entries, in WRAM
+      0xC0A0          the pad state, recomposed each frame
+      0xC0A1          the "frame ready" flag
+      0xC0A2-0xC0FF   reserved for the kernel
+      0xC100-0xC1FF   the actor's state — cleared at startup, free afterwards
+      0xDFFF          the top of the stack
+      0xFF80-0xFF89   the DMA routine, copied into HRAM by the init
 
-  L'acteur écrit ses sprites dans l'OAM miroir, jamais dans l'OAM réelle :
-  entrée 0 en 0xC000 (Y+16), 0xC001 (X+8), 0xC002 (tuile), 0xC003 (attributs).
-  Le décalage de 16 et de 8 est celui du matériel — l'OAM range la position du
-  *coin bas-droit étendu*, ce qui permet à un sprite de sortir par le haut ou
-  par la gauche de l'écran. Le DMA du vblank suivant publie le tout d'un bloc.
+  The actor writes its sprites into the OAM mirror, never into the real OAM:
+  entry 0 at 0xC000 (Y+16), 0xC001 (X+8), 0xC002 (tile), 0xC003 (attributes).
+  The offsets of 16 and 8 are the hardware's own — the OAM stores the position of
+  the *extended bottom-right corner*, which lets a sprite leave the screen
+  through the top or the left. The next vblank's DMA publishes the whole lot in
+  one block.
 
-  ## Pourquoi un miroir, et pourquoi le DMA depuis la HRAM
+  ## Why a mirror, and why the DMA from HRAM
 
-  L'OAM n'est lisible par le CPU que pendant le vblank ; en dehors, le PPU la
-  balaye et le bus est à lui. Un jeu qui écrirait ses sprites au fil de sa
-  logique les écrirait donc dans le vide une frame sur deux. D'où le miroir en
-  WRAM, accessible en permanence, et la publication par un transfert unique
-  quand la dalle se tait.
+  The OAM is only readable by the CPU during the vblank; outside it, the PPU
+  scans it and the bus belongs to the PPU. A game writing its sprites as its
+  logic unfolds would therefore be writing into the void one frame out of two.
+  Hence the mirror in WRAM, accessible at all times, and publication by a single
+  transfer once the panel falls silent.
 
-  Ce transfert est un DMA matériel : le jeu écrit la page source dans 0xFF46
-  et le contrôleur recopie 160 octets tout seul. Pendant ces 160 cycles, le
-  CPU n'a plus accès au bus principal — ni ROM, ni WRAM. La seule mémoire qui
-  lui reste est la HRAM, ces 127 octets câblés dans le processeur même. Un
-  `CALL` vers une routine restée en ROM lirait donc du néant à l'instruction
-  suivante. Le noyau recopie donc la routine en 0xFF80 au démarrage et l'y
-  appelle : c'est la contrainte matérielle la plus contre-intuitive de la
-  console, et le premier endroit où une ROM Potion doit ressembler à une vraie.
+  That transfer is a hardware DMA: the game writes the source page into 0xFF46
+  and the controller copies 160 bytes on its own. During those 160 cycles, the
+  CPU no longer has access to the main bus — neither ROM nor WRAM. The only
+  memory left to it is HRAM, those 127 bytes wired into the processor itself. A
+  `CALL` to a routine still sitting in ROM would therefore read nothingness on
+  the very next instruction. So the kernel copies the routine to 0xFF80 at
+  startup and calls it there: it is the most counter-intuitive hardware
+  constraint of the console, and the first place where a Potion ROM has to look
+  like a real one.
 
-  Notre émulateur, lui, exécute le DMA d'un coup à l'écriture de 0xFF46 et
-  laisserait passer une routine restée en ROM. On écrit quand même la vraie :
-  une ROM qui ne tournerait que chez nous ne prouverait rien.
+  Our emulator, for its part, executes the DMA in one go when 0xFF46 is written,
+  and would let a routine left in ROM slip through. We write the real one
+  anyway: a ROM that only ran on our machine would prove nothing.
 
-  ## Le battement
+  ## The heartbeat
 
-  L'init arme l'interruption vblank, et *seulement* elle (IE = 0x01). La
-  boucle principale est alors un `HALT` : le processeur dort, le vblank le
-  réveille, le handler lève le drapeau, la boucle lit le pad, appelle l'acteur,
-  et se rendort. C'est l'ordonnanceur v0 — un seul slot, l'acteur unique — et
-  c'est aussi la forme que garderont les suivants : ce qui change alors est le
-  contenu du slot, pas le battement.
+  The init arms the vblank interrupt, and *only* that one (IE = 0x01). The main
+  loop is then a `HALT`: the processor sleeps, the vblank wakes it, the handler
+  raises the flag, the loop reads the pad, calls the actor, and goes back to
+  sleep. That is the v0 scheduler — a single slot, the single actor — and it is
+  also the shape the later ones will keep: what changes then is the contents of
+  the slot, not the beat.
 
-  Le drapeau n'est pas une décoration. `HALT` se réveille sur *toute*
-  interruption servie, et il en viendra d'autres (le timer, le joypad, STAT) le
-  jour où le noyau les armera ; le drapeau distingue « c'est une nouvelle
-  frame » de « on m'a réveillé ». Sans lui, l'acteur tournerait à un rythme
-  inconnu de lui.
+  The flag is not decoration. `HALT` wakes on *any* serviced interrupt, and
+  others will come (the timer, the joypad, STAT) the day the kernel arms them;
+  the flag tells "this is a new frame" apart from "someone woke me". Without it,
+  the actor would run at a rhythm unknown to it.
 
-  ## Les deux tuiles du v0
+  ## The v0's two tiles
 
-  La tuile 0 est un carré plein — le sprite. La tuile 1 est vide, et l'init
-  remplit toute la carte de fond (0x9800-0x9BFF) de tuile 1.
+  Tile 0 is a solid square — the sprite. Tile 1 is empty, and the init fills the
+  whole background map (0x9800-0x9BFF) with tile 1.
 
-  Cette carte est le seul écart avec un noyau strictement minimal, et il est
-  forcé : la VRAM effacée met la carte de fond à zéro, donc à la tuile 0 — le
-  carré plein. Le fond serait alors un aplat noir, et le sprite invisible
-  dessus. Éteindre le fond (LCDC bit 0) serait l'autre issue, mais un jeu sans
-  couche de fond n'est pas une Game Boy ; on remplit.
+  That map is the only departure from a strictly minimal kernel, and it is
+  forced: a cleared VRAM leaves the background map at zero, hence at tile 0 — the
+  solid square. The background would then be a black expanse, with the sprite
+  invisible on top of it. Turning the background off (LCDC bit 0) would be the
+  other way out, but a game without a background layer is not a Game Boy; so we
+  fill.
   """
 
   alias Potion.Assembler
 
-  # ── Les registres touchés ───────────────────────────────────────────────────
+  # ── The registers we touch ──────────────────────────────────────────────────
 
   @p1 0x00
   @div 0x04
@@ -95,154 +96,155 @@ defmodule Potion.Runtime do
   @irq_if 0x0F
   @irq_ie 0xFF
 
-  # ── La carte mémoire ────────────────────────────────────────────────────────
+  # ── The memory map ──────────────────────────────────────────────────────────
 
   @oam_mirror 0xC000
   @pad 0xC0A0
-  @drapeau 0xC0A1
-  @etat 0xC100
+  @flag 0xC0A1
+  @state 0xC100
   @hram_dma 0xFF80
-  @pile 0xDFFF
+  @stack 0xDFFF
 
-  # La VRAM entière, la carte de fond, et la page de WRAM que l'init efface :
-  # l'OAM miroir, les cellules du noyau, et l'état de l'acteur.
+  # The whole VRAM, the background map, and the page of WRAM the init clears:
+  # the OAM mirror, the kernel's cells, and the actor's state.
   @vram 0x8000
-  @vram_octets 0x2000
-  @fond 0x9800
-  @wram_efface 0x0200
+  @vram_bytes 0x2000
+  @background 0x9800
+  @wram_cleared 0x0200
 
-  # LCD allumé, données de tuiles en 0x8000 (indices non signés), OBJ et BG
-  # allumés. 0x93 est ce que la quasi-totalité des jeux DMG écrit.
-  @lcdc_marche 0x93
+  # LCD on, tile data at 0x8000 (unsigned indices), OBJ and BG on. 0x93 is what
+  # very nearly every DMG game writes.
+  @lcdc_on 0x93
 
-  # La palette de l'identité : couleur 0 → teinte 0, 1 → 1, 2 → 2, 3 → 3.
+  # The identity palette: colour 0 → shade 0, 1 → 1, 2 → 2, 3 → 3.
   @palette 0xE4
 
   @doc """
-  Le programme complet : l'init, le noyau, puis le code de l'acteur.
+  The complete program: the init, the kernel, then the actor's code.
 
-  Prêt pour `Potion.ROM.build(programme, vblank: :vblank)` — sans cette
-  option le vecteur 0x40 reste des zéros et la première interruption servie
-  exécuterait du remplissage.
+  Ready for `Potion.ROM.build(program, vblank: :vblank)` — without that option
+  vector 0x40 stays zeros and the first serviced interrupt would execute
+  padding.
 
-  Le fragment `acteur` n'a pas à se nommer : le noyau pose l'étiquette
-  `:actor` juste avant lui. Il doit en revanche finir par un `{:ret}` — c'est
-  un `CALL` qui l'atteint, et un acteur qui déborde de son fragment continue
-  dans les octets suivants, c'est-à-dire dans le remplissage de la cartouche.
-  Le contrôle est fait ici, à l'assemblage, parce qu'à l'exécution le symptôme
-  serait un opcode illégal à des milliers de cycles de sa cause.
+  The `actor` fragment does not have to name itself: the kernel places the
+  `:actor` label right before it. It must, however, end with a `{:ret}` — it is
+  a `CALL` that reaches it, and an actor overflowing its fragment carries on
+  into the bytes that follow, that is, into the cartridge's padding. The check
+  happens here, at assembly time, because at run time the symptom would be an
+  illegal opcode thousands of cycles away from its cause.
   """
   @spec program([Assembler.element()]) :: [Assembler.element()]
-  def program(acteur) when is_list(acteur) do
-    verifie_acteur!(acteur)
+  def program(actor) when is_list(actor) do
+    check_actor!(actor)
 
     init() ++
       vblank() ++
       read_pad() ++
-      boucle() ++
+      main_loop() ++
       [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
-      [{:label, :actor}] ++ acteur
+      [{:label, :actor}] ++ actor
   end
 
-  defp verifie_acteur!(acteur) do
-    case List.last(acteur) do
+  defp check_actor!(actor) do
+    case List.last(actor) do
       {:ret} ->
         :ok
 
-      autre ->
+      other ->
         raise ArgumentError, """
-        l'acteur ne finit pas par un RET : #{inspect(autre)}
+        the actor does not end with a RET: #{inspect(other)}
 
-        Le noyau atteint l'acteur par un CALL, une fois par frame. Sans RET \
-        final, l'exécution continue dans ce qui suit le fragment — le \
-        remplissage de la cartouche, puis la VRAM.
+        The kernel reaches the actor through a CALL, once per frame. Without a \
+        closing RET, execution carries on into whatever follows the fragment — \
+        the cartridge's padding, then the VRAM.
         """
     end
   end
 
   @doc """
-  L'adresse de l'OAM miroir — l'entrée 0 commence là.
+  The address of the OAM mirror — entry 0 starts there.
   """
   @spec oam_mirror() :: 0xC000
   def oam_mirror, do: @oam_mirror
 
-  @doc "La cellule d'état du pad, recomposée à chaque frame par le noyau."
+  @doc "The pad state cell, recomposed on every frame by the kernel."
   @spec pad() :: 0xC0A0
   def pad, do: @pad
 
-  @doc "Le drapeau « frame prête » : levé par le handler, consommé par la boucle."
+  @doc "The \"frame ready\" flag: raised by the handler, consumed by the loop."
   @spec frame_flag() :: 0xC0A1
-  def frame_flag, do: @drapeau
+  def frame_flag, do: @flag
 
-  @doc "La première adresse laissée à l'acteur."
+  @doc "The first address left to the actor."
   @spec actor_state() :: 0xC100
-  def actor_state, do: @etat
+  def actor_state, do: @state
 
-  @doc "L'adresse de la routine DMA en HRAM."
+  @doc "The address of the DMA routine in HRAM."
   @spec hram_dma() :: 0xFF80
   def hram_dma, do: @hram_dma
 
-  # ══ L'init ═══════════════════════════════════════════════════════════════════
+  # ══ The init ═════════════════════════════════════════════════════════════════
 
   @doc """
-  Le démarrage : de l'état laissé par la ROM de boot à une machine qui bat.
+  Startup: from the state the boot ROM leaves behind to a machine with a pulse.
 
-  Dans l'ordre, et l'ordre compte : couper les interruptions, poser la pile,
-  attendre le vblank *avant* de toucher au LCD (l'éteindre en pleine ligne
-  visible abîme les vraies dalles), effacer la VRAM que rien n'a initialisée,
-  installer les tuiles et la carte de fond, recopier le DMA en HRAM, poser les
-  palettes, et seulement alors rallumer l'écran et ouvrir les interruptions.
+  In order, and the order matters: cut the interrupts, place the stack, wait for
+  the vblank *before* touching the LCD (turning it off mid visible line damages
+  real panels), clear the VRAM that nothing has initialised, install the tiles
+  and the background map, copy the DMA into HRAM, set the palettes, and only
+  then turn the screen back on and open the interrupts.
   """
   @spec init() :: [Assembler.element()]
   def init do
     [
       {:label, :init},
       {:di},
-      {:ld, :sp, @pile},
-      # DIV remis à zéro : le seul compteur qui tourne depuis le boot, et le
-      # seul grain d'aléa dont un jeu v0 disposerait. Autant partir d'un état
-      # connu — une frame dorée ne se compare pas à une machine qui a démarré
-      # à un autre instant.
+      {:ld, :sp, @stack},
+      # DIV reset to zero: the only counter running since the boot, and the only
+      # grain of randomness a v0 game would have. Might as well start from a
+      # known state — a golden frame cannot be compared against a machine that
+      # started at some other instant.
       {:xor, :a, :a},
       {:ldh, {:high, @div}, :a}
     ] ++
-      attente_vblank() ++
+      wait_vblank() ++
       [
-        # LCD éteint : le PPU lâche le bus, la VRAM devient écrivable d'un
-        # bout à l'autre. Le même zéro sert à recentrer le fond — SCX et SCY
-        # sortent du boot à zéro sur DMG, mais rien ne l'y oblige.
+        # LCD off: the PPU lets go of the bus, the VRAM becomes writable from
+        # one end to the other. The same zero serves to recentre the background
+        # — SCX and SCY come out of the boot at zero on DMG, but nothing
+        # requires them to.
         {:xor, :a, :a},
         {:ldh, {:high, @lcdc}, :a},
         {:ldh, {:high, @scy}, :a},
         {:ldh, {:high, @scx}, :a}
       ] ++
-      efface(@vram, @vram_octets, :clear_vram) ++
-      efface(@oam_mirror, @wram_efface, :clear_wram) ++
-      carte_de_fond() ++
-      tuiles() ++
-      copie_dma() ++
+      clear(@vram, @vram_bytes, :clear_vram) ++
+      clear(@oam_mirror, @wram_cleared, :clear_wram) ++
+      bg_map() ++
+      tiles() ++
+      copy_dma() ++
       [
         {:ld, :a, @palette},
         {:ldh, {:high, @bgp}, :a},
         {:ldh, {:high, @obp0}, :a},
-        # IF nettoyé avant d'ouvrir : l'attente de vblank ci-dessus a laissé
-        # le bit 0 levé. Sans ce coup de balai, le premier EI servirait une
-        # frame fantôme et l'acteur tournerait deux fois pour une seule dalle.
+        # IF wiped before opening up: the vblank wait above left bit 0 raised.
+        # Without that sweep, the first EI would service a ghost frame and the
+        # actor would run twice for a single panel.
         {:xor, :a, :a},
         {:ldh, {:high, @irq_if}, :a},
         {:ld, :a, 0x01},
         {:ldh, {:high, @irq_ie}, :a},
-        {:ld, :a, @lcdc_marche},
+        {:ld, :a, @lcdc_on},
         {:ldh, {:high, @lcdc}, :a},
         {:ei},
         {:jp, {:label, :main_loop}}
       ]
   end
 
-  # Scruter LY jusqu'au vblank. C'est l'attente active des jeux réels — il n'y
-  # a rien d'autre à faire avant que les interruptions soient armées, et le
-  # matériel ne propose aucun « attendre » qui ne soit pas une boucle.
-  defp attente_vblank do
+  # Poll LY until the vblank. This is the busy wait of real games — there is
+  # nothing else to do before the interrupts are armed, and the hardware offers
+  # no "wait" that is not a loop.
+  defp wait_vblank do
     [
       {:label, :wait_vblank},
       {:ldh, :a, {:high, @ly}},
@@ -251,35 +253,34 @@ defmodule Potion.Runtime do
     ]
   end
 
-  # Une plage mise à zéro : 256 tours d'un corps déroulé autant de fois qu'il
-  # faut. `LD (HL+), A` coûte 8 cycles, la fin de boucle 16 de plus — une
-  # boucle d'une seule écriture passerait les deux tiers de son temps à
-  # compter, et la VRAM entière lui prendrait trois frames. Déroulée
-  # trente-deux fois, elle tient dans une.
+  # A range zeroed out: 256 turns of a body unrolled as many times as needed.
+  # `LD (HL+), A` costs 8 cycles, ending the loop 16 more — a loop with a single
+  # write would spend two thirds of its time counting, and the whole VRAM would
+  # take it three frames. Unrolled thirty-two times, it fits in one.
   #
-  # `LD B, 0` puis `DEC B` : 256 tours, le zéro comptant pour un tour complet.
-  # Le compteur est le registre, jamais une cellule mémoire.
-  defp efface(base, octets, etiquette) when rem(octets, 256) == 0 do
+  # `LD B, 0` then `DEC B`: 256 turns, the zero counting as a full turn. The
+  # counter is the register, never a memory cell.
+  defp clear(base, bytes, label) when rem(bytes, 256) == 0 do
     [
       {:ld, :hl, base},
       {:xor, :a, :a},
       {:ld, :b, 0},
-      {:label, etiquette}
+      {:label, label}
     ] ++
-      List.duplicate({:ld, {:mem, :hl_inc}, :a}, div(octets, 256)) ++
+      List.duplicate({:ld, {:mem, :hl_inc}, :a}, div(bytes, 256)) ++
       [
         {:dec, :b},
-        {:jr, :nz, {:label, etiquette}}
+        {:jr, :nz, {:label, label}}
       ]
   end
 
-  # La carte de fond en tuile 1 — la tuile vide. La sortie de boucle se lit sur
-  # H : la carte va de 0x9800 à 0x9BFF, et 0x9C est le premier octet haut dont
-  # le bit 2 est levé. Tester un bit d'un registre coûte moins qu'entretenir un
-  # compteur, et l'adresse de fin est déjà dans HL.
-  defp carte_de_fond do
+  # The background map in tile 1 — the empty tile. The loop exit is read off H:
+  # the map runs from 0x9800 to 0x9BFF, and 0x9C is the first high byte whose
+  # bit 2 is raised. Testing a bit of a register costs less than maintaining a
+  # counter, and the end address is already in HL.
+  defp bg_map do
     [
-      {:ld, :hl, @fond},
+      {:ld, :hl, @background},
       {:ld, :a, 0x01},
       {:label, :bg_map},
       {:ld, {:mem, :hl_inc}, :a},
@@ -288,10 +289,10 @@ defmodule Potion.Runtime do
     ]
   end
 
-  # La tuile 0 : seize octets à 0xFF, soit huit lignes de huit pixels en
-  # couleur 3 — un carré plein. Deux bitplans à 1 font la couleur 3, et c'est
-  # tout le tileset du v0. La tuile 1 reste celle que l'effacement a laissée.
-  defp tuiles do
+  # Tile 0: sixteen bytes of 0xFF, that is, eight lines of eight pixels in
+  # colour 3 — a solid square. Two bitplanes set to 1 make colour 3, and that is
+  # the whole v0 tileset. Tile 1 stays the one the clearing left behind.
+  defp tiles do
     [
       {:ld, :hl, @vram},
       {:ld, :a, 0xFF},
@@ -303,11 +304,10 @@ defmodule Potion.Runtime do
     ]
   end
 
-  # La recopie de la routine DMA vers la HRAM. La longueur n'est pas écrite à
-  # la main : elle vient de l'assemblage de la routine elle-même. C'est le
-  # bénéfice concret d'un noyau qui est une valeur — la source et la mesure ne
-  # peuvent pas diverger.
-  defp copie_dma do
+  # Copying the DMA routine into HRAM. Its length is not written by hand: it
+  # comes from assembling the routine itself. That is the concrete benefit of a
+  # kernel that is a value — the source and the measurement cannot diverge.
+  defp copy_dma do
     [
       {:ld, :hl, {:label, :dma_source}},
       {:ld, :c, @hram_dma - 0xFF00},
@@ -321,19 +321,18 @@ defmodule Potion.Runtime do
     ]
   end
 
-  # ══ Le handler vblank ════════════════════════════════════════════════════════
+  # ══ The vblank handler ═══════════════════════════════════════════════════════
 
   @doc """
-  Le handler d'interruption vblank — la cible de l'option `vblank:` de
-  `Potion.ROM`.
+  The vblank interrupt handler — the target of `Potion.ROM`'s `vblank:` option.
 
-  Il sauve les quatre paires : une interruption tombe entre deux instructions
-  quelconques de la boucle principale, et rendre la main avec un registre
-  modifié est le genre de bug qui se manifeste une fois sur mille frames.
+  It saves all four pairs: an interrupt lands between any two instructions of
+  the main loop, and handing control back with a modified register is the kind
+  of bug that shows up once every thousand frames.
 
-  Le drapeau se lève *avant* le DMA. L'ordre est libre — la boucle principale
-  ne peut rien voir avant le RETI — et celui-ci dit ce que le drapeau signifie
-  vraiment : « une frame a commencé », pas « l'OAM est publiée ».
+  The flag is raised *before* the DMA. The order is free — the main loop cannot
+  see anything before the RETI — and this one says what the flag really means:
+  "a frame has begun", not "the OAM is published".
   """
   @spec vblank() :: [Assembler.element()]
   def vblank do
@@ -344,7 +343,7 @@ defmodule Potion.Runtime do
       {:push, :de},
       {:push, :hl},
       {:ld, :a, 0x01},
-      {:ld, {:mem, @drapeau}, :a},
+      {:ld, {:mem, @flag}, :a},
       {:call, @hram_dma},
       {:pop, :hl},
       {:pop, :de},
@@ -355,12 +354,12 @@ defmodule Potion.Runtime do
   end
 
   @doc """
-  La routine DMA, dans sa forme source — celle qui sera assemblée à part et
-  recopiée en 0xFF80.
+  The DMA routine, in its source form — the one that will be assembled apart and
+  copied to 0xFF80.
 
-  L'attente est un décompte de quarante tours à seize cycles : les 160 cycles
-  machine que le contrôleur met à recopier l'OAM. Il n'y a aucun registre à
-  scruter — le matériel n'annonce pas la fin d'un DMA, il faut la compter.
+  The wait is a countdown of forty turns at sixteen cycles: the 160 machine
+  cycles the controller takes to copy the OAM. There is no register to poll —
+  the hardware does not announce the end of a DMA, it has to be counted.
   """
   @spec dma_routine() :: [Assembler.element()]
   def dma_routine do
@@ -376,60 +375,59 @@ defmodule Potion.Runtime do
   end
 
   @doc """
-  Les octets de la routine DMA, assemblés à son adresse d'exécution.
+  The bytes of the DMA routine, assembled at its execution address.
 
-  L'origine 0xFF80 n'est pas décorative : les étiquettes de la routine
-  désignent des adresses absolues, et l'assembler à 0x0150 donnerait un saut
-  relatif correct par accident (JR compte une distance) mais toute évolution —
-  un `JP`, une table — sortirait fausse. Assemblée à part, la routine a aussi
-  son propre espace d'étiquettes : son `:wait` ne peut pas collisionner avec
-  celles du noyau.
+  The 0xFF80 origin is not decorative: the routine's labels name absolute
+  addresses, and assembling it at 0x0150 would give a correct relative jump by
+  accident (JR counts a distance) but any evolution — a `JP`, a table — would
+  come out wrong. Assembled apart, the routine also has its own label space: its
+  `:wait` cannot collide with the kernel's.
   """
   @spec dma_bytes() :: binary()
   def dma_bytes, do: Assembler.assemble(dma_routine(), origin: @hram_dma)
 
-  # ══ Le pad ═══════════════════════════════════════════════════════════════════
+  # ══ The pad ══════════════════════════════════════════════════════════════════
 
   @doc """
-  La lecture du pad, recomposée en un octet à l'endroit.
+  Reading the pad, recomposed into a byte the right way round.
 
-  P1 (0xFF00) est un registre à matrice : le jeu tire une des deux nappes à la
-  masse (bit 4 les directions, bit 5 les boutons — actifs à *zéro*) et relit
-  quatre lignes dans le quartet bas, elles aussi actives à zéro. Deux niveaux
-  de logique inversée dont aucun jeu ne veut dans sa logique.
+  P1 (0xFF00) is a matrix register: the game pulls one of the two rows to ground
+  (bit 4 the directions, bit 5 the buttons — active at *zero*) and reads back
+  four lines in the low nibble, themselves also active at zero. Two levels of
+  inverted logic that no game wants anywhere near its own logic.
 
-  Le noyau les paie une fois pour toutes : `CPL` remet les touches à l'endroit,
-  `SWAP` range les boutons dans le quartet haut, et 0xC0A0 porte un octet où un
-  bit à 1 veut dire « appuyé » :
+  The kernel pays for them once and for all: `CPL` puts the keys the right way
+  round, `SWAP` files the buttons into the high nibble, and 0xC0A0 carries a
+  byte where a bit set to 1 means "pressed":
 
-      bit 0 Droite   bit 1 Gauche   bit 2 Haut     bit 3 Bas
+      bit 0 Right    bit 1 Left     bit 2 Up       bit 3 Down
       bit 4 A        bit 5 B        bit 6 Select   bit 7 Start
 
-  La double lecture de chaque nappe est un rite du matériel : les lignes sont
-  des résistances de tirage, elles mettent quelques cycles à s'établir après un
-  changement de sélection, et la première lecture peut mentir. Elle ne coûte
-  rien et un jour elle nous évitera un bug qu'on ne saurait pas nommer.
+  Reading each row twice is a hardware rite: the lines are pull-up resistors,
+  they take a few cycles to settle after a change of selection, and the first
+  read can lie. It costs nothing and one day it will spare us a bug we would not
+  know how to name.
   """
   @spec read_pad() :: [Assembler.element()]
   def read_pad do
     [{:label, :read_pad}] ++
-      nappe(0x20) ++
+      row(0x20) ++
       [{:ld, :b, :a}] ++
-      nappe(0x10) ++
+      row(0x10) ++
       [
         {:swap, :a},
         {:or, :a, :b},
         {:ld, {:mem, @pad}, :a},
-        # Les deux nappes relâchées : c'est l'état au repos du registre, et
-        # celui qu'un lecteur extérieur (le combo de reset du matériel, par
-        # exemple) attend entre deux frames.
+        # Both rows released: that is the register's resting state, and the one
+        # an outside reader (the hardware reset combo, for instance) expects
+        # between two frames.
         {:ld, :a, 0x30},
         {:ldh, {:high, @p1}, :a},
         {:ret}
       ]
   end
 
-  defp nappe(selection) do
+  defp row(selection) do
     [
       {:ld, :a, selection},
       {:ldh, {:high, @p1}, :a},
@@ -440,28 +438,27 @@ defmodule Potion.Runtime do
     ]
   end
 
-  # ══ La boucle principale ═════════════════════════════════════════════════════
+  # ══ The main loop ════════════════════════════════════════════════════════════
 
   @doc """
-  L'ordonnanceur v0 : dormir, se réveiller sur le vblank, lire le pad, appeler
-  l'acteur, se rendormir.
+  The v0 scheduler: sleep, wake on the vblank, read the pad, call the actor, go
+  back to sleep.
 
-  `HALT` n'est pas une économie de batterie ici, c'est la seule horloge du
-  système : il donne au noyau un rythme exact d'une frame, sans compter un
-  seul cycle. Une boucle qui scruterait LY marcherait aussi, et dériverait dès
-  que l'acteur grossirait.
+  `HALT` is not a battery saving here, it is the system's only clock: it gives
+  the kernel a rhythm of exactly one frame, without counting a single cycle. A
+  loop polling LY would work too, and would drift as soon as the actor grew.
   """
-  @spec boucle() :: [Assembler.element()]
-  def boucle do
+  @spec main_loop() :: [Assembler.element()]
+  def main_loop do
     [
       {:label, :main_loop},
       {:halt},
-      # Réveil : d'où vient-il ? Sans drapeau levé, ce n'était pas une frame.
-      {:ld, :a, {:mem, @drapeau}},
+      # Awake: where from? With no flag raised, it was not a frame.
+      {:ld, :a, {:mem, @flag}},
       {:and, :a, :a},
       {:jr, :z, {:label, :main_loop}},
       {:xor, :a, :a},
-      {:ld, {:mem, @drapeau}, :a},
+      {:ld, {:mem, @flag}, :a},
       {:call, {:label, :read_pad}},
       {:call, {:label, :actor}},
       {:jr, {:label, :main_loop}}

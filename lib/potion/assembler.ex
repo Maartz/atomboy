@@ -1,87 +1,86 @@
 defmodule Potion.Assembler do
   @moduledoc """
-  La table d'instructions du SM83, lue à l'envers.
+  The SM83 instruction table, read backwards.
 
-  ## Pourquoi il n'y a aucun encodage dans ce fichier
+  ## Why there is not a single encoding in this file
 
-  `Atomboy.CPU.Table` décrit les 500 instructions du processeur : pour chacune,
-  son opcode, son préfixe et la forme de ses opérandes. Le décodeur en dérive des
-  clauses de fonction ; cet assembleur en dérive un **index inversé** — de
-  `{mnémonique, condition, forme des opérandes}` vers `{préfixe, opcode}`.
+  `Atomboy.CPU.Table` describes the 500 instructions of the processor: for each
+  one, its opcode, its prefix and the shape of its operands. The decoder derives
+  function clauses from it; this assembler derives a **reverse index** — from
+  `{mnemonic, condition, operand shapes}` to `{prefix, opcode}`.
 
-  C'est le seul choix qui garantisse ce dont Potion a besoin. Un assembleur qui
-  recopierait les encodages à la main serait une seconde table, à maintenir en
-  accord avec la première ; et la divergence ne se manifesterait pas par une
-  erreur de compilation mais par une ROM qui *tourne* en faisant autre chose que
-  ce qui est écrit. En dérivant, l'accord est structurel : toute instruction
-  décodable est assemblable, avec les mêmes octets, et le test aller-retour le
-  vérifie sur les 500.
+  It is the only choice that guarantees what Potion needs. An assembler that
+  copied the encodings by hand would be a second table, to be kept in agreement
+  with the first; and any divergence would show up not as a compile error but as
+  a ROM that *runs* while doing something other than what is written. By
+  deriving, the agreement is structural: every decodable instruction is
+  assemblable, with the same bytes, and the round-trip test checks that across
+  all 500.
 
-  La clé de l'index *est* la liste des gabarits d'opérandes — il n'y a pas de
-  normalisation intermédiaire. Ce qui reste à faire, et c'est tout le travail de
-  ce module, est de passer de la syntaxe source (`{:ld, :a, {:mem, :hl}}`, écrite
-  pour la main humaine) à cette forme-là (`[{:reg, :a}, :hl_ind]`, écrite pour le
-  silicium).
+  The index key *is* the list of operand templates — there is no intermediate
+  normalisation. What remains to be done, and it is all this module does, is to
+  go from source syntax (`{:ld, :a, {:mem, :hl}}`, written for the human hand)
+  to that form (`[{:reg, :a}, :hl_ind]`, written for the silicon).
 
-  ## Deux passes, et pourquoi elles suffisent
+  ## Two passes, and why they are enough
 
-  Sur SM83 aucune taille d'instruction ne dépend d'une distance : un opcode, plus
-  éventuellement l'octet de préfixe, plus ses immédiats, tous de largeur fixe.
-  Chaque élément connaît donc sa taille avant qu'aucune adresse ne soit résolue.
+  On the SM83 no instruction size depends on a distance: an opcode, plus the
+  prefix byte where applicable, plus its immediates, all of fixed width. Every
+  element therefore knows its size before any address is resolved.
 
-  La passe 1 parcourt le programme en sommant les tailles et note où tombe chaque
-  étiquette ; la passe 2 repasse et émet les octets, les cibles étant désormais
-  connues. Sans cette propriété il faudrait un point fixe — un branchement
-  lointain occupe plus de place, ce qui éloigne les cibles suivantes, ce qui
-  allonge d'autres branchements. Le SM83 nous l'épargne.
+  Pass 1 walks the program summing sizes and notes where each label falls; pass
+  2 walks it again and emits the bytes, the targets now being known. Without
+  that property a fixed point would be needed — a distant branch takes more
+  room, which pushes the following targets further away, which lengthens other
+  branches. The SM83 spares us that.
 
-  L'invariant qui verrouille les deux passes — *le nombre d'octets émis en passe
-  2 est exactement la taille annoncée en passe 1* — est vérifié à chaque
-  assemblage, pas seulement dans les tests : une ROM d'une longueur inattendue
-  s'exécute quand même, et donne de mauvais résultats.
+  The invariant that locks the two passes together — *the number of bytes
+  emitted in pass 2 is exactly the size announced in pass 1* — is checked on
+  every assembly, not only in the tests: a ROM of unexpected length runs all the
+  same, and gives wrong results.
 
-  ## Le format source
+  ## The source format
 
-  Un programme est une liste. Trois sortes d'éléments :
+  A program is a list. Three kinds of element:
 
-      {:label, :main_loop}      taille nulle ; nomme l'adresse courante
-      {:bytes, <<1, 2, 3>>}     des octets bruts — données, tuiles
-      {:ld, :a, {:mem, :hl}}     une instruction
+      {:label, :main_loop}      zero size; names the current address
+      {:bytes, <<1, 2, 3>>}     raw bytes — data, tiles
+      {:ld, :a, {:mem, :hl}}     an instruction
 
-  Une instruction est un tuple dont la tête est le mnémonique **exactement** tel
-  que la table le nomme (`:ld`, `:ldh`, `:add_sp`, `:jr`, `:rst`, `:bit`…). Pour
-  les formes conditionnelles la condition s'insère en premier : `{:jr, :nz,
-  {:label, :fin}}`, `{:ret, :c}`.
+  An instruction is a tuple whose head is the mnemonic **exactly** as the table
+  names it (`:ld`, `:ldh`, `:add_sp`, `:jr`, `:rst`, `:bit`…). For the
+  conditional forms the condition comes first: `{:jr, :nz, {:label, :done}}`,
+  `{:ret, :c}`.
 
-  Les opérandes :
+  The operands:
 
-      :a … :l                  un registre 8 bits
-      :bc :de :hl :sp :af      une paire 16 bits
-      0x12 / 0x1234            un immédiat, largeur déduite de la table
-      {:mem, :hl}              l'octet à l'adresse HL
+      :a … :l                  an 8-bit register
+      :bc :de :hl :sp :af      a 16-bit pair
+      0x12 / 0x1234            an immediate, width deduced from the table
+      {:mem, :hl}              the byte at address HL
       {:mem, :bc | :de | :hl_inc | :hl_dec}
-      {:mem, 0xC000}           l'octet à une adresse absolue
-      {:mem, {:label, :n}} idem, l'adresse venant d'une étiquette
-      {:high, 0x44}            la page haute : 0xFF00 + 0x44
-      {:high, :c}              la page haute via C
-      {:label, :n}         la cible d'un saut ou d'un appel
+      {:mem, 0xC000}           the byte at an absolute address
+      {:mem, {:label, :n}} same, the address coming from a label
+      {:high, 0x44}            the high page: 0xFF00 + 0x44
+      {:high, :c}              the high page via C
+      {:label, :n}         the target of a jump or a call
 
-  L'accumulateur est **explicite** dans les opérations arithmétiques, comme dans
-  la table : `{:add, :a, :b}`, `{:sub, :a, 0x10}`, `{:cp, :a, {:mem, :hl}}`. La
-  table décrit A parce que le processeur le lit et l'écrit ; l'assembleur
-  classique l'omet (`SUB B`), et c'est l'assembleur classique qui est irrégulier.
+  The accumulator is **explicit** in the arithmetic operations, as it is in the
+  table: `{:add, :a, :b}`, `{:sub, :a, 0x10}`, `{:cp, :a, {:mem, :hl}}`. The
+  table spells A out because the processor reads it and writes it; the classic
+  assembler leaves it out (`SUB B`), and it is the classic assembler that is
+  irregular.
 
-  ## Ce que l'assembleur déduit, et ce qu'il exige
+  ## What the assembler deduces, and what it demands
 
-  La largeur d'un immédiat n'est jamais écrite : `{:ld, :a, 0x12}` est un octet,
-  `{:ld, :hl, 0x1234}` un mot, parce que la table ne connaît qu'une forme dans
-  chaque cas. C'est l'index qui tranche, et il ne peut pas se tromper — s'il
-  existait deux formes concurrentes pour un même mnémonique, le test aller-retour
-  échouerait.
+  The width of an immediate is never written: `{:ld, :a, 0x12}` is a byte,
+  `{:ld, :hl, 0x1234}` a word, because the table knows only one form in each
+  case. The index decides, and it cannot be wrong — if two competing forms
+  existed for the same mnemonic, the round-trip test would fail.
 
-  En revanche la valeur est vérifiée : hors plage, l'assemblage s'arrête. Une
-  troncature silencieuse produirait une ROM plausible et fausse, ce qui coûte
-  bien plus cher qu'un message d'erreur.
+  The value, on the other hand, is checked: out of range, assembly stops. A
+  silent truncation would produce a plausible, wrong ROM, which costs far more
+  than an error message.
   """
 
   import Bitwise
@@ -90,9 +89,9 @@ defmodule Potion.Assembler do
   alias Atomboy.CPU.Table
 
   @typedoc """
-  Un opérande source, dans la syntaxe lisible par la main humaine.
+  A source operand, in the syntax readable by the human hand.
   """
-  @type operande ::
+  @type operand ::
           atom()
           | integer()
           | {:mem, atom() | non_neg_integer() | {:label, atom()}}
@@ -100,498 +99,495 @@ defmodule Potion.Assembler do
           | {:label, atom()}
 
   @typedoc """
-  Un élément de programme : une étiquette, des octets bruts, ou une instruction.
+  A program element: a label, raw bytes, or an instruction.
   """
   @type element :: {:label, atom()} | {:bytes, binary()} | tuple()
 
-  # 0x0150 : la première adresse libre après l'en-tête de cartouche. C'est là que
-  # le point d'entrée saute, et donc l'origine par défaut d'un programme Potion.
-  @origin_defaut 0x0150
+  # 0x0150: the first free address after the cartridge header. That is where the
+  # entry point jumps, and therefore the default origin of a Potion program.
+  @default_origin 0x0150
 
-  # L'index inversé, construit à la compilation depuis la table. Clé : la forme
-  # de l'instruction telle que la table la décrit. Valeur : de quoi l'écrire.
-  # Les gabarits d'opérandes ne sont pas stockés en valeur — ils sont déjà dans
-  # la clé, et deux copies d'une même vérité sont une de trop.
+  # The reverse index, built at compile time from the table. Key: the shape of
+  # the instruction as the table describes it. Value: what it takes to write it.
+  # The operand templates are not stored in the value — they are already in the
+  # key, and two copies of one truth are one too many.
   @index (for %Insn{} = insn <- Table.all(), into: %{} do
             {{insn.mnemonic, insn.condition, insn.operands}, {insn.prefix, insn.opcode}}
           end)
 
-  # Si deux instructions partageaient une clé, `into: %{}` en perdrait une
-  # silencieusement et l'encodage correspondant deviendrait inatteignable. Le
-  # jour où la table gagne une famille, c'est ici que ça casse — à la
-  # compilation, pas dans une ROM.
+  # If two instructions shared a key, `into: %{}` would silently lose one and
+  # the corresponding encoding would become unreachable. The day the table gains
+  # a family, this is where it breaks — at compile time, not in a ROM.
   if map_size(@index) != length(Table.all()) do
-    raise "index inversé dégénéré : #{length(Table.all())} instructions pour " <>
-            "#{map_size(@index)} clés {mnémonique, condition, opérandes}"
+    raise "degenerate reverse index: #{length(Table.all())} instructions for " <>
+            "#{map_size(@index)} {mnemonic, condition, operands} keys"
   end
 
-  @mnemoniques Table.all() |> Enum.map(& &1.mnemonic) |> Enum.uniq() |> Enum.sort()
+  @mnemonics Table.all() |> Enum.map(& &1.mnemonic) |> Enum.uniq() |> Enum.sort()
 
-  # Les deux seuls mnémoniques dont l'immédiat 8 bits est signé : JR compte une
-  # distance, ADD SP un déplacement de pile. Partout ailleurs un octet est un
-  # octet.
-  @relatifs [:jr, :add_sp]
+  # The only two mnemonics whose 8-bit immediate is signed: JR counts a
+  # distance, ADD SP a stack displacement. Everywhere else a byte is a byte.
+  @signed [:jr, :add_sp]
 
   @doc """
-  Assemble un programme en octets.
+  Assembles a program into bytes.
 
-  `opts[:origin]` est l'adresse de la première instruction — nécessaire pour
-  résoudre les étiquettes, qui nomment des adresses absolues et non des
-  décalages. Par défaut 0x0150.
+  `opts[:origin]` is the address of the first instruction — needed to resolve
+  labels, which name absolute addresses and not offsets. Defaults to 0x0150.
 
       iex> Potion.Assembler.assemble([{:ld, :a, 0x05}, {:add, :a, :b}])
       <<0x3E, 0x05, 0x80>>
   """
   @spec assemble([element()], keyword()) :: binary()
-  def assemble(programme, opts \\ []) do
-    origine = Keyword.get(opts, :origin, @origin_defaut)
-    {plan, etiquettes, taille} = mesurer(programme, origine)
-    octets = plan |> Enum.map(&emettre(&1, etiquettes)) |> IO.iodata_to_binary()
+  def assemble(program, opts \\ []) do
+    origin = Keyword.get(opts, :origin, @default_origin)
+    {plan, labels, size} = measure(program, origin)
+    bytes = plan |> Enum.map(&emit(&1, labels)) |> IO.iodata_to_binary()
 
-    if byte_size(octets) != taille do
-      raise "assemblage incohérent : la passe 1 annonce #{taille} octets, " <>
-              "la passe 2 en a émis #{byte_size(octets)}"
+    if byte_size(bytes) != size do
+      raise "inconsistent assembly: pass 1 announces #{size} bytes, " <>
+              "pass 2 emitted #{byte_size(bytes)}"
     end
 
-    octets
+    bytes
   end
 
   @doc """
-  Les adresses des étiquettes d'un programme, sans émettre les octets.
+  The label addresses of a program, without emitting the bytes.
 
-  La passe 1 les calcule de toute façon ; les exposer évite à l'appelant de
-  compter les instructions à la main pour savoir où son point d'entrée est
-  tombé. C'est ce dont le noyau aura besoin pour écrire l'en-tête de cartouche.
+  Pass 1 computes them anyway; exposing them saves the caller from counting
+  instructions by hand to find out where its entry point landed. It is what the
+  kernel will need in order to write the cartridge header.
   """
   @spec addresses([element()], keyword()) :: %{atom() => non_neg_integer()}
-  def addresses(programme, opts \\ []) do
-    origine = Keyword.get(opts, :origin, @origin_defaut)
-    {_plan, etiquettes, _taille} = mesurer(programme, origine)
-    etiquettes
+  def addresses(program, opts \\ []) do
+    origin = Keyword.get(opts, :origin, @default_origin)
+    {_plan, labels, _size} = measure(program, origin)
+    labels
   end
 
-  # ══ Passe 1 : les tailles et les étiquettes ══════════════════════════════════
+  # ══ Pass 1: the sizes and the labels ═════════════════════════════════════════
 
-  defp mesurer(programme, origine) do
-    {plan, etiquettes, adresse} =
-      programme
+  defp measure(program, origin) do
+    {plan, labels, address} =
+      program
       |> Enum.with_index()
-      |> Enum.reduce({[], %{}, origine}, &mesurer_element/2)
+      |> Enum.reduce({[], %{}, origin}, &measure_element/2)
 
-    {Enum.reverse(plan), etiquettes, adresse - origine}
+    {Enum.reverse(plan), labels, address - origin}
   end
 
-  defp mesurer_element({{:label, nom}, indice}, {plan, etiquettes, adresse})
-       when is_atom(nom) do
-    case etiquettes do
-      %{^nom => precedente} ->
+  defp measure_element({{:label, name}, index}, {plan, labels, address})
+       when is_atom(name) do
+    case labels do
+      %{^name => previous} ->
         raise ArgumentError, """
-        étiquette dupliquée : #{inspect(nom)}, à l'élément ##{indice}.
+        duplicate label: #{inspect(name)}, at element ##{index}.
 
-        Elle est déjà posée à 0x#{hexa(precedente)} et le serait de nouveau à \
-        0x#{hexa(adresse)} — une cible de saut ne peut pas désigner deux adresses.
+        It is already placed at 0x#{hex(previous)} and would be placed again at \
+        0x#{hex(address)} — a jump target cannot name two addresses.
         """
 
       _ ->
-        {plan, Map.put(etiquettes, nom, adresse), adresse}
+        {plan, Map.put(labels, name, address), address}
     end
   end
 
-  defp mesurer_element({{:bytes, octets}, _indice}, {plan, etiquettes, adresse})
-       when is_binary(octets) do
-    {[{:bytes, octets} | plan], etiquettes, adresse + byte_size(octets)}
+  defp measure_element({{:bytes, bytes}, _index}, {plan, labels, address})
+       when is_binary(bytes) do
+    {[{:bytes, bytes} | plan], labels, address + byte_size(bytes)}
   end
 
-  defp mesurer_element({{:label, autre}, indice}, _acc) do
+  defp measure_element({{:label, other}, index}, _acc) do
     raise ArgumentError,
-          "étiquette mal formée à l'élément ##{indice} : le nom doit être un atome, " <>
-            "reçu #{inspect(autre)}"
+          "malformed label at element ##{index}: the name must be an atom, " <>
+            "got #{inspect(other)}"
   end
 
-  defp mesurer_element({{:bytes, autre}, indice}, _acc) do
+  defp measure_element({{:bytes, other}, index}, _acc) do
     raise ArgumentError,
-          "octets mal formés à l'élément ##{indice} : attendu un binaire, " <>
-            "reçu #{inspect(autre)}"
+          "malformed bytes at element ##{index}: expected a binary, " <>
+            "got #{inspect(other)}"
   end
 
-  defp mesurer_element({source, indice}, {plan, etiquettes, adresse})
+  defp measure_element({source, index}, {plan, labels, address})
        when is_tuple(source) and tuple_size(source) > 0 do
-    insn = preparer(source, indice, adresse)
-    {[{:instruction, insn} | plan], etiquettes, adresse + insn.taille}
+    insn = prepare(source, index, address)
+    {[{:instruction, insn} | plan], labels, address + insn.size}
   end
 
-  defp mesurer_element({autre, indice}, _acc) do
+  defp measure_element({other, index}, _acc) do
     raise ArgumentError, """
-    élément de programme inconnu à l'élément ##{indice} : #{inspect(autre)}
+    unknown program element at element ##{index}: #{inspect(other)}
 
-    Un programme est une liste de `{:label, nom}`, `{:bytes, binaire}` et \
-    d'instructions — ces dernières étant des tuples dont la tête est un mnémonique.
+    A program is a list of `{:label, name}`, `{:bytes, binary}` and \
+    instructions — the latter being tuples whose head is a mnemonic.
     """
   end
 
-  # ── La résolution d'une instruction ─────────────────────────────────────────
+  # ── Resolving one instruction ───────────────────────────────────────────────
 
-  defp preparer(source, indice, adresse) do
-    [mnemonique | arguments] = Tuple.to_list(source)
+  defp prepare(source, index, address) do
+    [mnemonic | arguments] = Tuple.to_list(source)
 
-    unless is_atom(mnemonique) do
+    unless is_atom(mnemonic) do
       raise ArgumentError, """
-      instruction mal formée à l'élément ##{indice} (0x#{hexa(adresse)}) : \
+      malformed instruction at element ##{index} (0x#{hex(address)}): \
       #{inspect(source)}
 
-      La tête du tuple doit être un mnémonique de la table, pas #{inspect(mnemonique)}.
+      The head of the tuple must be a mnemonic from the table, not #{inspect(mnemonic)}.
       """
     end
 
-    {prefixe, opcode, paires} =
-      case resoudre(mnemonique, arguments) do
+    {prefix, opcode, pairs} =
+      case resolve(mnemonic, arguments) do
         nil ->
-          raise ArgumentError, message_inconnue(source, mnemonique, arguments, indice, adresse)
+          raise ArgumentError, unknown_message(source, mnemonic, arguments, index, address)
 
-        trouve ->
-          trouve
+        found ->
+          found
       end
 
-    immediats = for {gabarit, operande} <- paires, largeur(gabarit) > 0, do: {gabarit, operande}
-    corps = Enum.sum(Enum.map(immediats, fn {gabarit, _} -> largeur(gabarit) end))
+    immediates = for {template, operand} <- pairs, width(template) > 0, do: {template, operand}
+    body = Enum.sum(Enum.map(immediates, fn {template, _} -> width(template) end))
 
     %{
       source: source,
-      indice: indice,
-      adresse: adresse,
-      taille: 1 + if(prefixe, do: 1, else: 0) + corps,
-      mnemonique: mnemonique,
-      prefixe: prefixe,
+      index: index,
+      address: address,
+      size: 1 + if(prefix, do: 1, else: 0) + body,
+      mnemonic: mnemonic,
+      prefix: prefix,
       opcode: opcode,
-      immediats: immediats
+      immediates: immediates
     }
   end
 
-  # Un mnémonique et des arguments source ; en sortie l'encodage et l'appariement
-  # des opérandes avec les gabarits de la table, ou `nil`.
+  # A mnemonic and source arguments in; the encoding and the pairing of the
+  # operands with the table's templates out, or `nil`.
   #
-  # Le procédé est une recherche, pas une traduction : certains opérandes source
-  # ont plusieurs formes possibles (un entier peut être un immédiat 8 bits, 16
-  # bits, une cible de RST, un numéro de bit) et c'est l'index qui départage. Le
-  # produit cartésien reste minuscule — au plus seize combinaisons — et l'unicité
-  # des clés fait qu'au plus une aboutit.
-  defp resoudre(mnemonique, arguments) do
-    Enum.find_value(decoupes(arguments), fn {condition, operandes} ->
-      operandes
-      |> Enum.map(&formes/1)
-      |> produit()
-      |> Enum.find_value(fn gabarits ->
-        case Map.fetch(@index, {mnemonique, condition, gabarits}) do
-          {:ok, {prefixe, opcode}} -> {prefixe, opcode, Enum.zip(gabarits, operandes)}
+  # The method is a search, not a translation: some source operands have several
+  # possible shapes (an integer can be an 8-bit immediate, a 16-bit one, an RST
+  # target, a bit number) and it is the index that settles it. The cartesian
+  # product stays tiny — sixteen combinations at most — and the uniqueness of
+  # the keys means at most one succeeds.
+  defp resolve(mnemonic, arguments) do
+    Enum.find_value(readings(arguments), fn {condition, operands} ->
+      operands
+      |> Enum.map(&forms/1)
+      |> product()
+      |> Enum.find_value(fn templates ->
+        case Map.fetch(@index, {mnemonic, condition, templates}) do
+          {:ok, {prefix, opcode}} -> {prefix, opcode, Enum.zip(templates, operands)}
           :error -> nil
         end
       end)
     end)
   end
 
-  # `:c` est à la fois un registre et une condition — `{:inc, :c}` incrémente C,
-  # `{:ret, :c}` retourne si carry. Aucune règle syntaxique ne les distingue,
-  # alors on essaie les deux lectures et l'index tranche : une seule des deux
-  # correspond à une instruction existante. L'inconditionnelle d'abord, pour que
-  # `{:inc, :c}` ne soit jamais lu comme une condition.
-  defp decoupes([tete | reste]) when tete in [:nz, :z, :nc, :c] do
-    [{nil, [tete | reste]}, {tete, reste}]
+  # `:c` is both a register and a condition — `{:inc, :c}` increments C,
+  # `{:ret, :c}` returns if carry. No syntactic rule tells them apart, so we try
+  # both readings and the index settles it: only one of the two corresponds to
+  # an existing instruction. The unconditional one first, so that `{:inc, :c}`
+  # is never read as a condition.
+  defp readings([head | rest]) when head in [:nz, :z, :nc, :c] do
+    [{nil, [head | rest]}, {head, rest}]
   end
 
-  defp decoupes(arguments), do: [{nil, arguments}]
+  defp readings(arguments), do: [{nil, arguments}]
 
-  defp produit([]), do: [[]]
+  defp product([]), do: [[]]
 
-  defp produit([formes | reste]) do
-    for forme <- formes, suite <- produit(reste), do: [forme | suite]
+  defp product([forms | rest]) do
+    for form <- forms, tail <- product(rest), do: [form | tail]
   end
 
-  # Les formes de table qu'un opérande source peut prendre. Plusieurs quand la
-  # syntaxe est ambiguë, aucune quand l'opérande n'a pas de sens.
-  defp formes(registre) when registre in [:a, :b, :c, :d, :e, :h, :l], do: [{:reg, registre}]
-  defp formes(paire) when paire in [:bc, :de, :hl, :sp, :af], do: [{:pair, paire}]
+  # The table shapes a source operand can take. Several when the syntax is
+  # ambiguous, none when the operand makes no sense.
+  defp forms(register) when register in [:a, :b, :c, :d, :e, :h, :l], do: [{:reg, register}]
+  defp forms(pair) when pair in [:bc, :de, :hl, :sp, :af], do: [{:pair, pair}]
 
-  # Un entier : immédiat de l'une des deux largeurs, ou valeur encodée dans
-  # l'opcode même (la cible d'un RST, le numéro de bit d'un BIT/RES/SET).
-  defp formes(entier) when is_integer(entier) do
-    [{:imm, 8}, {:imm, 16}, {:rst, entier}, {:bit, entier}]
+  # An integer: an immediate of either width, or a value encoded in the opcode
+  # itself (the target of an RST, the bit number of a BIT/RES/SET).
+  defp forms(integer) when is_integer(integer) do
+    [{:imm, 8}, {:imm, 16}, {:rst, integer}, {:bit, integer}]
   end
 
-  # Une étiquette est une adresse : 16 bits pour JP et CALL, 8 bits signés pour
-  # le seul JR — l'index choisit, et `immediat/4` refuse le cas où un 8 bits
-  # tomberait ailleurs que dans un saut relatif.
-  defp formes({:label, nom}) when is_atom(nom), do: [{:imm, 16}, {:imm, 8}]
+  # A label is an address: 16 bits for JP and CALL, 8 signed bits for JR alone —
+  # the index chooses, and `immediate/4` refuses the case where an 8-bit one
+  # would land anywhere other than a relative jump.
+  defp forms({:label, name}) when is_atom(name), do: [{:imm, 16}, {:imm, 8}]
 
-  defp formes({:mem, :hl}), do: [:hl_ind]
-  defp formes({:mem, paire}) when paire in [:bc, :de, :hl_inc, :hl_dec], do: [{:ind, paire}]
-  defp formes({:mem, adresse}) when is_integer(adresse), do: [:a16_ind]
-  defp formes({:mem, {:label, nom}}) when is_atom(nom), do: [:a16_ind]
-  defp formes({:high, :c}), do: [:c_ind]
-  defp formes({:high, octet}) when is_integer(octet), do: [:a8_ind]
-  defp formes({:high, {:label, nom}}) when is_atom(nom), do: [:a8_ind]
-  defp formes(_autre), do: []
+  defp forms({:mem, :hl}), do: [:hl_ind]
+  defp forms({:mem, pair}) when pair in [:bc, :de, :hl_inc, :hl_dec], do: [{:ind, pair}]
+  defp forms({:mem, address}) when is_integer(address), do: [:a16_ind]
+  defp forms({:mem, {:label, name}}) when is_atom(name), do: [:a16_ind]
+  defp forms({:high, :c}), do: [:c_ind]
+  defp forms({:high, byte}) when is_integer(byte), do: [:a8_ind]
+  defp forms({:high, {:label, name}}) when is_atom(name), do: [:a8_ind]
+  defp forms(_other), do: []
 
-  defp largeur({:imm, 8}), do: 1
-  defp largeur({:imm, 16}), do: 2
-  defp largeur(:a8_ind), do: 1
-  defp largeur(:a16_ind), do: 2
-  defp largeur(_encode_dans_l_opcode), do: 0
+  defp width({:imm, 8}), do: 1
+  defp width({:imm, 16}), do: 2
+  defp width(:a8_ind), do: 1
+  defp width(:a16_ind), do: 2
+  defp width(_encoded_in_the_opcode), do: 0
 
-  # ══ Passe 2 : les octets ═════════════════════════════════════════════════════
+  # ══ Pass 2: the bytes ════════════════════════════════════════════════════════
 
-  defp emettre({:bytes, octets}, _etiquettes), do: octets
+  defp emit({:bytes, bytes}, _labels), do: bytes
 
-  defp emettre({:instruction, insn}, etiquettes) do
-    entete =
-      case insn.prefixe do
+  defp emit({:instruction, insn}, labels) do
+    head =
+      case insn.prefix do
         nil -> <<insn.opcode>>
         :cb -> <<0xCB, insn.opcode>>
       end
 
-    Enum.reduce(insn.immediats, entete, fn {gabarit, operande}, octets ->
-      valeur = immediat(gabarit, operande, insn, etiquettes)
-      octets <> encoder(gabarit, valeur)
+    Enum.reduce(insn.immediates, head, fn {template, operand}, bytes ->
+      value = immediate(template, operand, insn, labels)
+      bytes <> encode(template, value)
     end)
   end
 
-  defp encoder({:imm, 8}, valeur), do: <<valeur>>
-  defp encoder(:a8_ind, valeur), do: <<valeur>>
-  defp encoder({:imm, 16}, valeur), do: <<valeur::16-little>>
-  defp encoder(:a16_ind, valeur), do: <<valeur::16-little>>
+  defp encode({:imm, 8}, value), do: <<value>>
+  defp encode(:a8_ind, value), do: <<value>>
+  defp encode({:imm, 16}, value), do: <<value::16-little>>
+  defp encode(:a16_ind, value), do: <<value::16-little>>
 
-  # ── La valeur d'un immédiat ─────────────────────────────────────────────────
+  # ── The value of an immediate ───────────────────────────────────────────────
 
-  defp immediat({:imm, 8}, {:label, nom}, insn, etiquettes) do
-    cible = resoudre_etiquette!(nom, insn, etiquettes)
+  defp immediate({:imm, 8}, {:label, name}, insn, labels) do
+    target = resolve_label!(name, insn, labels)
 
-    unless insn.mnemonique == :jr do
+    unless insn.mnemonic == :jr do
       raise ArgumentError, """
-      étiquette là où #{Atom.to_string(insn.mnemonique) |> String.upcase()} attend \
-      un octet, à l'élément ##{insn.indice} (0x#{hexa(insn.adresse)}) : \
+      label where #{Atom.to_string(insn.mnemonic) |> String.upcase()} expects \
+      a byte, at element ##{insn.index} (0x#{hex(insn.address)}): \
       #{inspect(insn.source)}
 
-      Une étiquette ne devient un immédiat 8 bits que pour un saut relatif JR, \
-      où elle désigne une distance. Ailleurs, elle ne pourrait tenir dans un \
-      octet qu'en perdant la moitié de son adresse.
+      A label becomes an 8-bit immediate only for a relative JR jump, where it \
+      names a distance. Anywhere else, it could only fit in a byte by losing \
+      half of its address.
       """
     end
 
-    # PC est déjà avancé quand le processeur ajoute le déplacement : l'origine du
-    # saut est l'adresse *après* l'instruction, pas la sienne.
-    apres = insn.adresse + insn.taille
-    ecart = cible - apres
+    # PC is already advanced when the processor adds the displacement: the jump
+    # is measured from the address *after* the instruction, not its own.
+    next_pc = insn.address + insn.size
+    delta = target - next_pc
 
-    if ecart < -128 or ecart > 127 do
+    if delta < -128 or delta > 127 do
       raise ArgumentError, """
-      saut relatif hors de portée à l'élément ##{insn.indice} \
-      (0x#{hexa(insn.adresse)}) : #{inspect(insn.source)}
+      relative jump out of range at element ##{insn.index} \
+      (0x#{hex(insn.address)}): #{inspect(insn.source)}
 
-      L'écart est de #{ecart} octets — de 0x#{hexa(apres)} (l'adresse après le JR) \
-      vers 0x#{hexa(cible)} (l'étiquette #{inspect(nom)}) — et JR n'encode qu'un \
-      déplacement de -128 à 127. Il faut un JP, dont la cible est absolue.
+      The gap is #{delta} bytes — from 0x#{hex(next_pc)} (the address after the \
+      JR) to 0x#{hex(target)} (the label #{inspect(name)}) — and JR only encodes \
+      a displacement of -128 to 127. This needs a JP, whose target is absolute.
       """
     end
 
-    ecart &&& 0xFF
+    delta &&& 0xFF
   end
 
-  defp immediat({:imm, 8}, entier, insn, _etiquettes) when is_integer(entier) do
-    # Les deux mnémoniques relatifs acceptent aussi un entier négatif, encodé en
-    # complément à deux ; ailleurs l'octet n'est jamais signé.
-    if insn.mnemonique in @relatifs do
-      plage!(entier, -128, 0xFF, "un octet signé", insn) &&& 0xFF
+  defp immediate({:imm, 8}, integer, insn, _labels) when is_integer(integer) do
+    # The two relative mnemonics also accept a negative integer, encoded in
+    # two's complement; everywhere else the byte is never signed.
+    if insn.mnemonic in @signed do
+      range!(integer, -128, 0xFF, "a signed byte", insn) &&& 0xFF
     else
-      plage!(entier, 0, 0xFF, "un octet", insn)
+      range!(integer, 0, 0xFF, "a byte", insn)
     end
   end
 
-  defp immediat({:imm, 16}, {:label, nom}, insn, etiquettes) do
-    nom |> resoudre_etiquette!(insn, etiquettes) |> plage!(0, 0xFFFF, "une adresse", insn)
+  defp immediate({:imm, 16}, {:label, name}, insn, labels) do
+    name |> resolve_label!(insn, labels) |> range!(0, 0xFFFF, "an address", insn)
   end
 
-  defp immediat({:imm, 16}, entier, insn, _etiquettes) when is_integer(entier) do
-    plage!(entier, 0, 0xFFFF, "un mot", insn)
+  defp immediate({:imm, 16}, integer, insn, _labels) when is_integer(integer) do
+    range!(integer, 0, 0xFFFF, "a word", insn)
   end
 
-  defp immediat(:a16_ind, {:mem, {:label, nom}}, insn, etiquettes) do
-    nom |> resoudre_etiquette!(insn, etiquettes) |> plage!(0, 0xFFFF, "une adresse", insn)
+  defp immediate(:a16_ind, {:mem, {:label, name}}, insn, labels) do
+    name |> resolve_label!(insn, labels) |> range!(0, 0xFFFF, "an address", insn)
   end
 
-  defp immediat(:a16_ind, {:mem, adresse}, insn, _etiquettes) do
-    plage!(adresse, 0, 0xFFFF, "une adresse", insn)
+  defp immediate(:a16_ind, {:mem, address}, insn, _labels) do
+    range!(address, 0, 0xFFFF, "an address", insn)
   end
 
-  # La page haute n'encode que l'octet bas : 0xFF00 + n. Une étiquette y est
-  # acceptée si — et seulement si — elle est tombée dans cette page.
-  defp immediat(:a8_ind, {:high, {:label, nom}}, insn, etiquettes) do
-    cible = resoudre_etiquette!(nom, insn, etiquettes)
+  # The high page only encodes the low byte: 0xFF00 + n. A label is accepted
+  # there if — and only if — it landed in that page.
+  defp immediate(:a8_ind, {:high, {:label, name}}, insn, labels) do
+    target = resolve_label!(name, insn, labels)
 
-    if cible < 0xFF00 or cible > 0xFFFF do
+    if target < 0xFF00 or target > 0xFFFF do
       raise ArgumentError, """
-      étiquette hors de la page haute à l'élément ##{insn.indice} \
-      (0x#{hexa(insn.adresse)}) : #{inspect(insn.source)}
+      label outside the high page at element ##{insn.index} \
+      (0x#{hex(insn.address)}): #{inspect(insn.source)}
 
-      #{inspect(nom)} est à 0x#{hexa(cible)}, or LDH n'atteint que \
-      0xFF00 à 0xFFFF : il n'encode que l'octet bas de l'adresse.
+      #{inspect(name)} is at 0x#{hex(target)}, whereas LDH only reaches \
+      0xFF00 to 0xFFFF: it encodes only the low byte of the address.
       """
     end
 
-    cible &&& 0xFF
+    target &&& 0xFF
   end
 
-  defp immediat(:a8_ind, {:high, octet}, insn, _etiquettes) do
-    plage!(octet, 0, 0xFF, "un décalage dans la page haute", insn)
+  defp immediate(:a8_ind, {:high, byte}, insn, _labels) do
+    range!(byte, 0, 0xFF, "an offset within the high page", insn)
   end
 
-  defp resoudre_etiquette!(nom, insn, etiquettes) do
-    case etiquettes do
-      %{^nom => adresse} ->
-        adresse
+  defp resolve_label!(name, insn, labels) do
+    case labels do
+      %{^name => address} ->
+        address
 
       _ ->
-        connues =
-          case Map.keys(etiquettes) do
-            [] -> "aucune étiquette n'est définie dans ce programme"
-            noms -> "définies : " <> Enum.map_join(Enum.sort(noms), ", ", &inspect/1)
+        known =
+          case Map.keys(labels) do
+            [] -> "no label is defined in this program"
+            names -> "defined: " <> Enum.map_join(Enum.sort(names), ", ", &inspect/1)
           end
 
         raise ArgumentError, """
-        étiquette inconnue : #{inspect(nom)}, à l'élément ##{insn.indice} \
-        (0x#{hexa(insn.adresse)}) — #{connues}.
+        unknown label: #{inspect(name)}, at element ##{insn.index} \
+        (0x#{hex(insn.address)}) — #{known}.
         """
     end
   end
 
-  defp plage!(valeur, bas, haut, quoi, insn) when is_integer(valeur) do
-    if valeur < bas or valeur > haut do
+  defp range!(value, low, high, what, insn) when is_integer(value) do
+    if value < low or value > high do
       raise ArgumentError, """
-      immédiat hors plage à l'élément ##{insn.indice} (0x#{hexa(insn.adresse)}) : \
+      immediate out of range at element ##{insn.index} (0x#{hex(insn.address)}): \
       #{inspect(insn.source)}
 
-      #{inspect(valeur)} ne tient pas dans #{quoi} : attendu #{bas}..#{haut}.
+      #{inspect(value)} does not fit in #{what}: expected #{low}..#{high}.
       """
     end
 
-    valeur
+    value
   end
 
-  defp plage!(valeur, _bas, _haut, quoi, insn) do
+  defp range!(value, _low, _high, what, insn) do
     raise ArgumentError, """
-    opérande non numérique à l'élément ##{insn.indice} (0x#{hexa(insn.adresse)}) : \
+    non-numeric operand at element ##{insn.index} (0x#{hex(insn.address)}): \
     #{inspect(insn.source)}
 
-    #{inspect(valeur)} devrait être #{quoi}.
+    #{inspect(value)} should be #{what}.
     """
   end
 
-  # ══ Les messages d'échec ═════════════════════════════════════════════════════
+  # ══ The failure messages ═════════════════════════════════════════════════════
 
-  defp message_inconnue(source, mnemonique, arguments, indice, adresse) do
-    situation = "à l'élément ##{indice} (0x#{hexa(adresse)}) : #{inspect(source)}"
-    orphelins = orphelins(arguments)
+  defp unknown_message(source, mnemonic, arguments, index, address) do
+    situation = "at element ##{index} (0x#{hex(address)}): #{inspect(source)}"
+    orphans = orphans(arguments)
 
     cond do
-      orphelins != [] ->
+      orphans != [] ->
         """
-        opérande de forme inconnue #{situation}
+        operand of unknown shape #{situation}
 
-        #{Enum.map_join(orphelins, "\n", &"  #{inspect(&1)} ne correspond à aucune forme d'opérande.")}
+        #{Enum.map_join(orphans, "\n", &"  #{inspect(&1)} matches no operand shape.")}
 
-        Les formes reconnues sont : un registre (:a … :l), une paire (:bc, :de, \
-        :hl, :sp, :af), un entier, {:mem, …}, {:high, …} et {:label, nom}.
+        The recognised shapes are: a register (:a … :l), a pair (:bc, :de, \
+        :hl, :sp, :af), an integer, {:mem, …}, {:high, …} and {:label, name}.
         """
 
-      mnemonique in @mnemoniques ->
+      mnemonic in @mnemonics ->
         """
-        instruction inconnue #{situation}
+        unknown instruction #{situation}
 
-        Le mnémonique #{inspect(mnemonique)} existe, mais pas avec ces opérandes.
-        #{formes_connues(mnemonique, arguments)}
+        The mnemonic #{inspect(mnemonic)} exists, but not with these operands.
+        #{known_forms(mnemonic, arguments)}
         """
 
       true ->
         """
-        mnémonique inconnu #{situation}
+        unknown mnemonic #{situation}
 
-        #{inspect(mnemonique)} n'est pas dans la table du SM83.#{suggestion(mnemonique)}
+        #{inspect(mnemonic)} is not in the SM83 table.#{suggestion(mnemonic)}
         """
     end
   end
 
-  defp orphelins(arguments) do
-    # Une condition en tête n'est pas un opérande : la retirer avant de chercher
-    # les fautives, sinon `{:jr, :nz, cible}` accuserait `:nz`.
+  defp orphans(arguments) do
+    # A leading condition is not an operand: drop it before looking for the
+    # culprits, otherwise `{:jr, :nz, target}` would accuse `:nz`.
     arguments
     |> case do
-      [tete | reste] when tete in [:nz, :z, :nc, :c] -> reste
-      tous -> tous
+      [head | rest] when head in [:nz, :z, :nc, :c] -> rest
+      all -> all
     end
-    |> Enum.filter(&(formes(&1) == []))
+    |> Enum.filter(&(forms(&1) == []))
   end
 
-  # Les formes réellement existantes, en syntaxe assembleur. `:ld` en compte
-  # quatre-vingt-sept : les lister toutes n'aide personne. On montre celles qui
-  # ressemblent le plus à ce qui a été écrit — d'abord le nombre d'opérandes qui
-  # tombent juste, ensuite l'écart d'arité. Sur `{:ld, :a, :bc}`, la faute étant
-  # dans le second opérande, ce sont les formes en A qui remontent.
-  @plafond_formes 12
+  # The forms that actually exist, in assembler syntax. `:ld` has eighty-seven
+  # of them: listing them all helps nobody. We show those that look most like
+  # what was written — first by the number of operands that land right, then by
+  # the arity gap. On `{:ld, :a, :bc}`, the mistake being in the second operand,
+  # it is the forms taking A that come up.
+  @form_limit 12
 
-  defp formes_connues(mnemonique, arguments) do
+  defp known_forms(mnemonic, arguments) do
     labels =
       Table.all()
-      |> Enum.filter(&(&1.mnemonic == mnemonique))
-      |> Enum.sort_by(&{-concordance(&1, arguments), ecart_arite(&1, arguments)})
+      |> Enum.filter(&(&1.mnemonic == mnemonic))
+      |> Enum.sort_by(&{-matches(&1, arguments), arity_gap(&1, arguments)})
       |> Enum.map(&Insn.label/1)
       |> Enum.uniq()
 
-    {montrees, reste} = Enum.split(labels, @plafond_formes)
+    {shown, rest} = Enum.split(labels, @form_limit)
 
-    debut = "Formes connues :\n" <> Enum.map_join(montrees, "\n", &"  #{&1}")
+    start = "Known forms:\n" <> Enum.map_join(shown, "\n", &"  #{&1}")
 
-    case reste do
-      [] -> debut
-      autres -> debut <> "\n  … et #{length(autres)} autres."
+    case rest do
+      [] -> start
+      others -> start <> "\n  … and #{length(others)} more."
     end
   end
 
-  # Le nombre d'opérandes de la table qu'un opérande source écrit à la même place
-  # pourrait effectivement désigner.
-  defp concordance(insn, arguments) do
-    ecrits =
+  # The number of table operands that a source operand written in the same place
+  # could actually denote.
+  defp matches(insn, arguments) do
+    written =
       case arguments do
-        [tete | reste] when tete in [:nz, :z, :nc, :c] and insn.condition != nil -> reste
-        tous -> tous
+        [head | rest] when head in [:nz, :z, :nc, :c] and insn.condition != nil -> rest
+        all -> all
       end
 
     insn.operands
-    |> Enum.zip(ecrits)
-    |> Enum.count(fn {gabarit, ecrit} -> gabarit in formes(ecrit) end)
+    |> Enum.zip(written)
+    |> Enum.count(fn {template, one} -> template in forms(one) end)
   end
 
-  defp ecart_arite(insn, arguments) do
-    arite = length(insn.operands) + if(insn.condition, do: 1, else: 0)
-    abs(arite - length(arguments))
+  defp arity_gap(insn, arguments) do
+    arity = length(insn.operands) + if(insn.condition, do: 1, else: 0)
+    abs(arity - length(arguments))
   end
 
-  defp suggestion(mnemonique) do
-    ecrit = Atom.to_string(mnemonique)
+  defp suggestion(mnemonic) do
+    written = Atom.to_string(mnemonic)
 
-    proches =
-      @mnemoniques
-      |> Enum.map(&{String.jaro_distance(ecrit, Atom.to_string(&1)), &1})
-      # 0,65 et non 0,8 : les mnémoniques du SM83 font deux ou trois lettres, où
-      # une seule faute de frappe fait déjà tomber la distance de Jaro à 0,67.
+    close =
+      @mnemonics
+      |> Enum.map(&{String.jaro_distance(written, Atom.to_string(&1)), &1})
+      # 0.65 and not 0.8: SM83 mnemonics are two or three letters long, where a
+      # single typo already drops the Jaro distance to 0.67.
       |> Enum.filter(fn {score, _} -> score >= 0.65 end)
       |> Enum.sort(:desc)
       |> Enum.take(3)
-      |> Enum.map(fn {_, nom} -> inspect(nom) end)
+      |> Enum.map(fn {_, name} -> inspect(name) end)
 
-    case proches do
+    case close do
       [] -> ""
-      [seul] -> " Vouliez-vous dire #{seul} ?"
-      plusieurs -> " Vouliez-vous dire #{Enum.join(plusieurs, ", ")} ?"
+      [single] -> " Did you mean #{single}?"
+      several -> " Did you mean #{Enum.join(several, ", ")}?"
     end
   end
 
-  defp hexa(valeur), do: valeur |> Integer.to_string(16) |> String.pad_leading(4, "0")
+  defp hex(value), do: value |> Integer.to_string(16) |> String.pad_leading(4, "0")
 end

@@ -1,23 +1,23 @@
 defmodule Potion.AssemblerTest do
   @moduledoc """
-  L'assembleur contre la table dont il est tiré.
+  The assembler against the table it is drawn from.
 
-  Le premier test est le seul qui compte vraiment : il reconstruit une
-  instruction source pour **chacune** des instructions de
-  `Atomboy.CPU.Table.all/0`, l'assemble, et compare les octets à ce que la table
-  annonce — préfixe, opcode, immédiats en petit-boutien. Il n'énumère rien à la
-  main et n'a rien à mettre à jour : une famille ajoutée à la table est
-  immédiatement couverte, et une forme d'opérande que l'assembleur ne saurait pas
-  écrire échoue ici plutôt que dans une ROM.
+  The first test is the only one that really counts: it rebuilds a source
+  instruction for **each** of the instructions in `Atomboy.CPU.Table.all/0`,
+  assembles it, and compares the bytes with what the table announces — prefix,
+  opcode, immediates in little-endian. It enumerates nothing by hand and has
+  nothing to keep up to date: a family added to the table is covered
+  immediately, and an operand shape the assembler would not know how to write
+  fails here rather than in a ROM.
 
-  C'est la même mécanique que `Atomboy.CPU.LoopTest` applique aux deux backends
-  d'exécution : plutôt que de vérifier un échantillon choisi, on vérifie
-  l'ensemble et on rapporte toutes les divergences d'un coup. Un échec liste les
-  instructions fautives, pas la première.
+  It is the same mechanism `Atomboy.CPU.LoopTest` applies to the two execution
+  backends: rather than checking a chosen sample, we check the whole set and
+  report every divergence at once. A failure lists the offending instructions,
+  not just the first one.
 
-  Le reste vérifie ce que la table ne dit pas : la résolution des étiquettes,
-  les plages des immédiats, et — dernier maillon — qu'un programme assemblé
-  s'exécute bien sur l'oracle CPU et calcule ce qui est écrit.
+  The rest checks what the table does not say: label resolution, immediate
+  ranges, and — the last link — that an assembled program does run on the CPU
+  oracle and computes what is written.
   """
 
   use ExUnit.Case, async: true
@@ -30,41 +30,40 @@ defmodule Potion.AssemblerTest do
 
   doctest Potion.Assembler
 
-  # Des valeurs factices reconnaissables : un octet qui n'est pas un opcode
-  # intéressant, un mot dont les deux moitiés diffèrent — de quoi voir un
-  # petit-boutien inversé.
+  # Recognisable dummy values: a byte that is not an interesting opcode, a word
+  # whose two halves differ — enough to spot a flipped little-endian.
   @d8 0x12
   @d16 0x1234
 
-  describe "aller-retour avec la table" do
-    test "les #{length(Table.all())} instructions de la table s'assemblent comme elles se décodent" do
+  describe "round trip with the table" do
+    test "the #{length(Table.all())} instructions of the table assemble as they decode" do
       divergences =
         for %Insn{} = insn <- Table.all(),
-            emis = Assembler.assemble([source(insn)]),
-            attendu = attendu(insn),
-            emis != attendu,
-            do: {Insn.label(insn), insn.prefix, insn.opcode, attendu, emis}
+            emitted = Assembler.assemble([source(insn)]),
+            expected = expected(insn),
+            emitted != expected,
+            do: {Insn.label(insn), insn.prefix, insn.opcode, expected, emitted}
 
       assert divergences == []
     end
 
-    test "chaque instruction occupe exactement les octets qu'elle annonce" do
-      # L'assemblage de deux instructions bout à bout est la concaténation des
-      # deux : rien ne se chevauche, rien ne se perd. C'est l'invariant de taille
-      # vu de l'extérieur.
+    test "every instruction takes up exactly the bytes it announces" do
+      # Assembling two instructions back to back is the concatenation of the
+      # two: nothing overlaps, nothing is lost. It is the size invariant seen
+      # from the outside.
       for %Insn{} = insn <- Table.all() do
-        seule = Assembler.assemble([source(insn)])
-        doublee = Assembler.assemble([source(insn), source(insn)])
+        alone = Assembler.assemble([source(insn)])
+        doubled = Assembler.assemble([source(insn), source(insn)])
 
-        assert doublee == seule <> seule, "chaînage incorrect pour #{Insn.label(insn)}"
+        assert doubled == alone <> alone, "incorrect chaining for #{Insn.label(insn)}"
       end
     end
   end
 
-  describe "les opérandes ambigus" do
-    test ":c se lit registre ou condition selon l'instruction" do
-      # Aucune règle syntaxique ne les distingue — seule la table sait laquelle
-      # des deux lectures désigne une instruction existante.
+  describe "the ambiguous operands" do
+    test ":c reads as a register or a condition depending on the instruction" do
+      # No syntactic rule tells them apart — only the table knows which of the
+      # two readings names an existing instruction.
       assert Assembler.assemble([{:inc, :c}]) == <<0x0C>>
       assert Assembler.assemble([{:ret, :c}]) == <<0xD8>>
       assert Assembler.assemble([{:ret}]) == <<0xC9>>
@@ -73,14 +72,14 @@ defmodule Potion.AssemblerTest do
       assert Assembler.assemble([{:ldh, :a, {:high, :c}}]) == <<0xF2>>
     end
 
-    test "la largeur d'un immédiat est déduite de la table" do
+    test "the width of an immediate is deduced from the table" do
       assert Assembler.assemble([{:ld, :a, 0x42}]) == <<0x3E, 0x42>>
       assert Assembler.assemble([{:ld, :hl, 0xC000}]) == <<0x21, 0x00, 0xC0>>
       assert Assembler.assemble([{:jp, 0xC000}]) == <<0xC3, 0x00, 0xC0>>
       assert Assembler.assemble([{:jr, 0x10}]) == <<0x18, 0x10>>
     end
 
-    test "un entier vaut aussi cible de RST ou numéro de bit" do
+    test "an integer also serves as an RST target or a bit number" do
       assert Assembler.assemble([{:rst, 0x00}]) == <<0xC7>>
       assert Assembler.assemble([{:rst, 0x38}]) == <<0xFF>>
       assert Assembler.assemble([{:bit, 7, {:mem, :hl}}]) == <<0xCB, 0x7E>>
@@ -88,7 +87,7 @@ defmodule Potion.AssemblerTest do
       assert Assembler.assemble([{:set, 3, :b}]) == <<0xCB, 0xD8>>
     end
 
-    test "les immédiats signés de JR et ADD SP passent en complément à deux" do
+    test "the signed immediates of JR and ADD SP go through two's complement" do
       assert Assembler.assemble([{:jr, -2}]) == <<0x18, 0xFE>>
       assert Assembler.assemble([{:add_sp, :sp, -2}]) == <<0xE8, 0xFE>>
       assert Assembler.assemble([{:add_sp, :hl, 8}]) == <<0xF8, 0x08>>
@@ -97,154 +96,154 @@ defmodule Potion.AssemblerTest do
     end
   end
 
-  describe "les étiquettes" do
-    test "un JR arrière compte un écart négatif" do
-      # NOP en 0x0150, JR en 0x0151 : PC vaut 0x0153 quand l'écart s'applique,
-      # la cible est 0x0150, donc -3.
-      programme = [{:label, :main_loop}, {:nop}, {:jr, {:label, :main_loop}}]
+  describe "the labels" do
+    test "a backward JR counts a negative gap" do
+      # NOP at 0x0150, JR at 0x0151: PC is 0x0153 when the gap applies, the
+      # target is 0x0150, hence -3.
+      program = [{:label, :main_loop}, {:nop}, {:jr, {:label, :main_loop}}]
 
-      assert Assembler.assemble(programme) == <<0x00, 0x18, 0xFD>>
+      assert Assembler.assemble(program) == <<0x00, 0x18, 0xFD>>
     end
 
-    test "un JR avant compte un écart positif" do
-      programme = [{:jr, {:label, :fin}}, {:nop}, {:nop}, {:label, :fin}, {:halt}]
+    test "a forward JR counts a positive gap" do
+      program = [{:jr, {:label, :done}}, {:nop}, {:nop}, {:label, :done}, {:halt}]
 
-      assert Assembler.assemble(programme) == <<0x18, 0x02, 0x00, 0x00, 0x76>>
+      assert Assembler.assemble(program) == <<0x18, 0x02, 0x00, 0x00, 0x76>>
     end
 
-    test "un JR conditionnel vise la même adresse" do
-      programme = [{:label, :main_loop}, {:jr, :nz, {:label, :main_loop}}]
+    test "a conditional JR aims at the same address" do
+      program = [{:label, :main_loop}, {:jr, :nz, {:label, :main_loop}}]
 
-      assert Assembler.assemble(programme) == <<0x20, 0xFE>>
+      assert Assembler.assemble(program) == <<0x20, 0xFE>>
     end
 
-    test "les deux bornes exactes de la portée d'un JR" do
-      # +127 : l'étiquette est à 127 octets de l'adresse suivant le JR.
-      avant = [{:jr, {:label, :loin}}, {:bytes, remplissage(127)}, {:label, :loin}]
-      assert <<0x18, 0x7F, _::binary>> = Assembler.assemble(avant)
+    test "the two exact bounds of a JR's range" do
+      # +127: the label is 127 bytes from the address following the JR.
+      forward = [{:jr, {:label, :far}}, {:bytes, padding(127)}, {:label, :far}]
+      assert <<0x18, 0x7F, _::binary>> = Assembler.assemble(forward)
 
-      # -128 : le JR est à 126 octets de l'étiquette, plus ses deux propres.
-      arriere = [{:label, :loin}, {:bytes, remplissage(126)}, {:jr, {:label, :loin}}]
-      assert <<_::binary-size(126), 0x18, 0x80>> = Assembler.assemble(arriere)
+      # -128: the JR is 126 bytes from the label, plus its own two.
+      backward = [{:label, :far}, {:bytes, padding(126)}, {:jr, {:label, :far}}]
+      assert <<_::binary-size(126), 0x18, 0x80>> = Assembler.assemble(backward)
     end
 
-    test "un JR hors de portée nomme l'écart et les deux adresses" do
-      programme = [{:jr, {:label, :loin}}, {:bytes, remplissage(128)}, {:label, :loin}]
+    test "a JR out of range names the gap and both addresses" do
+      program = [{:jr, {:label, :far}}, {:bytes, padding(128)}, {:label, :far}]
 
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble(programme) end
+      error = assert_raise ArgumentError, fn -> Assembler.assemble(program) end
 
-      assert erreur.message =~ "saut relatif hors de portée"
-      assert erreur.message =~ "L'écart est de 128 octets"
-      assert erreur.message =~ "0x0152"
-      assert erreur.message =~ "0x01D2"
-      assert erreur.message =~ ":loin"
+      assert error.message =~ "relative jump out of range"
+      assert error.message =~ "The gap is 128 bytes"
+      assert error.message =~ "0x0152"
+      assert error.message =~ "0x01D2"
+      assert error.message =~ ":far"
     end
 
-    test "JP et CALL prennent l'adresse absolue" do
-      programme = [
-        {:label, :debut},
-        {:jp, {:label, :debut}},
-        {:call, {:label, :debut}},
-        {:call, :nz, {:label, :debut}}
+    test "JP and CALL take the absolute address" do
+      program = [
+        {:label, :start},
+        {:jp, {:label, :start}},
+        {:call, {:label, :start}},
+        {:call, :nz, {:label, :start}}
       ]
 
-      assert Assembler.assemble(programme) ==
+      assert Assembler.assemble(program) ==
                <<0xC3, 0x50, 0x01, 0xCD, 0x50, 0x01, 0xC4, 0x50, 0x01>>
     end
 
-    test "une étiquette sert aussi d'adresse mémoire" do
-      programme = [
-        {:ld, :a, {:mem, {:label, :donnee}}},
-        {:label, :donnee},
+    test "a label also serves as a memory address" do
+      program = [
+        {:ld, :a, {:mem, {:label, :data}}},
+        {:label, :data},
         {:bytes, <<0x42>>}
       ]
 
-      assert Assembler.assemble(programme) == <<0xFA, 0x53, 0x01, 0x42>>
+      assert Assembler.assemble(program) == <<0xFA, 0x53, 0x01, 0x42>>
     end
 
-    test "une étiquette dans la page haute s'écrit en LDH" do
-      programme = [
+    test "a label in the high page is written with LDH" do
+      program = [
         {:ldh, {:high, {:label, :bgp}}, :a},
-        {:bytes, remplissage(0xFF47 - 0x0152)},
+        {:bytes, padding(0xFF47 - 0x0152)},
         {:label, :bgp}
       ]
 
-      assert <<0xE0, 0x47, _::binary>> = Assembler.assemble(programme)
+      assert <<0xE0, 0x47, _::binary>> = Assembler.assemble(program)
     end
 
-    test "une étiquette hors de la page haute refuse le LDH" do
-      programme = [{:ldh, {:high, {:label, :ici}}, :a}, {:label, :ici}]
+    test "a label outside the high page is refused by LDH" do
+      program = [{:ldh, {:high, {:label, :here}}, :a}, {:label, :here}]
 
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble(programme) end
+      error = assert_raise ArgumentError, fn -> Assembler.assemble(program) end
 
-      assert erreur.message =~ "hors de la page haute"
-      assert erreur.message =~ "0x0152"
+      assert error.message =~ "outside the high page"
+      assert error.message =~ "0x0152"
     end
 
-    test "une étiquette inconnue liste celles qui existent" do
-      programme = [{:label, :ici}, {:jp, {:label, :ailleurs}}]
+    test "an unknown label lists the ones that exist" do
+      program = [{:label, :here}, {:jp, {:label, :elsewhere}}]
 
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble(programme) end
+      error = assert_raise ArgumentError, fn -> Assembler.assemble(program) end
 
-      assert erreur.message =~ "étiquette inconnue : :ailleurs"
-      assert erreur.message =~ "définies : :ici"
+      assert error.message =~ "unknown label: :elsewhere"
+      assert error.message =~ "defined: :here"
     end
 
-    test "une étiquette dupliquée donne les deux adresses" do
-      programme = [{:label, :ici}, {:nop}, {:label, :ici}]
+    test "a duplicate label gives both addresses" do
+      program = [{:label, :here}, {:nop}, {:label, :here}]
 
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble(programme) end
+      error = assert_raise ArgumentError, fn -> Assembler.assemble(program) end
 
-      assert erreur.message =~ "étiquette dupliquée : :ici"
-      assert erreur.message =~ "0x0150"
-      assert erreur.message =~ "0x0151"
+      assert error.message =~ "duplicate label: :here"
+      assert error.message =~ "0x0150"
+      assert error.message =~ "0x0151"
     end
 
-    test "adresses/2 rend la carte sans émettre les octets" do
-      programme = [{:bytes, <<1, 2, 3>>}, {:label, :ici}, {:nop}, {:label, :apres}]
+    test "addresses/2 returns the map without emitting the bytes" do
+      program = [{:bytes, <<1, 2, 3>>}, {:label, :here}, {:nop}, {:label, :after}]
 
-      assert Assembler.addresses(programme, origin: 0x4000) == %{ici: 0x4003, apres: 0x4004}
+      assert Assembler.addresses(program, origin: 0x4000) == %{here: 0x4003, after: 0x4004}
     end
   end
 
-  describe "octets bruts et origine" do
-    test "les octets bruts s'intercalent tels quels" do
-      programme = [{:nop}, {:bytes, <<0xDE, 0xAD>>}, {:nop}, {:bytes, <<>>}]
+  describe "raw bytes and origin" do
+    test "raw bytes are inserted as they are" do
+      program = [{:nop}, {:bytes, <<0xDE, 0xAD>>}, {:nop}, {:bytes, <<>>}]
 
-      assert Assembler.assemble(programme) == <<0x00, 0xDE, 0xAD, 0x00>>
+      assert Assembler.assemble(program) == <<0x00, 0xDE, 0xAD, 0x00>>
     end
 
-    test "l'origine décale toutes les adresses résolues" do
-      programme = [{:label, :ici}, {:jp, {:label, :ici}}]
+    test "the origin shifts every resolved address" do
+      program = [{:label, :here}, {:jp, {:label, :here}}]
 
-      assert Assembler.assemble(programme, origin: 0x0000) == <<0xC3, 0x00, 0x00>>
-      assert Assembler.assemble(programme, origin: 0x0150) == <<0xC3, 0x50, 0x01>>
-      assert Assembler.assemble(programme, origin: 0x4000) == <<0xC3, 0x00, 0x40>>
+      assert Assembler.assemble(program, origin: 0x0000) == <<0xC3, 0x00, 0x00>>
+      assert Assembler.assemble(program, origin: 0x0150) == <<0xC3, 0x50, 0x01>>
+      assert Assembler.assemble(program, origin: 0x4000) == <<0xC3, 0x00, 0x40>>
     end
 
-    test "l'origine ne change pas un écart relatif" do
-      programme = [{:label, :main_loop}, {:jr, {:label, :main_loop}}]
+    test "the origin does not change a relative gap" do
+      program = [{:label, :main_loop}, {:jr, {:label, :main_loop}}]
 
-      assert Assembler.assemble(programme, origin: 0x0000) ==
-               Assembler.assemble(programme, origin: 0x7FF0)
+      assert Assembler.assemble(program, origin: 0x0000) ==
+               Assembler.assemble(program, origin: 0x7FF0)
     end
 
-    test "un programme vide donne un binaire vide" do
+    test "an empty program gives an empty binary" do
       assert Assembler.assemble([]) == <<>>
-      assert Assembler.assemble([{:label, :seule}]) == <<>>
+      assert Assembler.assemble([{:label, :lonely}]) == <<>>
     end
   end
 
-  describe "les refus" do
-    test "un immédiat hors plage nomme la valeur et la plage attendue" do
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, :a, 0x100}]) end
+  describe "the refusals" do
+    test "an out-of-range immediate names the value and the expected range" do
+      error = assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, :a, 0x100}]) end
 
-      assert erreur.message =~ "immédiat hors plage"
-      assert erreur.message =~ "256 ne tient pas dans un octet"
-      assert erreur.message =~ "0..255"
+      assert error.message =~ "immediate out of range"
+      assert error.message =~ "256 does not fit in a byte"
+      assert error.message =~ "0..255"
     end
 
-    test "les bornes des immédiats non signés" do
+    test "the bounds of the unsigned immediates" do
       assert Assembler.assemble([{:ld, :a, 0xFF}]) == <<0x3E, 0xFF>>
       assert Assembler.assemble([{:ld, :bc, 0xFFFF}]) == <<0x01, 0xFF, 0xFF>>
       assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, :a, -1}]) end
@@ -252,84 +251,84 @@ defmodule Potion.AssemblerTest do
       assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, {:mem, 0x10000}, :a}]) end
     end
 
-    test "un déplacement signé hors de -128..127" do
+    test "a signed displacement outside -128..127" do
       assert_raise ArgumentError, fn -> Assembler.assemble([{:add_sp, :sp, -129}]) end
       assert_raise ArgumentError, fn -> Assembler.assemble([{:jr, -129}]) end
     end
 
-    test "une instruction inconnue montre les formes qui existent" do
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, :a, :bc}]) end
+    test "an unknown instruction shows the forms that exist" do
+      error = assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, :a, :bc}]) end
 
-      assert erreur.message =~ "instruction inconnue"
-      assert erreur.message =~ "{:ld, :a, :bc}"
-      assert erreur.message =~ "élément #0"
-      # Les formes suggérées viennent d'`Insn.label/1` — le même nom que le
-      # tableau de bord affiche.
-      assert erreur.message =~ "LD A, (BC)"
+      assert error.message =~ "unknown instruction"
+      assert error.message =~ "{:ld, :a, :bc}"
+      assert error.message =~ "element #0"
+      # The suggested forms come from `Insn.label/1` — the same name the
+      # dashboard displays.
+      assert error.message =~ "LD A, (BC)"
     end
 
-    test "un mnémonique voisin est suggéré" do
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble([{:lb, :a, 1}]) end
+    test "a neighbouring mnemonic is suggested" do
+      error = assert_raise ArgumentError, fn -> Assembler.assemble([{:lb, :a, 1}]) end
 
-      assert erreur.message =~ "mnémonique inconnu"
-      assert erreur.message =~ "Vouliez-vous dire :ld"
+      assert error.message =~ "unknown mnemonic"
+      assert error.message =~ "Did you mean :ld"
     end
 
-    test "un opérande sans forme est désigné nommément" do
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, :a, {:mem, :sp}}]) end
+    test "an operand with no shape is named explicitly" do
+      error = assert_raise ArgumentError, fn -> Assembler.assemble([{:ld, :a, {:mem, :sp}}]) end
 
-      assert erreur.message =~ "opérande de forme inconnue"
-      assert erreur.message =~ "{:mem, :sp}"
+      assert error.message =~ "operand of unknown shape"
+      assert error.message =~ "{:mem, :sp}"
     end
 
-    test "une étiquette ne se glisse pas dans un immédiat 8 bits" do
-      programme = [{:ld, :a, {:label, :ici}}, {:label, :ici}]
+    test "a label does not slip into an 8-bit immediate" do
+      program = [{:ld, :a, {:label, :here}}, {:label, :here}]
 
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble(programme) end
+      error = assert_raise ArgumentError, fn -> Assembler.assemble(program) end
 
-      assert erreur.message =~ "étiquette là où LD attend un octet"
+      assert error.message =~ "label where LD expects a byte"
     end
 
-    test "l'élément fautif est situé par son indice et son adresse" do
-      programme = [{:nop}, {:nop}, {:ld, :a, 0x100}]
+    test "the offending element is located by its index and its address" do
+      program = [{:nop}, {:nop}, {:ld, :a, 0x100}]
 
-      erreur = assert_raise ArgumentError, fn -> Assembler.assemble(programme) end
+      error = assert_raise ArgumentError, fn -> Assembler.assemble(program) end
 
-      assert erreur.message =~ "élément #2 (0x0152)"
+      assert error.message =~ "element #2 (0x0152)"
     end
 
-    test "un élément qui n'est ni étiquette, ni octets, ni instruction" do
+    test "an element that is neither a label, nor bytes, nor an instruction" do
       assert_raise ArgumentError, fn -> Assembler.assemble([:nop]) end
       assert_raise ArgumentError, fn -> Assembler.assemble([{:bytes, ~c"abc"}]) end
-      assert_raise ArgumentError, fn -> Assembler.assemble([{:label, "ici"}]) end
+      assert_raise ArgumentError, fn -> Assembler.assemble([{:label, "here"}]) end
     end
   end
 
-  describe "exécution sur l'oracle" do
-    test "une addition et un rangement en mémoire" do
-      programme = [
+  describe "execution on the oracle" do
+    test "an addition and a store to memory" do
+      program = [
         {:ld, :a, 5},
         {:ld, :b, 3},
         {:add, :a, :b},
         {:ld, {:mem, 0xC000}, :a},
-        {:label, :fin},
-        {:jr, {:label, :fin}}
+        {:label, :done},
+        {:jr, {:label, :done}}
       ]
 
-      {etat, mem} = executer(programme, 20)
+      {state, mem} = run(program, 20)
 
-      assert etat.a == 8
+      assert state.a == 8
       assert Flat.read8(mem, 0xC000) == 8
-      # Le JR sur lui-même : PC est revenu sur l'instruction, la ROM ne déborde
-      # pas dans ce qui suit.
-      assert etat.pc == 0x0150 + 8
+      # The JR onto itself: PC has come back to the instruction, the ROM does
+      # not spill into what follows.
+      assert state.pc == 0x0150 + 8
     end
 
-    test "une boucle conditionnelle multiplie par additions" do
-      # 3 × 5, en décrémentant C jusqu'à ce que Z tombe. Le JR NZ saute en
-      # arrière vers une étiquette : c'est le premier programme dont le sens
-      # dépend d'une adresse que seul l'assembleur connaît.
-      programme = [
+    test "a conditional loop multiplies by adding" do
+      # 3 × 5, decrementing C until Z drops. The JR NZ jumps backwards to a
+      # label: it is the first program whose meaning depends on an address only
+      # the assembler knows.
+      program = [
         {:ld, :a, 0},
         {:ld, :b, 3},
         {:ld, :c, 5},
@@ -338,93 +337,93 @@ defmodule Potion.AssemblerTest do
         {:dec, :c},
         {:jr, :nz, {:label, :main_loop}},
         {:ld, {:mem, 0xC000}, :a},
-        {:label, :fin},
-        {:jr, {:label, :fin}}
+        {:label, :done},
+        {:jr, {:label, :done}}
       ]
 
-      {etat, mem} = executer(programme, 200)
+      {state, mem} = run(program, 200)
 
-      assert etat.a == 15
-      assert etat.c == 0
+      assert state.a == 15
+      assert state.c == 0
       assert Flat.read8(mem, 0xC000) == 15
     end
 
-    test "un CALL, un RET, et des données lues par étiquette" do
-      programme = [
+    test "a CALL, a RET, and data read through a label" do
+      program = [
         {:ld, :sp, 0xDFFF},
-        {:call, {:label, :charger}},
+        {:call, {:label, :fetch}},
         {:ld, {:mem, 0xC000}, :a},
-        {:label, :fin},
-        {:jr, {:label, :fin}},
-        {:label, :charger},
-        {:ld, :a, {:mem, {:label, :donnee}}},
+        {:label, :done},
+        {:jr, {:label, :done}},
+        {:label, :fetch},
+        {:ld, :a, {:mem, {:label, :data}}},
         {:ret},
-        {:label, :donnee},
+        {:label, :data},
         {:bytes, <<0x5A>>}
       ]
 
-      {etat, mem} = executer(programme, 50)
+      {state, mem} = run(program, 50)
 
-      assert etat.a == 0x5A
+      assert state.a == 0x5A
       assert Flat.read8(mem, 0xC000) == 0x5A
-      # SP est revenu à sa valeur d'avant l'appel : le RET a bien dépilé.
-      assert etat.sp == 0xDFFF
+      # SP is back to its pre-call value: the RET did pop.
+      assert state.sp == 0xDFFF
     end
   end
 
-  # ── Reconstruction d'une source depuis la table ──────────────────────────────
+  # ── Rebuilding a source from the table ───────────────────────────────────────
 
   defp source(%Insn{} = insn) do
-    operandes = Enum.map(insn.operands, &source_operande/1)
-    arguments = if insn.condition, do: [insn.condition | operandes], else: operandes
+    operands = Enum.map(insn.operands, &source_operand/1)
+    arguments = if insn.condition, do: [insn.condition | operands], else: operands
 
     List.to_tuple([insn.mnemonic | arguments])
   end
 
-  defp source_operande({:reg, registre}), do: registre
-  defp source_operande({:pair, paire}), do: paire
-  defp source_operande(:hl_ind), do: {:mem, :hl}
-  defp source_operande({:ind, cible}), do: {:mem, cible}
-  defp source_operande(:a16_ind), do: {:mem, @d16}
-  defp source_operande(:a8_ind), do: {:high, @d8}
-  defp source_operande(:c_ind), do: {:high, :c}
-  defp source_operande({:imm, 8}), do: @d8
-  defp source_operande({:imm, 16}), do: @d16
-  defp source_operande({:rst, cible}), do: cible
-  defp source_operande({:bit, numero}), do: numero
+  defp source_operand({:reg, register}), do: register
+  defp source_operand({:pair, pair}), do: pair
+  defp source_operand(:hl_ind), do: {:mem, :hl}
+  defp source_operand({:ind, target}), do: {:mem, target}
+  defp source_operand(:a16_ind), do: {:mem, @d16}
+  defp source_operand(:a8_ind), do: {:high, @d8}
+  defp source_operand(:c_ind), do: {:high, :c}
+  defp source_operand({:imm, 8}), do: @d8
+  defp source_operand({:imm, 16}), do: @d16
+  defp source_operand({:rst, target}), do: target
+  defp source_operand({:bit, number}), do: number
 
-  defp attendu(%Insn{} = insn) do
-    prefixe = if insn.prefix == :cb, do: <<0xCB>>, else: <<>>
-    immediats = insn.operands |> Enum.map(&octets_attendus/1) |> IO.iodata_to_binary()
+  defp expected(%Insn{} = insn) do
+    prefix = if insn.prefix == :cb, do: <<0xCB>>, else: <<>>
+    immediates = insn.operands |> Enum.map(&expected_bytes/1) |> IO.iodata_to_binary()
 
-    prefixe <> <<insn.opcode>> <> immediats
+    prefix <> <<insn.opcode>> <> immediates
   end
 
-  defp octets_attendus({:imm, 8}), do: <<@d8>>
-  defp octets_attendus(:a8_ind), do: <<@d8>>
-  defp octets_attendus({:imm, 16}), do: <<@d16::16-little>>
-  defp octets_attendus(:a16_ind), do: <<@d16::16-little>>
-  defp octets_attendus(_encode_dans_l_opcode), do: <<>>
+  defp expected_bytes({:imm, 8}), do: <<@d8>>
+  defp expected_bytes(:a8_ind), do: <<@d8>>
+  defp expected_bytes({:imm, 16}), do: <<@d16::16-little>>
+  defp expected_bytes(:a16_ind), do: <<@d16::16-little>>
+  defp expected_bytes(_encoded_in_the_opcode), do: <<>>
 
-  # ── Le harnais d'exécution ───────────────────────────────────────────────────
+  # ── The execution harness ────────────────────────────────────────────────────
 
-  defp remplissage(n), do: :binary.copy(<<0x00>>, n)
+  defp padding(n), do: :binary.copy(<<0x00>>, n)
 
-  # La ROM assemblée, posée à son origine dans une mémoire plate, exécutée pas à
-  # pas par l'oracle — le même `Atomboy.CPU.step/2` que les vecteurs
-  # SingleStepTests valident.
-  defp executer(programme, pas, origine \\ 0x0150) do
-    octets = Assembler.assemble(programme, origin: origine)
+  # The assembled ROM, laid at its origin in a flat memory, executed step by step
+  # by the oracle — the same `Atomboy.CPU.step/2` that the SingleStepTests
+  # vectors validate.
+  defp run(program, steps, origin \\ 0x0150) do
+    bytes = Assembler.assemble(program, origin: origin)
 
     mem =
       Flat.new(
-        for {octet, decalage} <- Enum.with_index(:binary.bin_to_list(octets)),
-            do: {origine + decalage, octet}
+        for {byte, offset} <- Enum.with_index(:binary.bin_to_list(bytes)),
+            do: {origin + offset, byte}
       )
 
-    Enum.reduce(1..pas, {%State{pc: origine}, mem}, fn _, {etat, mem} ->
-      {etat, mem, _cycles} = Atomboy.CPU.step(etat, mem)
-      {etat, mem}
+    Enum.reduce(1..steps, {%State{pc: origin}, mem}, fn _, {state, mem} ->
+      {state, mem, _cycles} = Atomboy.CPU.step(state, mem)
+      {state, mem}
     end)
   end
 end
