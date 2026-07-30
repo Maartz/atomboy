@@ -246,40 +246,6 @@ static esp_lcd_panel_handle_t panel_open(void) {
    * the framebuffer changes. */
   ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, false));
 
-  /* FRMCTR1: the panel's own refresh rate, taken from its default 70 Hz to its
-   * maximum 119.
-   *
-   * This module brings out eight pins and TE is not among them, so there is no
-   * way to learn when the panel starts scanning its own memory -- which means no
-   * way to keep our write from crossing that scan. The tear is not fixable here;
-   * only its visibility is.
-   *
-   * And visibility is a beat frequency. At 70 Hz against the console's 59.7 the
-   * crossing point drifts ten times a second, which the eye reads perfectly as a
-   * bar sliding across the picture. At 119 it drifts sixty times a second, which
-   * the eye reads as a faint shimmer and mostly not at all.
-   *
-   * Nothing about the sound is involved. The tear was always there; pacing the
-   * console on the audio clock moved it from a rate too fast to see to one that
-   * is exactly wrong. Slowing the console back down would hide it again and
-   * ruin the music, which is a trade in the wrong direction.
-   *
-   * The drift is the distance to the console's rate *or to any multiple of it*,
-   * so 119 is a poor choice despite being the fastest: it sits almost exactly on
-   * the second harmonic of 58.8. 90 Hz is as far from both 58.8 and 117.6 as the
-   * register can reach, which makes it the best available and not a good one.
-   *
-   * DIVA = 0, RTNA from the datasheet's table: 0x10 is 119 Hz, 0x15 is 90, 0x1B
-   * the 70 Hz default, 0x1F the 61 Hz floor -- and 61 against 58.8 would be the
-   * worst setting there is, a seam creeping across once a second.
-   *
-   * This must be sent here and not later. A sweep that changed it at run time
-   * produced no visible effect at any of five values, which is how the latching
-   * was discovered: the panel takes this register at initialisation and ignores
-   * it afterwards. An experiment that cannot change anything reports that
-   * nothing matters. */
-  const uint8_t frame_rate[] = {0x00, 0x15};
-  ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(io, 0xB1, frame_rate, sizeof(frame_rate)));
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
   gpio_set_level(PIN_BL, 1);
