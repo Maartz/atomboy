@@ -43,12 +43,12 @@ defmodule Mix.Tasks.Atomboy.Native do
     image = Interp.image(memoire, %State{}, 1)
 
     code = image.labels[:table_base]
-    couverts = length(Emit.couverture())
+    couverts = length(Emit.couverture_table())
     total = length(Table.all())
     alu = Asm.assemble(ALU.routines())
 
     Mix.shell().info("""
-    Couverture : #{couverts}/#{total} opcodes émis (#{pourcent(couverts, total)} %)
+    Couverture : #{couverts}/#{total} instructions émises (#{pourcent(couverts, total)} %)#{if Emit.prefixe_couvert?(), do: ", préfixe CB câblé", else: ""}
     Code       : #{code} octets, soit #{pourcent(code, @icache)} % de l'icache du C6
     ALU        : #{alu.size} octets pour #{routines(alu)} routines, liées à l'interpréteur
     Image      : #{image.size} octets, dont 64 Ko de mémoire émulée

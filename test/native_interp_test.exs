@@ -15,7 +15,9 @@ defmodule Atomboy.NativeInterpTest do
 
   use ExUnit.Case, async: true
 
+  alias Atomboy.CPU.Insn
   alias Atomboy.CPU.State
+  alias Atomboy.CPU.Table
   alias Atomboy.Memory.Flat
   alias Atomboy.Native.Emit
   alias Atomboy.Native.Interp
@@ -29,7 +31,7 @@ defmodule Atomboy.NativeInterpTest do
   @seeds 1..8
 
   describe "la couverture" do
-    test "les étapes 1 et 3 à 6 couvrent les familles émises" do
+    test "les étapes 1 et 3 à 7 ne laissent que les interruptions" do
       couverts = MapSet.new(Emit.couverture())
 
       assert {nil, 0x00} in couverts, "NOP"
@@ -75,18 +77,27 @@ defmodule Atomboy.NativeInterpTest do
       assert {nil, 0xC9} in couverts, "RET"
       assert {nil, 0xD8} in couverts, "RET C"
 
-      # 0x76 est HALT, pas un LD : le trou dans le bloc x=1.
-      refute {nil, 0x76} in couverts, "HALT n'est pas un LD"
-      # Tout ce qui parle aux interruptions attend l'étape 8, RETI compris —
+      assert {nil, 0xCB} in couverts, "le préfixe CB"
+      assert {:cb, 0x00} in couverts, "RLC B"
+      assert {:cb, 0x36} in couverts, "SWAP (HL)"
+      assert {:cb, 0x7E} in couverts, "BIT 7, (HL)"
+      assert {:cb, 0x86} in couverts, "RES 0, (HL)"
+      assert {:cb, 0xFF} in couverts, "SET 7, A"
+
+      # Il ne reste que ce qui parle aux interruptions — étape 8. RETI compris :
       # il pose IME, et l'invité refuse encore tout état où IME est armé.
+      refute {nil, 0x76} in couverts, "HALT"
       refute {nil, 0xD9} in couverts, "RETI"
       refute {nil, 0xF3} in couverts, "DI"
       refute {nil, 0xFB} in couverts, "EI"
-      refute {nil, 0xCB} in couverts, "le préfixe CB"
 
-      # 218 (étapes 1 et 3 à 5) + 5 JR + 2 JP + 4 JP cc + 1 CALL + 4 CALL cc
-      # + 1 RET + 4 RET cc.
-      assert MapSet.size(couverts) == 239
+      # 239 (étapes 1 et 3 à 6) + STOP + les 256 du bloc étendu.
+      assert length(Emit.couverture_table()) == 496
+      assert length(Table.all()) - length(Emit.couverture_table()) == 4, "HALT, DI, EI, RETI"
+
+      # Le préfixe s'ajoute au dispatchable sans être une entrée de table.
+      assert MapSet.size(couverts) == 497
+      assert Emit.prefixe_couvert?()
     end
 
     test "la correspondance mnémonique → primitive suit celle de Gen" do
@@ -242,6 +253,28 @@ defmodule Atomboy.NativeInterpTest do
       assert resultat.memoire == memoire
     end
 
+    test "BIT n pèse bien le bit n, et lui seul" do
+      # Même angle mort que `POP AF` : `BIT` n'écrit que F, donc la première
+      # opération d'ALU venue efface son résultat avant qu'on l'observe. Vérifié
+      # par mutation — décaler le numéro de bit d'un cran laisse l'équivalence
+      # croisée entièrement verte, dans les deux familles.
+      #
+      # 0xAA vaut 10101010 : Z ne doit se lever que sur les bits pairs. C entre
+      # à 1 et doit ressortir intact, H doit se poser.
+      for n <- 0..7 do
+        memoire = programme(%{0x100 => 0xCB, 0x101 => 0x40 + n * 8})
+
+        resultat = Run.run!(memoire, %State{pc: 0x100, b: 0xAA, f: 0x10}, 8)
+
+        zero = if rem(n, 2) == 0, do: 0x80, else: 0x00
+
+        assert resultat.state.f == zero + 0x20 + 0x10,
+               "BIT #{n}, B sur 0xAA : F vaut #{Atomboy.CPU.State.flag_string(resultat.state)}"
+
+        assert resultat.state.b == 0xAA, "BIT ne doit pas écrire sa cible"
+      end
+    end
+
     test "PC reboucle à 0xFFFF sans déborder" do
       memoire = :binary.copy(<<0x00>>, 0x10000)
 
@@ -252,12 +285,27 @@ defmodule Atomboy.NativeInterpTest do
     end
   end
 
-  describe "l'équivalence croisée avec l'oracle" do
+  # Deux familles, parce qu'elles ne prouvent pas la même chose.
+  #
+  # Les programmes **linéaires** excluent tout ce qui détourne PC : l'exécution
+  # balaie alors l'espace d'adressage de bout en bout et chaque opcode émis
+  # passe des dizaines de fois. C'est la famille qui donne la *largeur*.
+  #
+  # Les programmes **avec sauts** prennent toute la table. Mesuré : ils ne
+  # visitent que 37 à 290 adresses distinctes sur 65 536, parce qu'un `JR -2`
+  # suffit à enfermer PC dans une boucle. Ils ne prouvent donc presque rien sur
+  # la largeur — mais ils sont les seuls à exercer les branchements, la pile en
+  # usage réel et l'auto-modification. C'est la famille qui donne la
+  # *profondeur*.
+  #
+  # Croire que la seconde suffisait était une erreur : « 40 000 instructions »
+  # se lit comme une couverture, et n'en est pas une.
+  describe "l'équivalence croisée — programmes linéaires" do
     for seed <- @seeds do
-      test "programme aléatoire, graine #{seed}" do
+      test "programme linéaire, graine #{seed}" do
         :rand.seed(:exsss, {unquote(seed), 0, 0})
 
-        memoire = programme_aleatoire()
+        memoire = programme_aleatoire(opcodes_lineaires())
         state = etat_aleatoire()
 
         {attendu, memoire_oracle, budget, fautif} = oracle(memoire, state, @steps)
@@ -281,6 +329,52 @@ defmodule Atomboy.NativeInterpTest do
         # chemin de PC — et fabriquent alors des opcodes que le natif ne sait
         # pas encore émettre. L'équivalence porte sur le préfixe sain ; un
         # cycle de plus doit faire échouer le natif sur *cet* opcode-là.
+        if fautif do
+          suite = Run.run!(memoire, state, budget + 1)
+
+          assert suite.statut == :opcode_inconnu
+          assert suite.opcode == fautif
+        end
+      end
+    end
+
+    test "un programme linéaire traverse effectivement toute la table" do
+      # Sans cette mesure, la famille linéaire pourrait se rétrécir sans qu'on
+      # le voie — c'est exactement ce qui était arrivé à l'autre.
+      :rand.seed(:exsss, {1, 0, 0})
+      memoire = programme_aleatoire(opcodes_lineaires())
+      {_, _, _, _, vus} = trace(memoire, etat_aleatoire(), @steps)
+
+      assert MapSet.size(vus) > 200,
+             "seulement #{MapSet.size(vus)} opcodes distincts exécutés sur #{length(opcodes_lineaires())}"
+    end
+  end
+
+  describe "l'équivalence croisée — programmes avec sauts" do
+    for seed <- @seeds do
+      test "programme avec sauts, graine #{seed}" do
+        :rand.seed(:exsss, {unquote(seed), 0, 0})
+
+        memoire = programme_aleatoire(opcodes_complets())
+        state = etat_aleatoire()
+
+        {attendu, memoire_oracle, budget, fautif} = oracle(memoire, state, @steps)
+
+        resultat = Run.run!(memoire, state, budget)
+
+        assert resultat.statut == :ok
+        assert resultat.cycles == budget
+        assert resultat.state == attendu
+
+        divergences =
+          for addr <- 0..0xFFFF,
+              octet_oracle = Flat.read8(memoire_oracle, addr),
+              octet_natif = :binary.at(resultat.memoire, addr),
+              octet_oracle != octet_natif,
+              do: {addr, octet_oracle, octet_natif}
+
+        assert divergences == []
+
         if fautif do
           suite = Run.run!(memoire, state, budget + 1)
 
@@ -316,22 +410,27 @@ defmodule Atomboy.NativeInterpTest do
     for addr <- 0..0xFFFF, into: <<>>, do: <<Map.get(octets, addr, 0x76)>>
   end
 
-  # Un octet par adresse, tiré de ce que le natif sait émettre — chaque tirage
-  # est donc un programme valide de bout en bout, qui s'auto-modifie, empile,
-  # dépile, et depuis `RST` saute pour de bon.
-  #
-  # La proportion d'octets couverts décide de la durée : à 182 opcodes émis, six
-  # graines sur huit finissaient par fabriquer un opcode inconnu devant PC ; à
-  # 218, les huit vont au bout des 5 000 pas. La branche `fautif` du test reste
-  # donc en place sans être empruntée aujourd'hui — elle le sera de nouveau au
-  # premier opcode retiré ou ajouté, et le mécanisme lui-même est couvert par un
-  # test dédié plus haut.
-  defp programme_aleatoire do
-    opcodes = for {nil, op} <- Emit.couverture(), do: op
-
+  # Un octet par adresse, tiré du vivier donné — chaque tirage est donc un
+  # programme valide de bout en bout, qui s'auto-modifie, empile et dépile.
+  defp programme_aleatoire(opcodes) do
     0..0xFFFF
     |> Enum.map(fn _addr -> Enum.random(opcodes) end)
     |> :binary.list_to_bin()
+  end
+
+  # Tout ce que le natif dispatche depuis un octet d'opcode, préfixe CB compris.
+  defp opcodes_complets, do: for({nil, op} <- Emit.couverture(), do: op)
+
+  # Le même vivier privé de tout ce qui détourne PC. L'exécution avance alors
+  # d'une instruction à la suivante et fait le tour des 64 Ko, ce qui est la
+  # seule façon d'exercer chaque opcode émis un grand nombre de fois.
+  defp opcodes_lineaires do
+    sauts =
+      for %Insn{prefix: nil, mnemonic: m, opcode: op} <- Table.base(),
+          m in [:jr, :jp, :call, :ret, :rst],
+          do: op
+
+    opcodes_complets() -- sauts
   end
 
   defp etat_aleatoire do
@@ -360,24 +459,32 @@ defmodule Atomboy.NativeInterpTest do
   # divergence dirait « le natif s'est arrêté » plutôt que « le natif s'est
   # trompé », ce qui est une tout autre information.
   defp oracle(memoire, state, steps) do
+    {st, mem, cycles, fautif, _vus} = trace(memoire, state, steps)
+    {st, mem, cycles, fautif}
+  end
+
+  # La même chose, plus l'ensemble des opcodes réellement exécutés — ce qui
+  # permet de mesurer la largeur d'une famille de programmes au lieu de la
+  # supposer.
+  defp trace(memoire, state, steps) do
     plate =
       Flat.new(
         for {byte, addr} <- Enum.with_index(:binary.bin_to_list(memoire)), do: {addr, byte}
       )
 
-    boucle(state, plate, 0, steps, MapSet.new(for {nil, op} <- Emit.couverture(), do: op))
+    boucle(state, plate, 0, steps, MapSet.new(opcodes_complets()), MapSet.new())
   end
 
-  defp boucle(st, mem, cycles, 0, _couverts), do: {st, mem, cycles, nil}
+  defp boucle(st, mem, cycles, 0, _couverts, vus), do: {st, mem, cycles, nil, vus}
 
-  defp boucle(st, mem, cycles, steps, couverts) do
+  defp boucle(st, mem, cycles, steps, couverts, vus) do
     opcode = Flat.read8(mem, st.pc)
 
     if MapSet.member?(couverts, opcode) do
-      {st, mem, pas} = Atomboy.CPU.tick(st, mem)
-      boucle(st, mem, cycles + pas, steps - 1, couverts)
+      {suite, mem, pas} = Atomboy.CPU.tick(st, mem)
+      boucle(suite, mem, cycles + pas, steps - 1, couverts, MapSet.put(vus, opcode))
     else
-      {st, mem, cycles, opcode}
+      {st, mem, cycles, opcode, vus}
     end
   end
 end

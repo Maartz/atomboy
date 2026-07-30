@@ -36,6 +36,8 @@ defmodule Atomboy.Native.Emit do
   interpréteur partiel doit dire lequel, pas rendre un résultat faux.
   """
 
+  import Bitwise
+
   alias Atomboy.CPU.Insn
   alias Atomboy.CPU.Table
   alias Atomboy.Native.ALU
@@ -63,6 +65,15 @@ defmodule Atomboy.Native.Emit do
   @alu Map.keys(@routine)
   @accumulateur [:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf]
 
+  # Les jumelles CB des rotations de l'accumulateur. Elles posent Z normalement
+  # là où `RLCA` et compagnie l'effacent toujours — deux encodages, deux
+  # sémantiques de Z, et une source classique de bugs.
+  @rotations [:rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl]
+
+  @doc "L'opcode qui introduit la table étendue."
+  @spec prefixe_cb() :: 0xCB
+  def prefixe_cb, do: 0xCB
+
   @doc "La primitive d'ALU que sert un mnémonique de la table."
   @spec routine(atom()) :: atom()
   def routine(mnemonic), do: Map.fetch!(@routine, mnemonic)
@@ -77,6 +88,12 @@ defmodule Atomboy.Native.Emit do
 
   # NOP — l'instruction qui ne fait que passer du temps.
   def body(%Insn{mnemonic: :nop, cycles: cycles}), do: fin(cycles)
+
+  # STOP — un octet et rien d'autre : l'arrêt effectif attend un contrôleur
+  # d'horloge que l'émulateur n'a pas, et le corpus SingleStepTests le modélise
+  # ainsi. C'est le choix de la table (table.ex:104), donc l'oracle le fait
+  # aussi, donc l'équivalence tient.
+  def body(%Insn{mnemonic: :stop, cycles: cycles}), do: fin(cycles)
 
   # LD r, r' — la moitié de la table, et la seule famille sans aucun effet de
   # bord. `LD B, B` s'émet comme les autres : élider serait une optimisation, et
@@ -306,7 +323,47 @@ defmodule Atomboy.Native.Emit do
     )
   end
 
+  # ── Le bloc CB ──────────────────────────────────────────────────────────────
+  #
+  # 256 opcodes, et la partie la plus régulière de la table : huit rotations sur
+  # huit cibles, puis BIT, RES et SET dont le numéro de bit est encodé dans
+  # l'opcode. Trois clauses suffisent, parce que `(HL)` n'est ici qu'une cible
+  # parmi huit — la même abstraction que l'encodage `r = 6` du matériel.
+
+  def body(%Insn{prefix: :cb, mnemonic: m, operands: [cible], cycles: cycles})
+      when m in @rotations do
+    lire_cible(cible, :a0) ++
+      [Asm.call(ALU.etiquette(m))] ++
+      ecrire_cible(cible, :a0) ++ fin(cycles)
+  end
+
+  # BIT n — ne fait que peser un bit : la cible n'est pas réécrite, et c'est
+  # pourquoi sa forme `(HL)` coûte 12 T là où RES et SET en coûtent 16.
+  def body(%Insn{prefix: :cb, mnemonic: :bit, operands: [{:bit, n}, cible], cycles: cycles}) do
+    lire_cible(cible, :a0) ++ [Asm.call(ALU.etiquette_bit(n))] ++ fin(cycles)
+  end
+
+  # RES et SET — un masque, et aucun drapeau. `Gen` les inline pour la même
+  # raison : il n'y a aucune subtilité à centraliser.
+  def body(%Insn{prefix: :cb, mnemonic: m, operands: [{:bit, n}, cible], cycles: cycles})
+      when m in [:res, :set] do
+    masque =
+      case m do
+        :res -> RV32.andi(:t0, :t0, bxor(1 <<< n, 0xFF))
+        :set -> RV32.ori(:t0, :t0, 1 <<< n)
+      end
+
+    lire_cible(cible, :t0) ++ [masque] ++ ecrire_cible(cible, :t0) ++ fin(cycles)
+  end
+
   def body(%Insn{}), do: :non_supporté
+
+  # Une cible du bloc CB : sept registres et `(HL)`, indifféremment.
+  defp lire_cible(:hl_ind, dest), do: Bus.lire(Regs.hl(), dest)
+  defp lire_cible({:reg, _} = reg, dest), do: Regs.read8(reg, dest)
+
+  defp ecrire_cible(:hl_ind, src), do: Bus.ecrire(Regs.hl(), src)
+  defp ecrire_cible({:reg, _} = reg, src), do: Regs.write8(reg, src)
 
   # Le squelette commun : le prélude s'exécute toujours, l'action seulement si
   # la condition tient. La branche non prise saute vers `fetch` avant
@@ -387,8 +444,32 @@ defmodule Atomboy.Native.Emit do
   """
   @spec couverture() :: [{nil | :cb, 0..0xFF}]
   def couverture do
+    # `0xCB` n'est pas une instruction : c'est un préfixe, et il n'a donc pas
+    # d'entrée dans la table. Il rejoint l'ensemble dispatchable dès que le bloc
+    # étendu est entièrement émis — sauter dans une table à trous serait pire
+    # que ne pas sauter du tout.
+    if prefixe_couvert?() do
+      [{nil, prefixe_cb()} | couverture_table()]
+    else
+      couverture_table()
+    end
+  end
+
+  @doc """
+  Les seules entrées de la table qui sont émises — sans le préfixe.
+
+  C'est ce nombre-là qui se compare aux 500 instructions décrites, et le
+  distinguer de `couverture/0` évite un tableau de bord qui compte 496 sur 500
+  en ayant ajouté quelque chose qui n'est pas dans les 500.
+  """
+  @spec couverture_table() :: [{nil | :cb, 0..0xFF}]
+  def couverture_table do
     for insn <- Table.all(), body(insn) != :non_supporté, do: {insn.prefix, insn.opcode}
   end
+
+  @doc "Le bloc étendu est-il émis en entier ?"
+  @spec prefixe_couvert?() :: boolean()
+  def prefixe_couvert?, do: Enum.count(couverture_table(), &match?({:cb, _}, &1)) == 256
 
   @doc "Les instructions encore à faire — le tableau de bord du chantier."
   @spec restant() :: [{nil | :cb, 0..0xFF}]

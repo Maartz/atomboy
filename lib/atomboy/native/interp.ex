@@ -202,10 +202,40 @@ defmodule Atomboy.Native.Interp do
   # ══ Les gestionnaires ════════════════════════════════════════════════════════
 
   defp gestionnaires do
-    for %Insn{prefix: nil} = insn <- Table.base(),
-        (corps = Emit.body(insn)) != :non_supporté do
-      [Asm.label(etiquette(insn.opcode)), corps]
-    end
+    base =
+      for %Insn{prefix: nil} = insn <- Table.base(),
+          (corps = Emit.body(insn)) != :non_supporté do
+        [Asm.label(etiquette(insn.opcode)), corps]
+      end
+
+    etendus =
+      for %Insn{prefix: :cb} = insn <- Table.extended(),
+          (corps = Emit.body(insn)) != :non_supporté do
+        [Asm.label(etiquette_cb(insn.opcode)), corps]
+      end
+
+    [prefixe(), base, etendus]
+  end
+
+  # Le préfixe 0xCB n'est pas une instruction : il relit un octet et saute dans
+  # la seconde table. Les deux tables étant contiguës, la seconde s'atteint par
+  # un déplacement constant de 1024 dans le `lw` — la table de base fait 256
+  # entrées de quatre octets, et 1024 tient dans l'immédiat d'un chargement.
+  #
+  # Aucun cycle n'est compté ici : la table donne pour chaque instruction
+  # étendue un coût qui inclut déjà le fetch du préfixe.
+  defp prefixe do
+    [
+      Asm.label(:h_cb),
+      RV32.add(:t0, Regs.mem(), Regs.pc()),
+      RV32.lbu(:t0, :t0, 0),
+      RV32.addi(Regs.pc(), Regs.pc(), 1),
+      RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16()),
+      RV32.slli(:t0, :t0, 2),
+      RV32.add(:t0, Regs.dispatch(), :t0),
+      RV32.lw(:t0, :t0, 4 * 256),
+      RV32.jr(:t0)
+    ]
   end
 
   # ══ Les données ══════════════════════════════════════════════════════════════
@@ -215,6 +245,10 @@ defmodule Atomboy.Native.Interp do
       {:align, 4},
       Asm.label(:table_base),
       table_base(),
+      # Contiguë, sans alignement intercalaire : le préfixe compte sur un
+      # déplacement de 1024 exactement.
+      Asm.label(:table_cb),
+      table_cb(),
       {:align, 4},
       Asm.label(:etat_initial),
       entete(state, budget),
@@ -229,18 +263,35 @@ defmodule Atomboy.Native.Interp do
   # Un opcode absent atterrit sur un gestionnaire qui le rapporte, jamais dans
   # du code qui ne lui était pas destiné.
   defp table_base do
-    couverts = MapSet.new(Emit.couverture(), fn {_prefix, opcode} -> opcode end)
+    couverts = couverts(nil)
+
+    for opcode <- 0..0xFF do
+      cond do
+        opcode == Emit.prefixe_cb() and Emit.prefixe_couvert?() -> {:addr, :h_cb}
+        MapSet.member?(couverts, opcode) -> {:addr, etiquette(opcode)}
+        true -> {:addr, :opcode_inconnu}
+      end
+    end
+  end
+
+  defp table_cb do
+    couverts = couverts(:cb)
 
     for opcode <- 0..0xFF do
       if MapSet.member?(couverts, opcode) do
-        {:addr, etiquette(opcode)}
+        {:addr, etiquette_cb(opcode)}
       else
         {:addr, :opcode_inconnu}
       end
     end
   end
 
+  defp couverts(prefixe) do
+    MapSet.new(for {^prefixe, opcode} <- Emit.couverture(), do: opcode)
+  end
+
   defp etiquette(opcode), do: :"h_#{Integer.to_string(opcode, 16)}"
+  defp etiquette_cb(opcode), do: :"cb_#{Integer.to_string(opcode, 16)}"
 
   defp entete(%State{} = state, budget) do
     control =
