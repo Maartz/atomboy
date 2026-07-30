@@ -81,6 +81,63 @@ table (`Potion.Assembleur`), the cartridge builder (`Potion.ROM`), a
 GOOL-style kernel with a vblank heartbeat, OAM DMA from HRAM and one
 actor slot (`Potion.Noyau`), and the macro compiler (`Potion.Compilo`).
 
+## The native core — the emulator compiled to RISC-V, by Elixir
+
+The same instruction table that generates the BEAM decoder and Potion's
+assembler also generates a **complete native emulator in RV32
+assembly**, emitted by plain Elixir. No C, no linker, no compiler
+toolchain in the loop: `lib/atomboy/native/` builds a bootable image
+out of encoded instructions and runs it under `qemu-system-riscv32`.
+
+Why: the ESP32-C6 port hit 12% of real time under AtomVM, and the wall
+was the interpreter, not the silicon — roughly a megabyte of native
+interpreter fighting a 32 KB instruction cache. A purpose-built SM83
+interpreter is a fraction of that size, so the ceiling moves.
+
+What exists, and how it is checked:
+
+| | |
+|---|---|
+| `rv32.ex` | the instruction encoder, verified against `riscv64-unknown-elf-as` |
+| `asm.ex`, `image.ex` | labels, and a bootable image with no C and no linker |
+| `alu.ex` | the flag arithmetic, checked exhaustively — 892,928 cases, compared inside the guest |
+| `interp.ex` | all 501 opcodes, dispatched in constant time through a jump table |
+| `ppu.ex` | the DMG scanline renderer: dmg-acid2 comes out pixel-identical to the Elixir PPU |
+| `machine.ex` | the machine cadence — 154 lines of 456 T-cycles, LY, vblank, timers, joypad |
+
+Everything is validated differentially against the Elixir emulator as
+oracle, with the comparison run **inside** the guest so a few hundred
+cases cost one boot instead of a serial port full of pictures.
+
+The measurements, under `qemu -icount shift=0` (retired instructions,
+not seconds — qemu is not cycle-accurate, so timing it would measure
+the host):
+
+| | |
+|---|---|
+| 22 | RV32 instructions per SM83 instruction |
+| 339,517 | instructions per frame, CPU and cadence |
+| 976,255 | instructions per frame with the renderer — 58.6 M/s at 60 fps |
+| 16,040 bytes | of generated code: 49% of the C6's instruction cache |
+
+Against a 160 MHz C6 that is about 37% of the core at one instruction
+per cycle, with the cache half empty. What qemu cannot tell us is the
+real IPC on silicon — flash latency, cache misses, branch prediction —
+so the number is a green light, not a victory.
+
+And the two compilers meet: `games/hero.gb`, compiled from Elixir by
+Potion, **runs and displays on the generated native core**, its frame
+byte-identical to the one the BEAM emulator draws.
+
+```sh
+mix atomboy.native            # assemble and run the native core under qemu
+mix atomboy.native.bench      # the number: RV32 instructions per SM83 instruction
+```
+
+Needs `qemu-system-riscv32` and `riscv64-unknown-elf-as` (Homebrew);
+without them the native tests exclude themselves and the suite stays
+green.
+
 ## Installing
 
 On macOS, Homebrew has both the app and the CLI binary:
@@ -225,6 +282,10 @@ that is why the CPU is generated, why the memory API never changed shape,
 and why `mix atomboy.atomvm` (packages and runs the app on a generic_unix
 AtomVM build) and `mix atomboy.esp32` (flashes an ESP32 or ESP32-C6, with a
 riscv32 AOT pipeline) still exist and work. The ESP32-C6 POC reached 12% of
-real time with native AOT: the ceiling is the interpreter, not the hardware.
-The embedded future of the project points at a Pi Zero 2W running the
-regular BEAM instead; the ESP32 toolchain remains as a working curiosity.
+real time with native AOT: the ceiling was the interpreter, not the hardware.
+
+That diagnosis is what the native core above acts on — and it is why the
+microcontroller is back on the table rather than filed away as a
+curiosity. The AtomVM route asked a general-purpose VM to run an
+emulator; the native route generates the emulator itself, which is the
+one thing that fits in the cache.
