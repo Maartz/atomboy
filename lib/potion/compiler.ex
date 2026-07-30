@@ -338,13 +338,13 @@ defmodule Potion.Compiler do
      ], counter}
   end
 
-  defp condition!({op, _, [left, right]} = condition, otherwise, allocation, statement, counter)
+  defp condition!({op, _, [left, right]}, otherwise, allocation, statement, counter)
        when op in [:==, :!=, :<, :>, :<=, :>=] do
     address = cell!(left, allocation, statement)
-    value = comparand!(right, condition, statement)
+    {setup, operand} = term(right, allocation, statement)
     {jumps, counter} = skip_unless(op, otherwise, counter)
 
-    {[{:ld, :a, {:mem, address}}, {:cp, :a, value}] ++ jumps, counter}
+    {[{:ld, :a, {:mem, address}}] ++ setup ++ [{:cp, :a, operand}] ++ jumps, counter}
   end
 
   defp condition!(condition, _otherwise, _allocation, statement, _counter) do
@@ -373,35 +373,6 @@ defmodule Potion.Compiler do
        {:jr, :nz, {:label, otherwise}},
        {:label, below}
      ], counter + 1}
-  end
-
-  defp comparand!(value, _condition, _statement) when is_integer(value) and value in 0..255,
-    do: value
-
-  defp comparand!(value, condition, statement) when is_integer(value) do
-    raise CompileError, """
-    value outside a byte: #{value}, in #{one_line(statement)}
-
-        #{Macro.to_string(condition)}
-
-    A comparison weighs one byte against another, and a byte is 0 to 255. \
-    A game variable never leaves that range either -- it wraps.
-    """
-  end
-
-  defp comparand!(other, condition, statement) do
-    raise CompileError, """
-    comparison against something other than a number:
-
-        #{Macro.to_string(condition)}
-
-    Rejected AST: #{inspect(other)}
-
-    In #{one_line(statement)}, the right-hand side of a comparison is a literal \
-    between 0 and 255. Comparing two variables needs `CP` to read memory, which \
-    on the SM83 means going through HL -- the same register policy that \
-    `x = x + y` is waiting for.
-    """
   end
 
   # One byte of OAM: the value, shifted by the hardware offset. On a literal the
@@ -448,8 +419,9 @@ defmodule Potion.Compiler do
 
   defp load({operator, _, [left, right]}, allocation, statement)
        when operator in [:+, :-] do
-    load(left, allocation, statement) ++
-      [{arithmetic(operator), :a, byte!(right, statement)}]
+    {setup, operand} = term(right, allocation, statement)
+
+    load(left, allocation, statement) ++ setup ++ [{arithmetic(operator), :a, operand}]
   end
 
   defp load(other, _allocation, _statement), do: reject!(other)
@@ -457,23 +429,55 @@ defmodule Potion.Compiler do
   defp arithmetic(:+), do: :add
   defp arithmetic(:-), do: :sub
 
-  # The right-hand term of a `+` or a `-`: a literal, never a variable. A
-  # memory-to-memory addition would require keeping one operand somewhere while
-  # the other is loaded, hence a register policy, hence a compiler of another
-  # calibre.
-  defp byte!(value, _statement) when is_integer(value) and value in 0..255, do: value
+  # The second term of an arithmetic or a comparison: a literal, or a variable
+  # reached through HL.
+  #
+  # A is already carrying the first operand by the time this runs, and the SM83
+  # loads a byte from an arbitrary address into A and nowhere else. So the second
+  # operand cannot come to A -- A has to go to it, and HL is the only register
+  # that addresses memory for the ALU. `LD HL, addr` then `ADD A, (HL)`: one more
+  # instruction than a literal, which is the whole cost of the register policy
+  # this used to say it lacked.
+  #
+  # HL is free to clobber. The kernel keeps nothing in it across its `CALL` to
+  # the actor, and the vblank handler pushes all four pairs before touching
+  # anything -- so an interrupt landing between the `LD HL` and the `ADD` hands
+  # it back untouched.
+  defp term(value, _allocation, statement) when is_integer(value) do
+    {[], byte!(value, statement)}
+  end
 
-  defp byte!(other, statement) do
+  defp term({name, _, context}, allocation, statement)
+       when is_atom(name) and is_atom(context) do
+    {[{:ld, :hl, cell!(name, allocation, statement)}], {:mem, :hl}}
+  end
+
+  defp term(other, _allocation, statement) do
     raise CompileError, """
-    operand outside the v0 subset:
+    operand outside the subset:
 
         #{Macro.to_string(other)}
 
     Rejected AST: #{inspect(other)}
 
-    In #{one_line(statement)}, only an integer literal from 0 to 255 is accepted \
-    in this place. The v0 compiles `x = 5`, `x = y`, `x = x + 1` and `x = y - 3` \
-    — a variable, a sign, a constant.
+    In #{one_line(statement)}, this place takes a variable or an integer literal \
+    from 0 to 255 — `x = y + speed` as readily as `x = y + 3`. What it does not \
+    take is another computation: one operation per sentence, and a variable to \
+    hold the middle of a longer one.
+    """
+  end
+
+  defp byte!(value, _statement) when is_integer(value) and value in 0..255, do: value
+
+  defp byte!(other, statement) do
+    raise CompileError, """
+    value outside a byte: #{inspect(other)}
+
+        #{one_line(statement)}
+
+    A Potion variable holds one byte, and so does every literal it meets: 0 to \
+    255. Past that the value would not fit where it is going, and the wrap would \
+    be the compiler's doing rather than the game's.
     """
   end
 

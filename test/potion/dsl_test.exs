@@ -289,6 +289,26 @@ defmodule Potion.DSLTest do
 
   # ══ The refusals, at compile time ════════════════════════════════════════════
 
+  # The same ball, but its step is a variable rather than a literal -- which is
+  # what `x = x + speed` buys, and what a Pong ball needs: a direction that is
+  # data, not two branches of code.
+  defmodule Drifter do
+    @moduledoc false
+    use Potion
+
+    defactor :ball do
+      variables x: 40, step: 3, limit: 120
+
+      every_frame do
+        x = x + step
+
+        if x >= limit, do: step = 0
+
+        sprite(0, x: x, y: 70, tile: 0)
+      end
+    end
+  end
+
   describe "the flags a comparison reads" do
     # `CP n` is a subtraction thrown away: Z if equal, C if A was the smaller.
     # Every comparison is a choice of jumps over those two bits, and the choice
@@ -392,6 +412,61 @@ defmodule Potion.DSLTest do
     end
   end
 
+  describe "a variable on the right-hand side" do
+    test "the ball advances by a step it reads from memory" do
+      addresses = Drifter.addresses()
+
+      # Three turns of the actor: 40, 43, 46.
+      {_pixels, _state, ram} = run_frames(Drifter, 5)
+
+      assert Map.get(ram, addresses.x) == 40 + 3 * 3
+      assert Map.get(ram, addresses.step) == 3
+    end
+
+    test "it stops where another variable says to, not where a literal does" do
+      {_pixels, _state, ram} = run_frames(Drifter, 60)
+      addresses = Drifter.addresses()
+
+      assert Map.get(ram, addresses.step) == 0, "it should have reached the limit"
+
+      x = Map.get(ram, addresses.x)
+      assert x >= 120 and x < 123, "it stopped at #{x}, not just past its limit"
+    end
+
+    test "the addition reaches the second variable through HL" do
+      allocation = Potion.Compiler.allocate(x: 0, step: 0)
+      body = {:=, [], [{:x, [], nil}, {:+, [], [{:x, [], nil}, {:step, [], nil}]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, {:mem, allocation.cells.x}} in elements
+      assert {:ld, :hl, allocation.cells.step} in elements
+      assert {:add, :a, {:mem, :hl}} in elements
+      assert {:ld, {:mem, allocation.cells.x}, :a} in elements
+    end
+
+    test "a comparison reaches it the same way" do
+      allocation = Potion.Compiler.allocate(x: 0, limit: 0, hit: 0)
+      condition = {:>=, [], [{:x, [], nil}, {:limit, [], nil}]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :hl, allocation.cells.limit} in elements
+      assert {:cp, :a, {:mem, :hl}} in elements
+    end
+
+    test "a literal still costs one instruction less" do
+      allocation = Potion.Compiler.allocate(x: 0)
+      body = {:=, [], [{:x, [], nil}, {:+, [], [{:x, [], nil}, 3]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:add, :a, 3} in elements
+      refute Enum.any?(elements, &match?({:ld, :hl, _}, &1))
+    end
+  end
+
   describe "what the v0 refuses to compile" do
     test "an expression outside the subset" do
       message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
@@ -401,11 +476,11 @@ defmodule Potion.DSLTest do
       assert message =~ "x = x + 1"
     end
 
-    test "an addition of two variables — the v0 has no register policy" do
-      message = reject!("Rejected.TwoVariables", "variables x: 1, y: 2", "x = x + y")
+    test "a computation nested inside another" do
+      message = reject!("Rejected.Nested", "variables x: 1, y: 2", "x = x + (y + 1)")
 
-      assert message =~ "outside the v0 subset"
-      assert message =~ "integer literal from 0 to 255"
+      assert message =~ "operand outside the subset"
+      assert message =~ "one operation per sentence"
     end
 
     test "an unknown key" do
@@ -471,16 +546,15 @@ defmodule Potion.DSLTest do
       assert message =~ "is not a literal"
     end
 
-    test "a comparison against something that is not a byte" do
+    test "a comparison against something that is neither variable nor byte" do
       message =
         reject!(
           "Rejected.Comparand",
-          "variables x: 1, y: 2",
-          "if x > y, do: x = x + 1"
+          "variables x: 1",
+          "if x > (1 + 1), do: x = x + 1"
         )
 
-      assert message =~ "comparison against something other than a number"
-      assert message =~ "HL"
+      assert message =~ "operand outside the subset"
     end
 
     test "a comparison against a value outside a byte" do
