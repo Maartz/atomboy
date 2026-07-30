@@ -18,11 +18,13 @@
  * worth debugging an SPI bus with.
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/i2s_std.h"
 #include "driver/spi_master.h"
 #include "esp_cpu.h"
 #include "esp_heap_caps.h"
@@ -92,6 +94,38 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
  */
 #define PIN_SDA 4
 #define PIN_SCL 5
+
+/* MAX98357A: an I2S DAC and a class-D amplifier in one module, its own supply
+ * on 5 V and 3.3 V logic that it tolerates.
+ *
+ * SD is not the shutdown its name suggests. It is a four-way selector read as
+ * a voltage against the chip's internal 100k pull-down: below 0.16 V the
+ * amplifier is off, 0.16-0.77 V picks the right channel, 0.77-1.4 V the
+ * (L+R)/2 mix, and above 1.4 V the left. A GPIO driven high is 3.3 V, so this
+ * board gets the left channel and only the left -- which costs nothing here,
+ * because the DMG's two channels will be summed in software and written into
+ * the left slot. Wanting the chip to do the mixing instead is a 220k resistor
+ * in series with this pin, not a line of code.
+ *
+ * Driven low it is a real shutdown, and that is the state everything below
+ * starts and ends in. */
+#define PIN_BCLK 20
+#define PIN_LRCLK 21
+#define PIN_DOUT 22
+#define PIN_SD 23
+
+/* 32768 Hz, which is not a rate picked for the peripheral's convenience: it is
+ * the DMG's own clock divided by 128, and it is exactly what the emulator
+ * emits on the laptop -- @sample_rate in lib/atomboy/apu.ex. The native APU
+ * will hand this channel the same samples the BEAM one produces, so any other
+ * number here would buy a resample nobody asked for. */
+#define AUDIO_HZ 32768
+
+/* Six buffers of 256 frames: 1536 frames in flight, 47 ms, a little under
+ * three video frames. That is the slack the APU will have to miss a deadline
+ * by before the speaker hears it. */
+#define AUDIO_DESCS 6
+#define AUDIO_FRAMES 256
 
 #define HERO_CRC 0x5AA2E5B7u
 
@@ -233,10 +267,124 @@ static void panel_prove(esp_lcd_panel_handle_t panel, uint16_t *scratch) {
   }
 }
 
+/* Silence, and the pin that buys it, before the peripheral that needs it.
+ *
+ * A class-D amplifier with nothing clocking into it amplifies whatever its
+ * input floats to, which on a breadboard is every switching edge within a few
+ * centimetres -- the hiss that has been there since the module was first given
+ * power. It is not noise the emulator makes; it is noise made by the absence
+ * of the emulator. SD low is off, and it goes low before the I2S peripheral
+ * exists, so the amplifier never hears an uninitialised pin.
+ *
+ * Then the channel: master, transmit only, Philips framing, 16-bit stereo --
+ * which is s16le, the same shape `Atomboy.Play.Audio` pipes to ffplay. */
+static i2s_chan_handle_t audio_open(void) {
+  gpio_config_t shutdown = {.mode = GPIO_MODE_OUTPUT, .pin_bit_mask = 1ULL << PIN_SD};
+  ESP_ERROR_CHECK(gpio_config(&shutdown));
+  gpio_set_level(PIN_SD, 0);
+
+  i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+  channel.dma_desc_num = AUDIO_DESCS;
+  channel.dma_frame_num = AUDIO_FRAMES;
+
+  /* Zero a buffer once it has been sent, so a missed deadline is heard as a
+   * gap rather than as the last 8 ms played over and over. An emulator that
+   * runs late should stutter, not drone -- and the drone is the harder bug to
+   * recognise, because it sounds like something is working. */
+  channel.auto_clear = true;
+
+  i2s_chan_handle_t tx = NULL;
+  ESP_ERROR_CHECK(i2s_new_channel(&channel, &tx, NULL));
+
+  i2s_std_config_t std = {
+      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_HZ),
+      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+      .gpio_cfg =
+          {
+              /* The MAX98357A recovers its own clock from BCLK and has no MCLK
+               * input. One pin fewer, and one fewer to get wrong. */
+              .mclk = I2S_GPIO_UNUSED,
+              .bclk = PIN_BCLK,
+              .ws = PIN_LRCLK,
+              .dout = PIN_DOUT,
+              .din = I2S_GPIO_UNUSED,
+          },
+  };
+  ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx, &std));
+
+  ESP_LOGI(TAG, "audio: %d Hz stereo on BCLK %d / LRCLK %d / DIN %d, amp muted", AUDIO_HZ, PIN_BCLK,
+           PIN_LRCLK, PIN_DOUT);
+
+  return tx;
+}
+
+/* 440 Hz for a third of a second, which proves the whole chain at once: the
+ * clock divider, the frame alignment, three wires, the amplifier's supply and
+ * the speaker. Either a pitch one can hum comes out or it does not.
+ *
+ * A sine rather than a square, deliberately. A square through a chain that is
+ * half working sounds a great deal like the buzz this is meant to replace, and
+ * an instrument that resembles the fault it is diagnosing is no instrument.
+ *
+ * A quarter of full scale, and ramped in and out over 256 frames. A step from
+ * silence to full amplitude is a pop, and the pop is the loudest thing an 8 ohm
+ * speaker will be asked to do all day. */
+static void audio_prove(i2s_chan_handle_t tx) {
+  static const int total = AUDIO_HZ / 3;
+  static const int ramp = 256;
+  static const float level = 8192.0f;
+
+  static int16_t chunk[AUDIO_FRAMES * 2];
+
+  ESP_ERROR_CHECK(i2s_channel_enable(tx));
+  gpio_set_level(PIN_SD, 1);
+
+  for (int sent = 0; sent < total; sent += AUDIO_FRAMES) {
+    for (int i = 0; i < AUDIO_FRAMES; i++) {
+      const int n = sent + i;
+      const int edge = n < ramp ? n : (total - n < ramp ? total - n : ramp);
+      const float gain = edge > 0 ? (float)edge / (float)ramp : 0.0f;
+
+      const float phase = 2.0f * (float)M_PI * 440.0f * (float)n / (float)AUDIO_HZ;
+      const int16_t sample = (int16_t)(sinf(phase) * level * gain);
+
+      /* Both slots, even though SD has selected the left one. The right slot
+       * costs nothing to fill and its presence is what makes a wrong LRCLK
+       * audible: swap the frame alignment and a tone written to one channel
+       * only goes silent, while a tone written to both survives -- and the
+       * point of this is to hear faults, not to hide them. */
+      chunk[i * 2] = sample;
+      chunk[i * 2 + 1] = sample;
+    }
+
+    size_t written = 0;
+    ESP_ERROR_CHECK(i2s_channel_write(tx, chunk, sizeof(chunk), &written, portMAX_DELAY));
+  }
+
+  /* Let the last buffers reach the speaker before the amplifier is cut, or the
+   * fade-out is truncated into the click it was there to avoid. */
+  vTaskDelay(pdMS_TO_TICKS(100));
+
+  /* And back to off, in the order that keeps it quiet: the amplifier first,
+   * then the clocks it was listening to. Until the native APU exists there is
+   * nothing to send, and a channel clocking zeros is still a channel one can
+   * hear on a breadboard. */
+  gpio_set_level(PIN_SD, 0);
+  ESP_ERROR_CHECK(i2s_channel_disable(tx));
+
+  ESP_LOGI(TAG, "audio: 440 Hz sent, amp back off");
+}
+
 void app_main(void) {
   for (int i = 0; i < 4; i++) {
     palette[i] = rgb565_be(dmg[i]);
   }
+
+  /* First, before the blob and before the panel: the amplifier is told to be
+   * quiet. Three seconds of solid colours go past below, and the hiss would
+   * have been the soundtrack to all of them. */
+  i2s_chan_handle_t audio = audio_open();
+  audio_prove(audio);
 
   const size_t size = (size_t)(blob_end - blob_start);
   ESP_LOGI(TAG, "blob: %u bytes of generated RV32I, code and data", (unsigned)size);

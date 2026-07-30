@@ -46,3 +46,6 @@ esp32/native/sdkconfig.old
 dependencies.lock
 esp32/native/main/blob.bin
 esp32/native/sdkconfig*
+
+# clangd's index, written by the editor rather than by the build.
+esp32/native/.cache/
