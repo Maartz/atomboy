@@ -56,7 +56,7 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
  * coin toss: the clock rings, the data is sampled wrong, the panel ignores
  * every command and stays in the white it powered up in -- which is exactly
  * what it did. Speed is the last thing to raise, not the first. */
-#define SPI_HZ (10 * 1000 * 1000)
+#define SPI_HZ (20 * 1000 * 1000)
 
 #define GB_W 160
 #define GB_H 144
@@ -65,8 +65,19 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
 /* Centred, at 1:1. Two of 160 is 320 and the panel is 240 across in this
  * orientation, so the only integer scale that fits is one -- and an integer
  * scale is the only kind that leaves pixel art looking like itself. */
-#define ORIGIN_X ((PANEL_W - GB_W) / 2)
-#define ORIGIN_Y ((PANEL_H - GB_H) / 2)
+/* Three output pixels for every two of the Game Boy's: 240x216, which takes
+ * the panel's full width. It is the largest that fits -- doubling would want
+ * 320x288 and there are 240 across -- and 3:2 is the only non-integer ratio
+ * worth having, because every source pixel becomes a whole number of
+ * destination ones. No pixel is dropped and none is blurred; some are simply
+ * twice as wide as their neighbour, which reads as texture rather than as
+ * damage. */
+#define OUT_W (GB_W * 3 / 2)
+#define OUT_H (GB_H * 3 / 2)
+#define OUT_PIXELS (OUT_W * OUT_H)
+
+#define ORIGIN_X ((PANEL_W - OUT_W) / 2)
+#define ORIGIN_Y ((PANEL_H - OUT_H) / 2)
 
 /* The pinned checksum is the tenth frame -- test/native_machine_test.exs,
  * @hero_crc -- and the blob is built for one frame a call. */
@@ -83,6 +94,11 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
 #define PIN_SCL 5
 
 #define HERO_CRC 0x5AA2E5B7u
+
+/* The pinned frame belongs to hero.gb. Any other cartridge draws its own, and
+ * comparing against a checksum from a different ROM would only ever say
+ * DIVERGENT -- which is noise, not a finding. */
+#define CHECK_CRC 0
 
 static const char *button_names[8] = {"right", "left", "up",     "down",
                                       "A",     "B",    "select", "start"};
@@ -146,7 +162,7 @@ static esp_lcd_panel_handle_t panel_open(void) {
       .quadwp_io_num = -1,
       .quadhd_io_num = -1,
       /* One frame in one transfer: 160x144 at two bytes a pixel. */
-      .max_transfer_sz = GB_PIXELS * 2 + 8,
+      .max_transfer_sz = OUT_PIXELS * 2 + 8,
   };
   ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
 
@@ -173,6 +189,11 @@ static esp_lcd_panel_handle_t panel_open(void) {
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
   ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, false));
+
+  /* Tetris came up with its text reading backwards. The ILI9341's column
+   * address order is the panel's business, not the emulator's -- nothing about
+   * the framebuffer changes. */
+  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, false));
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
   gpio_set_level(PIN_BL, 1);
@@ -224,10 +245,10 @@ void app_main(void) {
    * the PMP split off -- the C6's HP SRAM answers to both buses at one address,
    * but ESP-IDF marks the data half non-executable unless told otherwise. */
   void *executable = heap_caps_aligned_alloc(4, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  uint16_t *pixels = heap_caps_malloc(GB_PIXELS * 2, MALLOC_CAP_DMA);
+  uint16_t *pixels = heap_caps_malloc(OUT_PIXELS * 2, MALLOC_CAP_DMA);
 
   if (executable == NULL || pixels == NULL) {
-    ESP_LOGE(TAG, "out of memory: %u bytes of code, %u of pixels", (unsigned)size, GB_PIXELS * 2);
+    ESP_LOGE(TAG, "out of memory: %u bytes of code, %u of pixels", (unsigned)size, OUT_PIXELS * 2);
     return;
   }
 
@@ -305,7 +326,7 @@ void app_main(void) {
      * call of ten frames could not: that the blob really does write its state
      * back, and that call eleven continues the console rather than rebooting
      * it. Past that the frame is legitimately a different one. */
-    if (++batches == FRAMES_PINNED) {
+    if (CHECK_CRC && ++batches == FRAMES_PINNED) {
       const uint32_t crc = esp_rom_crc32_le(0, shades, GB_PIXELS);
 
       ESP_LOGI(TAG, "frame CRC 0x%08lX -- the BEAM emulator says 0x%08X", (unsigned long)crc,
@@ -318,8 +339,16 @@ void app_main(void) {
       }
     }
 
-    for (int p = 0; p < GB_PIXELS; p++) {
-      pixels[p] = palette[shades[p] & 3];
+    /* Scale and colour in one pass. The 2/3 division is integer and lands on
+     * the pattern 0,0,1,1,2,3,3,4,4,5 -- two source pixels stretched into
+     * three, forever. */
+    for (int y = 0; y < OUT_H; y++) {
+      const uint8_t *row = shades + (y * 2 / 3) * GB_W;
+      uint16_t *out = pixels + y * OUT_W;
+
+      for (int x = 0; x < OUT_W; x++) {
+        out[x] = palette[row[x * 2 / 3] & 3];
+      }
     }
 
     /* One byte a frame, which is also how often a DMG polls its own pad. The
@@ -376,8 +405,8 @@ void app_main(void) {
 
     const uint32_t drawn = esp_cpu_get_cycle_count() - before;
 
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y, ORIGIN_X + GB_W,
-                                              ORIGIN_Y + GB_H, pixels));
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y, ORIGIN_X + OUT_W,
+                                              ORIGIN_Y + OUT_H, pixels));
 
     ESP_LOGI(TAG, "%lu us emulating, %lu us to the palette", (unsigned long)(emulated / 160u),
              (unsigned long)((drawn - emulated) / 160u));
