@@ -30,7 +30,7 @@ defmodule Atomboy.NativeInterpTest do
   @steps 5_000
   @seeds 1..8
 
-  describe "la couverture" do
+  describe "coverage" do
     test "the SM83 table is emitted in full" do
       covered = MapSet.new(Emit.coverage())
 
@@ -160,8 +160,8 @@ defmodule Atomboy.NativeInterpTest do
       assert result.state.sp == 0x202
     end
 
-    test "PUSH puis POP rendent la paire intacte, octet bas en premier" do
-      # PUSH BC puis POP DE : DE doit valoir BC, et la pile porter l'octet bas
+    test "PUSH then POP return the pair intact, low byte first" do
+      # PUSH BC then POP DE: DE must equal BC, and the stack hold the low byte
       # at the low address -- the order the hardware expects.
       memory = program(%{0x100 => 0xC5, 0x101 => 0xD1})
 
@@ -287,7 +287,7 @@ defmodule Atomboy.NativeInterpTest do
   # *profondeur*.
   #
   # Believing the second sufficed was a mistake: "40000 instructions"
-  # se lit comme une couverture, et n'en est pas une.
+  # reads like coverage, and is not.
   describe "cross-equivalence -- linear programs" do
     for seed <- @seeds do
       test "linear program, seed #{seed}" do

@@ -415,11 +415,11 @@ defmodule Atomboy.Native.Emit do
   # Z est le bit 7, C le bit 4 ; `NZ` et `NC` branchent sur l'absence.
   @condition %{nz: {0x80, :absent}, z: {0x80, :present}, nc: {0x10, :absent}, c: {0x10, :present}}
 
-  defp branch_if(condition, etiquette) do
-    {masque, sens} = Map.fetch!(@condition, condition)
-    branchement = if sens == :absent, do: &Asm.beqz/2, else: &Asm.bnez/2
+  defp branch_if(condition, label) do
+    {mask, sense} = Map.fetch!(@condition, condition)
+    branch = if sense == :absent, do: &Asm.beqz/2, else: &Asm.bnez/2
 
-    [RV32.andi(:t1, Regs.f(), masque), branchement.(:t1, etiquette)]
+    [RV32.andi(:t1, Regs.f(), mask), branch.(:t1, label)]
   end
 
   @doc """
@@ -457,7 +457,7 @@ defmodule Atomboy.Native.Emit do
   end
 
   @doc """
-  La fin de tout gestionnaire : les cycles, puis le fetch suivant.
+  The end of every handler: the cycles, then the next fetch.
 
   Every cost in the table is 24 T or less, so `addi`'s immediate takes them
   without a detour.

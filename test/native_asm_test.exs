@@ -99,7 +99,7 @@ defmodule Atomboy.NativeAsmTest do
   describe "the two-pass invariant" do
     test "the announced size is the one emitted" do
       # A mix of every item kind, whose total size is known:
-      # 4 + 4 + 4 + 3 + 1 (alignement) + 4 + 8 = 28.
+      # 4 + 4 + 4 + 3 + 1 (alignment) + 4 + 8 = 28.
       %{code: code, size: size} =
         Asm.assemble([
           RV32.nop(),

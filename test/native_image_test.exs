@@ -43,7 +43,7 @@ defmodule Atomboy.NativeImageTest do
 
   test "a watchdog interrupts a looping guest" do
     # An image that never powers off: the first byte jumps to itself.
-    looper = Image.build([{:label, :bloque}, Atomboy.Native.Asm.j(:bloque)])
+    looper = Image.build([{:label, :stuck}, Atomboy.Native.Asm.j(:stuck)])
 
     result = Qemu.run(looper.code, timeout: 1_500)
 
