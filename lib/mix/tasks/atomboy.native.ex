@@ -21,6 +21,8 @@ defmodule Mix.Tasks.Atomboy.Native do
 
   alias Atomboy.CPU.State
   alias Atomboy.CPU.Table
+  alias Atomboy.Native.ALU
+  alias Atomboy.Native.Asm
   alias Atomboy.Native.Emit
   alias Atomboy.Native.Image
   alias Atomboy.Native.Interp
@@ -43,10 +45,12 @@ defmodule Mix.Tasks.Atomboy.Native do
     code = image.labels[:table_base]
     couverts = length(Emit.couverture())
     total = length(Table.all())
+    alu = Asm.assemble(ALU.routines())
 
     Mix.shell().info("""
     Couverture : #{couverts}/#{total} opcodes émis (#{pourcent(couverts, total)} %)
     Code       : #{code} octets, soit #{pourcent(code, @icache)} % de l'icache du C6
+    ALU        : #{alu.size} octets pour #{routines(alu)} routines, pas encore liées
     Image      : #{image.size} octets, dont 64 Ko de mémoire émulée
     """)
 
@@ -96,4 +100,10 @@ defmodule Mix.Tasks.Atomboy.Native do
   end
 
   defp pourcent(part, tout), do: Float.round(part * 100 / tout, 1)
+
+  # Une routine par étiquette : l'assemblage les a toutes résolues, donc les
+  # compter ici évite de tenir une liste en double.
+  defp routines(%{labels: labels}) do
+    labels |> Map.keys() |> Enum.count(&String.starts_with?(Atom.to_string(&1), "alu_"))
+  end
 end
