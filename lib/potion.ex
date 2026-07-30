@@ -99,10 +99,14 @@ defmodule Potion do
   declares nor ever sees — and lets the first frame recognise that it is the
   first. `Potion.Compiler` details that pattern.
 
-  The v0 accepts **only one actor per module**: the kernel's scheduler has a
-  single slot, and a second `defactor` would compile a game half of which would
-  never run. The day the scheduler has several, the macro will accept them
-  without the surface changing.
+  A module may hold **several actors**. The kernel gives each one a slot and
+  calls them in declaration order, every frame, with nothing in between -- so an
+  actor that writes a cell another one reads will be read in that order, always.
+
+  Their cells share one namespace: `addresses/0` returns the whole game's, and
+  two actors cannot both declare a `y`. In exchange, any actor can name any
+  cell, whichever actor declared it and whatever the order -- a ball reads the
+  paddles, and the paddles read the ball.
 
   ## What the v0 compiles
 
@@ -149,6 +153,8 @@ defmodule Potion do
   defmacro __using__(_opts) do
     quote do
       import Potion, only: [defactor: 2, variables: 1, every_frame: 1]
+
+      @before_compile Potion
     end
   end
 
@@ -167,44 +173,94 @@ defmodule Potion do
     unique!(module, name)
 
     {declarations, every_frame} = split!(body, name)
-    allocation = Compiler.allocate(declarations)
-    fragment = Compiler.compile(every_frame, allocation)
-    verify!(fragment, name)
 
-    Module.put_attribute(module, :potion_actor, name)
+    slot = length(actors(module))
 
-    quote do
-      @doc """
-      The complete assembler program — the kernel, then the actor `#{inspect(unquote(name))}`.
+    allocation =
+      Compiler.allocate(declarations, base: next_base(module), prefix: "potion_#{slot}")
 
-      In the `Potion.Assembler` format: a list of tuples, which can be read,
-      sliced, or passed to `Potion.Assembler.addresses/2` to find out where
-      everything landed.
-      """
-      def program do
-        Potion.Runtime.program(unquote(Macro.escape(fragment)))
-      end
+    shared_names!(module, allocation, name)
 
-      @doc """
-      The ROM, 32,768 bytes, ready to burn or to hand to `Atomboy.Screen`.
-      """
-      def rom do
-        Potion.ROM.build(program(),
-          vblank: :vblank,
-          title: unquote(title(module))
-        )
-      end
+    Module.put_attribute(
+      module,
+      :potion_actors,
+      actors(module) ++ [{name, allocation, every_frame}]
+    )
 
-      @doc """
-      Where the game's variables live, in WRAM.
+    :ok
+  end
 
-      A Potion game has no variables in the BEAM sense: it has cells. Here they
-      are, for whoever wants to read them from the outside — an emulator, a test,
-      a debugger.
-      """
-      def addresses do
-        unquote(Macro.escape(allocation.cells))
-      end
+  @doc false
+  defmacro __before_compile__(env) do
+    case actors(env.module) do
+      [] ->
+        :ok
+
+      actors ->
+        # Compiling here rather than in `defactor` is what lets an actor name a
+        # cell belonging to another one. At `defactor` time only the actors
+        # declared *above* exist, so a ball could see the paddles and the paddles
+        # could never see the ball -- a rule nobody would remember. By the time
+        # the module closes, every cell is known, and reading is symmetric.
+        cells =
+          Enum.reduce(actors, %{}, fn {_name, allocation, _body}, acc ->
+            Map.merge(acc, allocation.cells)
+          end)
+
+        fragments =
+          Enum.map(actors, fn {name, allocation, body} ->
+            fragment = Compiler.compile(body, %{allocation | cells: cells})
+            verify!(fragment, name)
+            fragment
+          end)
+
+        quote do
+          @doc """
+          The complete assembler program -- the kernel, then each actor in turn.
+
+          In the `Potion.Assembler` format: a list of tuples, which can be read,
+          sliced, or passed to `Potion.Assembler.addresses/2` to find out where
+          everything landed.
+          """
+          def program do
+            Potion.Runtime.program(unquote(Macro.escape(fragments)))
+          end
+
+          @doc """
+          The ROM, 32,768 bytes, ready to burn or to hand to `Atomboy.Screen`.
+          """
+          def rom do
+            Potion.ROM.build(program(),
+              vblank: :vblank,
+              title: unquote(title(env.module))
+            )
+          end
+
+          @doc """
+          Where the game's variables live, in WRAM.
+
+          A Potion game has no variables in the BEAM sense: it has cells. Here
+          they are -- every actor's, in one map, which is why two actors cannot
+          share a variable name.
+          """
+          def addresses do
+            unquote(Macro.escape(cells))
+          end
+        end
+    end
+  end
+
+  # Declaration order, which is also the order the kernel calls them in. The
+  # list is held whole rather than accumulated: an `accumulate: true` attribute
+  # comes back reversed, and reversing it at every read is one more place for
+  # the scheduling order to go quietly wrong.
+  defp actors(module), do: Module.get_attribute(module, :potion_actors) || []
+
+  # Each actor takes its slice of the page, one after another.
+  defp next_base(module) do
+    case actors(module) do
+      [] -> Runtime.actor_state()
+      list -> list |> List.last() |> elem(1) |> Compiler.next_free()
     end
   end
 
@@ -252,27 +308,43 @@ defmodule Potion do
   end
 
   defp unique!(module, name) do
-    case Module.get_attribute(module, :potion_actor) do
-      nil ->
+    if Enum.any?(actors(module), fn {taken, _allocation, _fragment} -> taken == name end) do
+      raise CompileError, """
+      two actors called #{inspect(name)} in #{inspect(module)}.
+
+      The name is what the game calls a slot; two of them would not say which \
+      one the kernel calls first, nor which cells belong to which.
+      """
+    end
+  end
+
+  # Every actor's variables end up in one `addresses/0`, so a name taken twice
+  # would hide a cell rather than clash. Better said here, while the second
+  # declaration is still on screen.
+  defp shared_names!(module, allocation, name) do
+    clashes =
+      Enum.flat_map(actors(module), fn {other, other_allocation, _fragment} ->
+        for {variable, _address} <- other_allocation.cells,
+            Map.has_key?(allocation.cells, variable),
+            do: {variable, other}
+      end)
+
+    case clashes do
+      [] ->
         :ok
 
-      first ->
+      taken ->
         raise CompileError, """
-        second actor in #{inspect(module)}: #{inspect(name)}, after #{inspect(first)}.
+        variable name already used by another actor, in #{inspect(name)}: \
+        #{Enum.map_join(taken, ", ", fn {variable, other} -> "#{inspect(variable)} (#{inspect(other)})" end)}
 
-        The v0 scheduler has only one slot — the kernel makes a single `CALL` per \
-        frame, and #{inspect(first)} occupies it. #{inspect(name)} would never \
-        run, which is the worst possible way of not working.
-
-        Until there is a multi-slot scheduler: one actor per module, and one ROM \
-        per module.
+        A game's cells all share one `addresses/0`, so names are unique across \
+        the whole game, not merely within an actor. Two paddles want `left_y` \
+        and `right_y` rather than a `y` each.
         """
     end
   end
 
-  # The body of a `defactor`: at most one `variables`, exactly one `every_frame`,
-  # and nothing else. Neither is expanded — they are forms this function
-  # recognises, not code that runs.
   defp split!(body, name) do
     body
     |> statements()

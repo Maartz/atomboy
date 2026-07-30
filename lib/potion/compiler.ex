@@ -91,7 +91,8 @@ defmodule Potion.Compiler do
           cells: %{atom() => non_neg_integer()},
           order: [atom()],
           initial: %{atom() => byte()},
-          installed: non_neg_integer()
+          installed: non_neg_integer(),
+          prefix: String.t()
         }
 
   # The bits of the pad cell, as `Potion.Runtime.read_pad/0` files them. This
@@ -121,26 +122,36 @@ defmodule Potion.Compiler do
       iex> Potion.Compiler.allocate(x: 80, y: 72).installed
       0xC102
   """
-  @spec allocate(keyword()) :: allocation()
-  def allocate(declarations) do
+  @spec allocate(keyword(), keyword()) :: allocation()
+  def allocate(declarations, opts \\ []) do
+    base = Keyword.get(opts, :base, Runtime.actor_state())
+    prefix = Keyword.get(opts, :prefix, "potion")
+
     list = declarations!(declarations)
     names = Keyword.keys(list)
 
     duplicates!(names, declarations)
-    capacity!(names, declarations)
+    capacity!(names, declarations, base)
 
     cells =
       names
       |> Enum.with_index()
-      |> Map.new(fn {name, rank} -> {name, Runtime.actor_state() + rank} end)
+      |> Map.new(fn {name, rank} -> {name, base + rank} end)
 
     %{
       cells: cells,
       order: names,
       initial: Map.new(list),
-      installed: Runtime.actor_state() + length(names)
+      installed: base + length(names),
+      prefix: prefix
     }
   end
+
+  @doc """
+  The address just past an allocation -- where the next actor's slice starts.
+  """
+  @spec next_free(allocation()) :: non_neg_integer()
+  def next_free(allocation), do: allocation.installed + 1
 
   defp declarations!(declarations) when is_list(declarations) do
     Enum.each(declarations, fn
@@ -204,18 +215,30 @@ defmodule Potion.Compiler do
     end
   end
 
-  defp capacity!(names, declarations) do
-    if length(names) + 1 > @state_page do
+  defp capacity!(names, declarations, base) do
+    last = base + length(names)
+    ceiling = Runtime.actor_state() + @state_page - 1
+
+    if last > ceiling do
       raise CompileError, """
-      too many variables: #{length(names)} declared, #{@state_page - 1} at most.
+      no room left in the actor page: #{length(names)} variables asked for from \
+      0x#{hex(base)}, and the page ends at 0x#{hex(ceiling)}.
 
           #{Macro.to_string(declarations)}
 
-      The kernel leaves the actor page 0x#{hex(Runtime.actor_state())}-0x#{hex(Runtime.actor_state() + @state_page - 1)}, \
-      that is #{@state_page} cells, one of which holds the "installed" flag.
+      The kernel leaves 0x#{hex(Runtime.actor_state())}-0x#{hex(ceiling)} to the actors, \
+      that is #{@state_page} cells shared between all of them -- one per variable, \
+      plus one "installed" flag each.
       """
     end
   end
+
+  # Every generated label carries the actor's prefix, so two actors in one game
+  # cannot collide -- the assembler would refuse the duplicate, which is the
+  # right outcome but a late and puzzling one.
+  defp label(allocation, kind, counter), do: :"#{allocation.prefix}_#{kind}_#{counter}"
+
+  defp installed_label(allocation), do: :"#{allocation.prefix}_installed"
 
   # ══ The compilation ══════════════════════════════════════════════════════════
 
@@ -241,7 +264,7 @@ defmodule Potion.Compiler do
     [
       {:ld, :a, {:mem, allocation.installed}},
       {:and, :a, :a},
-      {:jr, :nz, {:label, :potion_installed}},
+      {:jr, :nz, {:label, installed_label(allocation)}},
       {:ld, :a, 0x01},
       {:ld, {:mem, allocation.installed}, :a}
     ] ++
@@ -251,7 +274,7 @@ defmodule Potion.Compiler do
           {:ld, {:mem, allocation.cells[name]}, :a}
         ]
       end) ++
-      [{:label, :potion_installed}]
+      [{:label, installed_label(allocation)}]
   end
 
   # A block: the statements one after another, the label counter passing from one
@@ -282,8 +305,8 @@ defmodule Potion.Compiler do
   defp statement({:if, _, [condition, blocks]} = statement, allocation, counter) do
     {then_body, else_body} = if_bodies!(blocks, statement)
 
-    done = :"potion_end_#{counter}"
-    otherwise = if else_body == :none, do: done, else: :"potion_else_#{counter}"
+    done = label(allocation, "end", counter)
+    otherwise = if else_body == :none, do: done, else: label(allocation, "else", counter)
 
     {test, counter} = condition!(condition, otherwise, allocation, statement, counter + 1)
     {taken, counter} = block(then_body, allocation, counter)
@@ -342,7 +365,7 @@ defmodule Potion.Compiler do
        when op in [:==, :!=, :<, :>, :<=, :>=] do
     address = cell!(left, allocation, statement)
     {setup, operand} = term(right, allocation, statement)
-    {jumps, counter} = skip_unless(op, otherwise, counter)
+    {jumps, counter} = skip_unless(op, otherwise, allocation, counter)
 
     {[{:ld, :a, {:mem, address}}] ++ setup ++ [{:cp, :a, operand}] ++ jumps, counter}
   end
@@ -356,17 +379,24 @@ defmodule Potion.Compiler do
   # one jump; `>` needs two, since it must rule out both equality and the
   # borrow; and `<=` is the only one that jumps *into* the body, because "C or
   # Z" cannot be spelled by jumping away from it.
-  defp skip_unless(:==, otherwise, counter), do: {[{:jr, :nz, {:label, otherwise}}], counter}
-  defp skip_unless(:!=, otherwise, counter), do: {[{:jr, :z, {:label, otherwise}}], counter}
-  defp skip_unless(:<, otherwise, counter), do: {[{:jr, :nc, {:label, otherwise}}], counter}
-  defp skip_unless(:>=, otherwise, counter), do: {[{:jr, :c, {:label, otherwise}}], counter}
+  defp skip_unless(:==, otherwise, _allocation, counter),
+    do: {[{:jr, :nz, {:label, otherwise}}], counter}
 
-  defp skip_unless(:>, otherwise, counter) do
+  defp skip_unless(:!=, otherwise, _allocation, counter),
+    do: {[{:jr, :z, {:label, otherwise}}], counter}
+
+  defp skip_unless(:<, otherwise, _allocation, counter),
+    do: {[{:jr, :nc, {:label, otherwise}}], counter}
+
+  defp skip_unless(:>=, otherwise, _allocation, counter),
+    do: {[{:jr, :c, {:label, otherwise}}], counter}
+
+  defp skip_unless(:>, otherwise, _allocation, counter) do
     {[{:jr, :c, {:label, otherwise}}, {:jr, :z, {:label, otherwise}}], counter}
   end
 
-  defp skip_unless(:<=, otherwise, counter) do
-    below = :"potion_below_#{counter}"
+  defp skip_unless(:<=, otherwise, allocation, counter) do
+    below = label(allocation, "below", counter)
 
     {[
        {:jr, :c, {:label, below}},

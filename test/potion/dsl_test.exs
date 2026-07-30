@@ -211,19 +211,19 @@ defmodule Potion.DSLTest do
       program = Hero.program()
 
       assert is_list(program)
-      assert {:label, :actor} in program
+      assert {:label, :actor_0} in program
 
       addresses = Assembler.addresses(program, origin: 0x0150)
 
       assert addresses.init == 0x0150
-      assert Map.has_key?(addresses, :actor)
-      assert addresses.actor > addresses.main_loop
+      assert Map.has_key?(addresses, :actor_0)
+      assert addresses.actor_0 > addresses.main_loop
 
       # The compiler's labels, all prefixed: one per `if`, plus the one for the
       # installation.
-      assert Map.has_key?(addresses, :potion_installed)
+      assert Map.has_key?(addresses, :potion_0_installed)
 
-      for n <- 0..3, do: assert(Map.has_key?(addresses, :"potion_end_#{n}"))
+      for n <- 0..3, do: assert(Map.has_key?(addresses, :"potion_0_end_#{n}"))
 
       # And the fragment ends with the RET the kernel demands.
       assert List.last(program) == {:ret}
@@ -305,6 +305,33 @@ defmodule Potion.DSLTest do
         if x >= limit, do: step = 0
 
         sprite(0, x: x, y: 70, tile: 0)
+      end
+    end
+  end
+
+  # Two actors in one game: each with its own cells, its own sprite, its own
+  # pace. `follower` reads a cell `leader` wrote earlier in the same frame --
+  # which only means anything because the kernel calls the slots in declaration
+  # order, every frame, with nothing in between.
+  defmodule Pair do
+    @moduledoc false
+    use Potion
+
+    defactor :leader do
+      variables leader_x: 20
+
+      every_frame do
+        leader_x = leader_x + 1
+        sprite(0, x: leader_x, y: 40, tile: 0)
+      end
+    end
+
+    defactor :follower do
+      variables follower_x: 0
+
+      every_frame do
+        follower_x = leader_x - 8
+        sprite(1, x: follower_x, y: 60, tile: 0)
       end
     end
   end
@@ -467,6 +494,64 @@ defmodule Potion.DSLTest do
     end
   end
 
+  describe "several actors" do
+    test "each one gets its own cells, side by side in the page" do
+      addresses = Pair.addresses()
+
+      assert addresses.leader_x == Potion.Runtime.actor_state()
+      # The leader takes a cell and its flag; the follower starts after both.
+      assert addresses.follower_x == Potion.Runtime.actor_state() + 2
+    end
+
+    test "both run every frame, and both draw" do
+      {_pixels, _state, ram} = run_frames(Pair, 8)
+      addresses = Pair.addresses()
+
+      leader = Map.get(ram, addresses.leader_x)
+      follower = Map.get(ram, addresses.follower_x)
+
+      assert leader > 20, "the leader has not moved"
+      assert follower == leader - 8, "the follower did not read this frame's value"
+
+      assert [_y, _x, 0, 0] = oam(ram, 0)
+      assert [_y2, _x2, 0, 0] = oam(ram, 1)
+    end
+
+    test "the order is the declaration order, and the follower sees the same frame" do
+      # If the kernel called them the other way round, the follower would be
+      # reading the leader's *previous* position and would trail by nine.
+      {_pixels, _state, ram} = run_frames(Pair, 12)
+      addresses = Pair.addresses()
+
+      assert Map.get(ram, addresses.follower_x) ==
+               Map.get(ram, addresses.leader_x) - 8
+    end
+
+    test "the kernel calls one slot per actor" do
+      program = Pair.program()
+
+      calls =
+        program
+        |> Enum.drop_while(&(&1 != {:label, :main_loop}))
+        |> Enum.take_while(&(&1 != {:label, :dma_source}))
+        |> Enum.filter(&match?({:call, _}, &1))
+
+      assert calls == [
+               {:call, {:label, :read_pad}},
+               {:call, {:label, :actor_0}},
+               {:call, {:label, :actor_1}}
+             ]
+    end
+
+    test "the two actors' labels do not collide" do
+      addresses = Assembler.addresses(Pair.program(), origin: 0x0150)
+
+      assert Map.has_key?(addresses, :potion_0_installed)
+      assert Map.has_key?(addresses, :potion_1_installed)
+      assert addresses.potion_0_installed != addresses.potion_1_installed
+    end
+  end
+
   describe "what the v0 refuses to compile" do
     test "an expression outside the subset" do
       message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
@@ -506,20 +591,22 @@ defmodule Potion.DSLTest do
       assert message =~ "undeclared variable: :z"
     end
 
-    test "two actors in the same module" do
+    test "two actors sharing a variable name" do
       source = """
-      defmodule Rejected.TwoActors do
+      defmodule Rejected.SharedName do
         use Potion
 
-        defactor :first do
+        defactor :left do
+          variables y: 10
           every_frame do
-            sprite(0, x: 10, y: 10, tile: 0)
+            sprite(0, x: 10, y: y, tile: 0)
           end
         end
 
-        defactor :second do
+        defactor :right do
+          variables y: 20
           every_frame do
-            sprite(1, x: 20, y: 20, tile: 0)
+            sprite(1, x: 150, y: y, tile: 0)
           end
         end
       end
@@ -527,9 +614,35 @@ defmodule Potion.DSLTest do
 
       message = refuse_compile!(source)
 
-      assert message =~ "second actor"
-      assert message =~ ":second"
-      assert message =~ "has only one slot"
+      assert message =~ "already used by another actor"
+      assert message =~ ":left"
+      assert message =~ "left_y"
+    end
+
+    test "two actors with the same name" do
+      source = """
+      defmodule Rejected.SameActor do
+        use Potion
+
+        defactor :ball do
+          variables a: 1
+          every_frame do
+            a = a + 1
+          end
+        end
+
+        defactor :ball do
+          variables b: 1
+          every_frame do
+            b = b + 1
+          end
+        end
+      end
+      """
+
+      message = refuse_compile!(source)
+
+      assert message =~ "two actors called :ball"
     end
 
     test "a sprite number outside the forty OAM entries" do

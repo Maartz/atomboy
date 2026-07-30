@@ -57,10 +57,9 @@ defmodule Potion.Runtime do
 
   The init arms the vblank interrupt, and *only* that one (IE = 0x01). The main
   loop is then a `HALT`: the processor sleeps, the vblank wakes it, the handler
-  raises the flag, the loop reads the pad, calls the actor, and goes back to
-  sleep. That is the v0 scheduler — a single slot, the single actor — and it is
-  also the shape the later ones will keep: what changes then is the contents of
-  the slot, not the beat.
+  raises the flag, the loop reads the pad, calls each actor in turn, and goes
+  back to sleep. That is the scheduler: one slot per actor, called in
+  declaration order, and the beat is the vblank rather than a count of cycles.
 
   The flag is not decoration. `HALT` wakes on *any* serviced interrupt, and
   others will come (the timer, the joypad, STAT) the day the kernel arms them;
@@ -134,16 +133,34 @@ defmodule Potion.Runtime do
   illegal opcode thousands of cycles away from its cause.
   """
   @spec program([Assembler.element()]) :: [Assembler.element()]
-  def program(actor) when is_list(actor) do
-    check_actor!(actor)
+  def program(actors) when is_list(actors) do
+    fragments = fragments(actors)
+    Enum.each(fragments, &check_actor!/1)
 
     init() ++
       vblank() ++
       read_pad() ++
-      main_loop() ++
+      main_loop(length(fragments)) ++
       [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
-      [{:label, :actor}] ++ actor
+      Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
+        [{:label, actor_label(slot)}] ++ fragment
+      end)
   end
+
+  @doc """
+  The label the kernel calls for the actor in a given slot.
+
+  Numbered rather than named: the kernel schedules positions, and it is the
+  language above that knows an actor is called `:ball`.
+  """
+  @spec actor_label(non_neg_integer()) :: atom()
+  def actor_label(slot), do: :"actor_#{slot}"
+
+  # One fragment or several. A fragment is a list of tuples, a list of fragments
+  # a list of lists -- the two cannot be confused, and accepting both means the
+  # hand-written actors that predate the scheduler still read as they did.
+  defp fragments([head | _] = actors) when is_list(head), do: actors
+  defp fragments(actor), do: [actor]
 
   defp check_actor!(actor) do
     case List.last(actor) do
@@ -441,15 +458,22 @@ defmodule Potion.Runtime do
   # ══ The main loop ════════════════════════════════════════════════════════════
 
   @doc """
-  The v0 scheduler: sleep, wake on the vblank, read the pad, call the actor, go
-  back to sleep.
+  The scheduler: sleep, wake on the vblank, read the pad, call each actor in
+  turn, go back to sleep.
 
   `HALT` is not a battery saving here, it is the system's only clock: it gives
   the kernel a rhythm of exactly one frame, without counting a single cycle. A
-  loop polling LY would work too, and would drift as soon as the actor grew.
+  loop polling LY would work too, and would drift as soon as the actors grew.
+
+  The slots run in declaration order, every frame, with nothing between them: an
+  actor that writes a cell another one reads will be read in that order, always.
+  That is the whole scheduling contract, and it is worth stating because it is
+  the one an actor cannot check for itself.
   """
-  @spec main_loop() :: [Assembler.element()]
-  def main_loop do
+  @spec main_loop(pos_integer()) :: [Assembler.element()]
+  def main_loop(slots \\ 1) when slots >= 1 do
+    calls = for slot <- 0..(slots - 1), do: {:call, {:label, actor_label(slot)}}
+
     [
       {:label, :main_loop},
       {:halt},
@@ -460,8 +484,9 @@ defmodule Potion.Runtime do
       {:xor, :a, :a},
       {:ld, {:mem, @flag}, :a},
       {:call, {:label, :read_pad}},
-      {:call, {:label, :actor}},
+      calls,
       {:jr, {:label, :main_loop}}
     ]
+    |> List.flatten()
   end
 end
