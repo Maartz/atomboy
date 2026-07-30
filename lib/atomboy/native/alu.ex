@@ -464,7 +464,7 @@ defmodule Atomboy.Native.ALU do
     ]
   end
 
-  # ══ Les rotations de la table CB ═════════════════════════════════════════════
+  # ══ The CB table's rotations ═════════════════════════════════════════════════
   #
   # Same shape as their twins on A, except that they set Z normally and work on
   # a0 rather than on the accumulator.

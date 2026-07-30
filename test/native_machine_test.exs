@@ -629,6 +629,16 @@ defmodule Atomboy.NativeMachineTest do
 
       code = Machine.image(memory, state, 1, render: true).labels[:table_base]
 
+      # hero.gb spends its frame halted, waiting for VBlank, so it fetches a few
+      # hundred opcodes and spends the rest of the frame in the halt path --
+      # which is dearer per T-cycle than a fetch, hence a total *above* the
+      # all-NOP one below. Its number is therefore nearly blind to what a fetch
+      # costs, and that is what the second measurement is for: an all-NOP memory
+      # where every one of the 17556 opcodes a frame allows is a fetch and
+      # nothing else. Any change to the fetch path shows up there or nowhere.
+      %{steady: fetching} = marginal(:binary.copy(<<0x00>>, 0x10000), %State{pc: 0x0100}, [])
+      per_opcode = Float.round(fetching / div(154 * 456, 4), 2)
+
       IO.puts("""
 
       hero.gb, native machine loop, steady state per frame:
@@ -637,9 +647,20 @@ defmodule Atomboy.NativeMachineTest do
         the renderer    #{drawn - bare} of those
         ten frames      #{ten.instret} instructions, #{ten.cycles} T-cycles
         code            #{code} bytes of the C6's 32768 byte cache
+
+      all-NOP memory, the fetch-bound extreme:
+        #{fetching} RV32 instructions per frame, #{per_opcode} per opcode
       """)
 
       assert bare > 0 and drawn > bare
+
+      # The guard the page table earned. Fetching a NOP and dispatching it cost
+      # 12.4 RV32 instructions when memory was flat and 16.4 once every read
+      # went through a page table -- the whole price of a cartridge, paid here
+      # and nowhere else. Twenty leaves room to breathe; it does not leave room
+      # for a second indirection to slip in unmeasured.
+      assert per_opcode < 20,
+             "the fetch path costs #{per_opcode} RV32 instructions per opcode -- it was 16.37"
     end
   end
 

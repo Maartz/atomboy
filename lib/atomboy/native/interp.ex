@@ -133,7 +133,7 @@ defmodule Atomboy.Native.Interp do
     )
   end
 
-  # ══ Le pilote ════════════════════════════════════════════════════════════════
+  # ══ The driver ═══════════════════════════════════════════════════════════════
 
   defp driver do
     [
@@ -179,7 +179,11 @@ defmodule Atomboy.Native.Interp do
       RV32.or_(Regs.hl(), :t0, :t1),
       RV32.lhu(Regs.sp(), :t2, 8),
       RV32.lhu(Regs.pc(), :t2, 10),
-      RV32.lbu(Regs.control(), :t2, 12)
+      RV32.lbu(Regs.control(), :t2, 12),
+      # Last, because it needs `mem` -- and it clobbers `t0` and `t1`, which the
+      # header read has finished with by now. `t2` survives: the caller still
+      # wants it pointing at the header.
+      Bus.install()
     ]
   end
 
@@ -193,7 +197,7 @@ defmodule Atomboy.Native.Interp do
   @spec instret_baseline() :: [Asm.item()]
   def instret_baseline, do: [RV32.csrrs(:s9, @instret, :zero)]
 
-  # ══ Le squelette ═════════════════════════════════════════════════════════════
+  # ══ The skeleton ═════════════════════════════════════════════════════════════
 
   @doc """
   The dispatch skeleton: the fetch, the slow path, the interrupt service.
@@ -216,7 +220,7 @@ defmodule Atomboy.Native.Interp do
     ]
   end
 
-  # ══ Le fetch ═════════════════════════════════════════════════════════════════
+  # ══ The fetch ════════════════════════════════════════════════════════════════
 
   defp fetch(budget_exit) do
     [
@@ -224,7 +228,7 @@ defmodule Atomboy.Native.Interp do
       Asm.bgeu(Regs.cycles(), Regs.budget(), :to_budget_exit),
       Asm.bnez(Regs.control(), :to_slow),
       Asm.label(:fast),
-      RV32.add(:t0, Regs.mem(), Regs.pc()),
+      Bus.translate(Regs.pc(), :read, :t0),
       RV32.lbu(Regs.opcode(), :t0, 0),
       RV32.addi(Regs.pc(), Regs.pc(), 1),
       RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16()),
@@ -245,7 +249,7 @@ defmodule Atomboy.Native.Interp do
     ]
   end
 
-  # ══ Le chemin lent ═══════════════════════════════════════════════════════════
+  # ══ The slow path ════════════════════════════════════════════════════════════
   #
   # L'ordre est celui de `Atomboy.CPU.Loop.fetch/17`, clause pour clause :
   # promoting an armed EI, then HALT, then interrupt service, then dispatch.
@@ -347,7 +351,7 @@ defmodule Atomboy.Native.Interp do
     ]
   end
 
-  # ══ Les sorties ══════════════════════════════════════════════════════════════
+  # ══ The exits ════════════════════════════════════════════════════════════════
 
   @doc """
   The two exits, the record, and the regions that follow it.
@@ -428,7 +432,7 @@ defmodule Atomboy.Native.Interp do
     ]
   end
 
-  # ══ Les gestionnaires ════════════════════════════════════════════════════════
+  # ══ The handlers ═════════════════════════════════════════════════════════════
 
   @doc """
   Every opcode handler the backend can emit, each behind its own label.
@@ -463,7 +467,7 @@ defmodule Atomboy.Native.Interp do
   defp prefix do
     [
       Asm.label(:h_cb),
-      RV32.add(:t0, Regs.mem(), Regs.pc()),
+      Bus.translate(Regs.pc(), :read, :t0),
       RV32.lbu(:t0, :t0, 0),
       RV32.addi(Regs.pc(), Regs.pc(), 1),
       RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16()),
@@ -501,7 +505,8 @@ defmodule Atomboy.Native.Interp do
       Asm.label(:table_base),
       table_base(),
       Asm.label(:table_cb),
-      table_cb()
+      table_cb(),
+      Bus.tables()
     ]
   end
 

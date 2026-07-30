@@ -127,7 +127,7 @@ defmodule Atomboy.Native.RV32 do
   @spec regs() :: [reg()]
   def regs, do: @regs |> Enum.sort_by(&elem(&1, 1)) |> Enum.map(&elem(&1, 0))
 
-  # ══ Les tables ═══════════════════════════════════════════════════════════════
+  # ══ The tables ═══════════════════════════════════════════════════════════════
   #
   # Each entry: {Elixir name, assembler mnemonic, ...encoding fields}. The name
   # differs from the mnemonic for `and`, `or` and `xor`, which are Elixir special

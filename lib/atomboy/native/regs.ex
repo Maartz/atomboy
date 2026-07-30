@@ -39,6 +39,15 @@ defmodule Atomboy.Native.Regs do
   and thread pointers, which a bare-metal image has no use for -- because the
   alternative was materialising `0xFF00` on the hot path of every store, and
   `0xFF00` does not fit an immediate.
+
+  **`pages` outranks `mem`.** `mem` is where the 64 KB begins, and for everything
+  the console maps flat -- VRAM, WRAM, OAM, HRAM -- it is still the answer.
+  `pages` points at the two page tables `Atomboy.Native.Bus` walks, and it is
+  what makes a cartridge possible at all: under banking a guest address no
+  longer names a fixed byte, so its base has to be looked up rather than
+  assumed. It is pinned for the reason `mask16` is -- every translated access
+  consults it, and materialising its address each time would cost more than the
+  lookup it serves.
   """
 
   alias Atomboy.Native.RV32
@@ -61,8 +70,24 @@ defmodule Atomboy.Native.Regs do
     mask16: :s8,
     opcode: :a1,
     rom_top: :gp,
-    io_base: :tp
+    io_base: :tp,
+    pages: :s10
   ]
+
+  # `s9` is not in the map and is not free either: `Atomboy.Native.Interp`
+  # samples the retired-instruction counter into it at startup and reads it
+  # back at the end. Nothing between the two may touch it.
+  @reserved [:s9]
+
+  @doc "Registers spoken for outside `map/0`, which no role may claim."
+  @spec reserved() :: [RV32.reg()]
+  def reserved, do: @reserved
+
+  taken = Keyword.values(@map) ++ @reserved
+
+  if length(Enum.uniq(taken)) != length(taken) do
+    raise "two roles on one register: #{inspect(taken -- Enum.uniq(taken))}"
+  end
 
   for {role, register} <- @map do
     @doc "The RV32 register carrying #{role}."

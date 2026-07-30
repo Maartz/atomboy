@@ -9,9 +9,10 @@ defmodule Atomboy.Native.Bus do
   same reason -- the day the native side has to talk to a real cartridge, this
   is the only file that grows.
 
-  Reads still do nothing but add the 64 KB base to a 16-bit address: flat memory
-  is the contract the SM83 vectors validate, and no address the SM83 tests read
-  behaves differently on the way in.
+  Reads go through a page table -- see `translate/3`. Until a cartridge fills it
+  in, every entry holds the 64 KB base and the lookup returns exactly what
+  `add dest, mem, address` used to: flat memory stays the contract the SM83
+  vectors validate, and the indirection is there so that one day it need not be.
 
   ## The write hook: where a store stops being a store
 
@@ -30,15 +31,15 @@ defmodule Atomboy.Native.Bus do
 
   ## What the hook costs, and why it is shaped backwards
 
-  It sits on the hot path of every store, so the fast path is four instructions
-  where it used to be two:
+  It sits on the hot path of every store, so the fast path carries two checks
+  around the translation:
 
       bltu address, rom_top, done    # below 0x8000 the cartridge answers: drop
-      add  t1, mem, address
+      <translate address, write>     # five instructions, into t1
       sb   source, t1, 0
       bltu address, io_base, done    # below 0xFF00 a store is only a store
 
-  The store happens *before* the range check rather than after it, which reads
+  The store happens *before* the second range check rather than after it, which reads
   backwards and is the point: had the check come first, the fast path would need
   a jump to skip the seam call, and that jump costs the same as the store it
   guards. Writing first and letting the seam correct what it has to means the
@@ -66,21 +67,116 @@ defmodule Atomboy.Native.Bus do
   ## The address register
 
   `t1` is the temporary for every access. A caller may therefore hold the
-  address there -- `add t1, mem, t1` stays correct -- but must keep nothing in
-  it across an access.
+  address there -- it is written last, so `t1` as both source and destination
+  stays correct -- but must keep nothing in it across an access. `t3` is the
+  translation's own scratch, and the one register an address may **not** live
+  in: it is consumed before the address is needed.
+
+  ## What is not translated yet
+
+  `read16/2` and `write16/2` still add `mem` directly. They are the stack and
+  `LD (a16), SP`, and a stack in banked space is not something the tables can
+  serve cheaply anyway -- its two bytes could straddle a page. It costs nothing
+  today, since every page is flat; it becomes a real limitation the day save RAM
+  is banked, and closing it belongs with that work rather than before it.
   """
 
   alias Atomboy.Native.Asm
   alias Atomboy.Native.Regs
   alias Atomboy.Native.RV32
 
-  @doc "Reads the byte at `address` into `dest`."
+  # ══ The translation ══════════════════════════════════════════════════════════
+
+  @page_bits 12
+  @pages 0x10000 |> div(4096)
+  @table_bytes @pages * 4
+
+  @doc "How many bytes one page table occupies -- the write table sits that far past the read one."
+  @spec table_bytes() :: pos_integer()
+  def table_bytes, do: @table_bytes
+
+  @doc """
+  Computes into `dest` the host address of guest `address`, for `direction`.
+
+  Each table holds #{@pages} words, one per 4 KB page, and an entry is
+  **pre-biased**: it is the host address of the page's first byte *minus* where
+  that page starts in the guest, so the lookup ends in a single addition rather
+  than a mask and two. A flat memory is then the case where all
+  #{@pages * 2} entries equal `mem`, which is exactly what
+  `install/0` lays down and why nothing had to change the day this replaced
+  `add dest, mem, address`.
+
+  Two tables rather than one, and that is what pays for the cartridge's
+  asymmetries. Where a bank is only readable -- ROM, and disabled save RAM,
+  which answers `0xFF` -- the read entry points at the bytes and the write entry
+  at a page nobody reads. So a store into ROM lands somewhere harmless without a
+  branch, and a store into locked save RAM cannot be read back, which a single
+  table could not express without a test on the hot path.
+
+  Clobbers `t3`; `address` must therefore not be `t3`, and `dest` may be
+  `address` itself -- it is written last.
+  """
+  @spec translate(RV32.reg(), :read | :write, RV32.reg()) :: [Asm.item()]
+  def translate(address, direction, dest) do
+    if address == :t3 do
+      raise ArgumentError, "translate/3 clobbers t3: the address cannot live there"
+    end
+
+    [
+      # `address >>> 12 * 4` in two instructions: a 16-bit address shifted by 10
+      # is at most 63, so dropping the low two bits gives the word offset
+      # directly. Shifting by 12 and back by 2 would cost the same and say less.
+      RV32.srli(:t3, address, @page_bits - 2),
+      RV32.andi(:t3, :t3, @table_bytes - 4),
+      RV32.add(:t3, Regs.pages(), :t3),
+      RV32.lw(:t3, :t3, table_offset(direction)),
+      RV32.add(dest, :t3, address)
+    ]
+  end
+
+  defp table_offset(:read), do: 0
+  defp table_offset(:write), do: @table_bytes
+
+  @doc """
+  The two tables, for the image's data section. Contiguous, read first.
+  """
+  @spec tables() :: [Asm.item()]
+  def tables do
+    [
+      {:align, 4},
+      Asm.label(:page_tables),
+      {:space, 2 * @table_bytes}
+    ]
+  end
+
+  @doc """
+  Fills both tables with `mem`: every page flat, which is the state every image
+  starts in and the only state one without a cartridge ever leaves.
+
+  For the prologue, once `mem` is loaded. Clobbers `t0` and `t1`.
+  """
+  @spec install() :: [Asm.item()]
+  def install do
+    [
+      Asm.la(Regs.pages(), :page_tables),
+      RV32.mv(:t0, Regs.pages()),
+      RV32.li(:t1, 2 * @pages),
+      Asm.label(:install_pages),
+      RV32.sw(Regs.mem(), :t0, 0),
+      RV32.addi(:t0, :t0, 4),
+      RV32.addi(:t1, :t1, -1),
+      Asm.bnez(:t1, :install_pages)
+    ]
+  end
+
+  @doc """
+  Reads the byte at `address` into `dest`.
+
+  Clobbers `t1` and `t3`; `address` may be `t1`, and must not be `t3`.
+  """
   @spec read(RV32.reg(), RV32.reg()) :: [Asm.item()]
   def read(address, dest) do
-    [
-      RV32.add(:t1, Regs.mem(), address),
-      RV32.lbu(dest, :t1, 0)
-    ]
+    translate(address, :read, :t1) ++ [RV32.lbu(dest, :t1, 0)]
   end
 
   @doc "The label a write that is more than a write jumps to."
@@ -127,15 +223,20 @@ defmodule Atomboy.Native.Bus do
   def write(address, source) do
     # The seam's calling convention, arranged only on the path that calls it.
     setup = place(address, source)
+    store = translate(address, :write, :t1) ++ [RV32.sb(source, :t1, 0)]
 
     # The instructions between the second check and the point both paths meet:
     # the moves, then the call itself.
     tail = 4 * (length(setup) + 1)
 
+    # And between the first check and that same point: the store, plus the
+    # second check. Counted from the lists rather than written out, so that
+    # lengthening the translation cannot silently retarget a branch.
+    head = 4 * (length(store) + 2) + tail
+
     [
-      RV32.bltu(address, Regs.rom_top(), 16 + tail),
-      RV32.add(:t1, Regs.mem(), address),
-      RV32.sb(source, :t1, 0),
+      RV32.bltu(address, Regs.rom_top(), head),
+      store,
       RV32.bltu(address, Regs.io_base(), 4 + tail),
       setup,
       Asm.call(seam())

@@ -425,13 +425,14 @@ defmodule Atomboy.Native.Emit do
   @doc """
   Loads the immediate byte following the opcode, and advances PC.
 
-  `t1` holds the address for the duration of the read, so that `dest` can be
-  n'importe quel autre registre de travail — `t0` comme `a0`.
+  `t1` holds the address for the duration of the read and `t3` the translation's
+  scratch, so that `dest` can be any other working register -- `t0` as much as
+  `a0`.
   """
   @spec read_immediate(RV32.reg()) :: [Asm.item()]
   def read_immediate(dest) do
     [
-      RV32.add(:t1, Regs.mem(), Regs.pc()),
+      Bus.translate(Regs.pc(), :read, :t1),
       RV32.lbu(dest, :t1, 0),
       RV32.addi(Regs.pc(), Regs.pc(), 1),
       RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16())
