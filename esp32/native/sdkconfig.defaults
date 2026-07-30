@@ -1,0 +1,19 @@
+# The C6's HP SRAM is one physical memory reachable from both the instruction
+# and the data bus, but ESP-IDF splits it with a PMP entry and marks the data
+# half non-executable -- a W^X the startup code installs before app_main runs.
+# That is a sound default and the wrong one here: the whole point of this
+# project is code written into RAM at run time and then executed.
+#
+# The first flash proved it the hard way. MALLOC_CAP_EXEC returned NULL, not
+# because the chip has no executable memory but because the region protection
+# had already spoken for it.
+CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT=n
+
+# Retired instructions are the measurement this project trusts, and on silicon
+# the cycle counter is what stands in for them. Keep the CPU at its rated speed
+# so the numbers mean what qemu's meant.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
+
+# The emulator will want the whole of the 512 KB before long: 64 KB of guest
+# memory, a 23 KB framebuffer, and a cartridge that does not fit in either.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y

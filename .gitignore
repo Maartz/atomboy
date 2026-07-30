@@ -38,3 +38,9 @@ atomboy_mac.tar
 __pycache__/
 .claude/
 .DS_Store
+
+# ESP-IDF build output and the config it generates from sdkconfig.defaults.
+esp32/native/build/
+esp32/native/sdkconfig
+esp32/native/sdkconfig.old
+dependencies.lock
