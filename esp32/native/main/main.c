@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_cpu.h"
 #include "esp_heap_caps.h"
@@ -70,7 +71,42 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
 /* The pinned checksum is the tenth frame -- test/native_machine_test.exs,
  * @hero_crc -- and the blob is built for one frame a call. */
 #define FRAMES_PINNED 10
+/* Eight buttons on a PCF8574, two wires. The chip's pins idle high through
+ * their own weak pull-ups and a button shorts one to ground, so a pressed key
+ * reads as a *zero* -- the byte comes back inverted and is inverted again here.
+ *
+ * The bit order is Potion's, not the hardware's: right, left, up, down, A, B,
+ * select, start. `Atomboy.Native.Machine`'s joypad seam splits it into the two
+ * rows the DMG's matrix actually has.
+ */
+#define PIN_SDA 4
+#define PIN_SCL 5
+
 #define HERO_CRC 0x5AA2E5B7u
+
+static const char *button_names[8] = {"right", "left", "up",     "down",
+                                      "A",     "B",    "select", "start"};
+
+/* Walks the bus and returns the first address that answers. Nothing here is
+ * guessed: a datasheet says 0x20 and the solder says what it says. */
+static int i2c_scan(i2c_master_bus_handle_t bus) {
+  int found = -1;
+
+  for (uint8_t address = 0x08; address < 0x78; address++) {
+    if (i2c_master_probe(bus, address, 50) == ESP_OK) {
+      ESP_LOGI(TAG, "I2C: something answers at 0x%02X", address);
+      if (found < 0) {
+        found = address;
+      }
+    }
+  }
+
+  if (found < 0) {
+    ESP_LOGE(TAG, "I2C: nobody answered on SDA %d / SCL %d", PIN_SDA, PIN_SCL);
+  }
+
+  return found;
+}
 
 struct result {
   uint32_t status;
@@ -204,6 +240,32 @@ void app_main(void) {
   esp_lcd_panel_handle_t panel = panel_open();
   panel_prove(panel, pixels);
 
+  i2c_master_bus_config_t i2c_bus = {
+      .i2c_port = -1,
+      .sda_io_num = PIN_SDA,
+      .scl_io_num = PIN_SCL,
+      .clk_source = I2C_CLK_SRC_DEFAULT,
+      .glitch_ignore_cnt = 7,
+      .flags.enable_internal_pullup = true,
+  };
+  i2c_master_bus_handle_t bus = NULL;
+  ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus, &bus));
+
+  const int address = i2c_scan(bus);
+  i2c_master_dev_handle_t pad = NULL;
+
+  if (address >= 0) {
+    i2c_device_config_t device = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = (uint16_t)address,
+        .scl_speed_hz = 400000,
+    };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &device, &pad));
+    ESP_LOGI(TAG, "pad: PCF8574 at 0x%02X -- press something", address);
+  }
+
+  uint8_t last = 0;
+
   const atomboy_entry_t entry = (atomboy_entry_t)executable;
   int batches = 0;
 
@@ -240,6 +302,31 @@ void app_main(void) {
 
     for (int p = 0; p < GB_PIXELS; p++) {
       pixels[p] = palette[shades[p] & 3];
+    }
+
+    /* One byte a frame, which is also how often a DMG polls its own pad. The
+     * chip reports a pressed key as zero, so this is the byte the emulator
+     * wants only after it has been turned over. */
+    if (pad != NULL) {
+      uint8_t raw = 0xFF;
+
+      if (i2c_master_receive(pad, &raw, 1, 20) == ESP_OK) {
+        const uint8_t held = (uint8_t)~raw;
+
+        if (held != last) {
+          char line[64] = "";
+
+          for (int b = 0; b < 8; b++) {
+            if (held & (1 << b)) {
+              strcat(line, button_names[b]);
+              strcat(line, " ");
+            }
+          }
+
+          ESP_LOGI(TAG, "pad 0x%02X: %s", held, line[0] ? line : "(nothing)");
+          last = held;
+        }
+      }
     }
 
     const uint32_t drawn = esp_cpu_get_cycle_count() - before;
