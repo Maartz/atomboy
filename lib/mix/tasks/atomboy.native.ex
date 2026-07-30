@@ -50,7 +50,7 @@ defmodule Mix.Tasks.Atomboy.Native do
     Mix.shell().info("""
     Couverture : #{couverts}/#{total} opcodes émis (#{pourcent(couverts, total)} %)
     Code       : #{code} octets, soit #{pourcent(code, @icache)} % de l'icache du C6
-    ALU        : #{alu.size} octets pour #{routines(alu)} routines, pas encore liées
+    ALU        : #{alu.size} octets pour #{routines(alu)} routines, liées à l'interpréteur
     Image      : #{image.size} octets, dont 64 Ko de mémoire émulée
     """)
 

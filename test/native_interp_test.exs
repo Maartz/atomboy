@@ -25,24 +25,54 @@ defmodule Atomboy.NativeInterpTest do
   # Le harnais paie un lancement de qemu et un vidage de 64 Ko par exécution.
   @moduletag timeout: 120_000
 
-  @steps 500
-  @seeds 1..5
+  @steps 5_000
+  @seeds 1..8
 
   describe "la couverture" do
-    test "l'étape 1 couvre NOP et les LD registre à registre" do
+    test "les étapes 1 et 3 couvrent les familles sans accès mémoire" do
       couverts = MapSet.new(Emit.couverture())
 
       assert {nil, 0x00} in couverts, "NOP"
       assert {nil, 0x41} in couverts, "LD B, C"
       assert {nil, 0x7F} in couverts, "LD A, A"
+      assert {nil, 0x80} in couverts, "ADD A, B"
+      assert {nil, 0xBF} in couverts, "CP A"
+      assert {nil, 0xC6} in couverts, "ADD A, d8"
+      assert {nil, 0x3C} in couverts, "INC A"
+      assert {nil, 0x05} in couverts, "DEC B"
+      assert {nil, 0x27} in couverts, "DAA"
+      assert {nil, 0x3F} in couverts, "CCF"
+      assert {nil, 0x3E} in couverts, "LD A, d8"
 
       # 0x76 est HALT, pas un LD : le trou dans le bloc x=1.
       refute {nil, 0x76} in couverts, "HALT n'est pas un LD"
-      # La colonne et la ligne (HL) touchent la mémoire — étape 4.
+      # Tout ce qui touche (HL) attend l'étape 4.
       refute {nil, 0x46} in couverts, "LD B, (HL)"
       refute {nil, 0x70} in couverts, "LD (HL), B"
+      refute {nil, 0x86} in couverts, "ADD A, (HL)"
+      refute {nil, 0x34} in couverts, "INC (HL)"
+      refute {nil, 0x36} in couverts, "LD (HL), d8"
 
-      assert MapSet.size(couverts) == 50, "NOP plus 49 LD r, r'"
+      # 1 NOP + 49 LD r,r' + 56 ALU A,r + 8 ALU A,d8 + 14 INC/DEC r
+      # + 8 accumulateur + 7 LD r,d8.
+      assert MapSet.size(couverts) == 143
+    end
+
+    test "la correspondance mnémonique → primitive suit celle de Gen" do
+      # `gen.ex:1490` fait la même traduction pour les deux backends Elixir.
+      # Qu'elles divergent produirait du code natif qui appelle une routine
+      # inexistante — ou pire, la mauvaise.
+      exportees = MapSet.new(Enum.map(Atomboy.CPU.ALU.__info__(:functions), &elem(&1, 0)))
+
+      for mnemonic <- [:add, :adc, :sub, :sbc, :and, :xor, :or, :cp] do
+        routine = Emit.routine(mnemonic)
+
+        assert routine in exportees,
+               "#{mnemonic} vise #{routine}, que Atomboy.CPU.ALU n'exporte pas"
+      end
+
+      assert Emit.routine(:and) == :bit_and
+      assert Emit.routine(:add) == :add
     end
 
     test "tout ce que le natif couvre, l'oracle le couvre aussi" do

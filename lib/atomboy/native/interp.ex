@@ -36,6 +36,7 @@ defmodule Atomboy.Native.Interp do
   alias Atomboy.CPU.Insn
   alias Atomboy.CPU.State
   alias Atomboy.CPU.Table
+  alias Atomboy.Native.ALU
   alias Atomboy.Native.Asm
   alias Atomboy.Native.Emit
   alias Atomboy.Native.Image
@@ -70,7 +71,7 @@ defmodule Atomboy.Native.Interp do
   @spec image(binary(), State.t(), pos_integer()) :: Asm.assembled()
   def image(memoire, %State{} = state, budget) when byte_size(memoire) == @memoire do
     Image.build(
-      [pilote(), fetch(), sorties(), gestionnaires()],
+      [pilote(), fetch(), sorties(), gestionnaires(), ALU.routines()],
       donnees(memoire, state, budget)
     )
   end
