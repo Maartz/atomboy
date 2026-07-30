@@ -3,36 +3,36 @@ defmodule Atomboy.ServerTest do
 
   import ExUnit.CaptureIO
 
-  # Une ROM qui boucle sur place : JR -2 à l'entrée 0x100.
-  defp rom_tournante(dir) do
+  # A ROM that spins in place: JR -2 at the 0x100 entry point.
+  defp spinning_rom(dir) do
     rom = :binary.copy(<<0>>, 0x100) <> <<0x18, 0xFE>> <> :binary.copy(<<0>>, 0x8000 - 0x102)
-    path = Path.join(dir, "boucle.gb")
+    path = Path.join(dir, "loop.gb")
     File.write!(path, rom)
     path
   end
 
-  defp découpe(<<?F, rgb::binary-size(160 * 144 * 3), rest::binary>>, frames, pcm),
-    do: découpe(rest, frames + 1, pcm)
+  defp split(<<?F, rgb::binary-size(160 * 144 * 3), rest::binary>>, frames, pcm),
+    do: split(rest, frames + 1, pcm)
 
-  defp découpe(<<?A, n::16-big, bloc::binary-size(n), rest::binary>>, frames, pcm),
-    do: découpe(rest, frames, pcm + byte_size(bloc))
+  defp split(<<?A, n::16-big, block::binary-size(n), rest::binary>>, frames, pcm),
+    do: split(rest, frames, pcm + byte_size(block))
 
-  defp découpe(<<>>, frames, pcm), do: {frames, pcm}
+  defp split(<<>>, frames, pcm), do: {frames, pcm}
 
   @tag :tmp_dir
-  test "le flux serveur : des frames RGB24 et du PCM, rien d'autre", %{tmp_dir: dir} do
-    rom = rom_tournante(dir)
+  test "the server stream: RGB24 frames and PCM, nothing else", %{tmp_dir: dir} do
+    rom = spinning_rom(dir)
 
-    flux =
+    stream =
       capture_io([encoding: :latin1], fn ->
         assert :ok = Atomboy.Server.run(rom, frames: 3)
       end)
 
-    {frames, pcm} = découpe(flux, 0, 0)
+    {frames, pcm} = split(stream, 0, 0)
     assert frames == 3
-    # La cadence murale démarre avec son avance (~2048 échantillons × 4).
+    # The wall-clock pacing starts with its lead (~2048 samples × 4).
     assert pcm >= 8192
-    # s16le stéréo : toujours un multiple de 4.
+    # s16le stereo: always a multiple of 4.
     assert rem(pcm, 4) == 0
   end
 end

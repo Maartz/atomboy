@@ -1,52 +1,52 @@
 defmodule Atomboy.CLI do
   @moduledoc """
-  Le point d'entrée de l'exécutable distribué.
+  The entry point of the shipped executable.
 
-  Burrito enveloppe la release (l'app et le BEAM entier) dans un binaire
-  unique ; au lancement, cette application démarre, lit les arguments et
-  joue. Le `-noinput` qui neutralise le lecteur tty interne du BEAM est
-  câblé dans `rel/vm.args.eex` — l'exécutable est correct par construction,
-  sans lanceur ni variable d'environnement.
+  Burrito wraps the release — the app and an entire BEAM — into a single
+  binary; on launch this application starts, reads the arguments and
+  plays. The `-noinput` that neutralises the BEAM's own tty reader is
+  wired into `rel/vm.args.eex` — the executable is correct by
+  construction, with no launcher and no environment variable.
 
       atomboy zelda.gb
-      atomboy pokemon.gbc --palette gris --no-sound
+      atomboy pokemon.gbc --palette gray --no-sound
 
-  Les arguments arrivent par `:init.get_plain_arguments/0` — la voie qui ne
-  dépend pas du module Burrito à l'exécution. Ne démarre qu'en prod : `mix
-  test` ne lance pas de partie.
+  Arguments arrive through `:init.get_plain_arguments/0` — the path that
+  does not depend on the Burrito module at runtime. Only starts in prod:
+  `mix test` never launches a game.
   """
 
   use Application
 
-  # Synchrone à dessein : le lanceur Burrito démarre le BEAM avec
-  # `-s elixir start_cli`, qui s'exécute APRÈS le boot — et interpréterait
-  # la ROM passée en argument comme un script Elixir (vécu : il a lu du
-  # Tetris comme du code source), puis halterait la VM. En jouant toute la
-  # partie dans le start de l'application, on halte avant qu'il ne parle.
+  # Synchronous on purpose: the Burrito launcher boots the BEAM with
+  # `-s elixir start_cli`, which runs AFTER boot — and would read the ROM
+  # passed as an argument as an Elixir script (lived through: it read
+  # Tetris as source code), then halt the VM. By playing the whole game
+  # inside the application's start, we halt before it gets to speak.
   @impl true
   def start(_type, _args) do
-    # Charger d'avance les modules de formatage d'erreurs : le BEAM les
-    # charge à la demande, et si le cache d'extraction disparaît en cours de
-    # partie, un crash deviendrait illisible (« DEFAULT FORMATTER CRASHED »,
-    # vécu) — le vrai rapport mangé par la mort du formateur.
+    # Preload the error formatting modules: the BEAM loads them on demand,
+    # and if the extraction cache vanishes mid-game a crash would become
+    # unreadable ("DEFAULT FORMATTER CRASHED", lived through) — the real
+    # report eaten by the death of the formatter.
     Enum.each([:io_lib_pretty, :io_lib_format, :erl_pp], &:code.ensure_loaded/1)
 
     args = :init.get_plain_arguments() |> Enum.map(&List.to_string/1)
     System.halt(main(args))
   end
 
-  @doc "Joue selon les arguments. Rend le code de sortie du processus."
+  @doc "Plays according to the arguments. Returns the process exit code."
   @spec main([String.t()]) :: non_neg_integer()
   def main(args) do
     case parse(args) do
       {:ok, rom, opts} ->
-        {fenetre, opts} = Keyword.pop(opts, :window, false)
-        {serveur, opts} = Keyword.pop(opts, :server, false)
+        {window, opts} = Keyword.pop(opts, :window, false)
+        {server, opts} = Keyword.pop(opts, :server, false)
 
         runner =
           cond do
-            serveur -> Atomboy.Server
-            fenetre -> Atomboy.Window
+            server -> Atomboy.Server
+            window -> Atomboy.Window
             true -> Atomboy.Play
           end
 
@@ -61,12 +61,17 @@ defmodule Atomboy.CLI do
           end
         rescue
           e ->
-            # Le rapport de crash ne dépend de personne : formaté par nos
-            # soins, écrit dans un fichier ET sur stderr — jamais confié au
-            # contrôleur d'applications, dont le formateur peut mourir.
+            # The crash report depends on nobody: formatted by our own
+            # hand, written to a file AND to stderr — never entrusted to
+            # the application controller, whose formatter can die.
             report = Exception.format(:error, e, __STACKTRACE__)
             File.write("atomboy-crash.log", report)
-            IO.puts(:stderr, "\natomboy a planté — rapport dans atomboy-crash.log :\n\n" <> report)
+
+            IO.puts(
+              :stderr,
+              "\natomboy crashed — report in atomboy-crash.log:\n\n" <> report
+            )
+
             70
         end
 
@@ -77,8 +82,8 @@ defmodule Atomboy.CLI do
   end
 
   @doc """
-  La ligne de commande commune à l'exécutable et à `mix atomboy.play` :
-  une ROM, et les options de jeu.
+  The command line shared by the executable and `mix atomboy.play`: one
+  ROM, and the play options.
   """
   # Legacy aliases: the flags shipped in v0.3.0 were French. They stay
   # accepted, silently mapped, so published docs and muscle memory keep
@@ -99,7 +104,7 @@ defmodule Atomboy.CLI do
     args = Enum.map(args, &Map.get(@alias_legacy, &1, &1))
 
     {opts, argv} =
-      OptionParser.parse!(port_par_defaut(args),
+      OptionParser.parse!(with_default_port(args),
         strict: [
           hold: :integer,
           frames: :integer,
@@ -125,13 +130,13 @@ defmodule Atomboy.CLI do
     e in OptionParser.ParseError -> {:error, Exception.message(e)}
   end
 
-  # « --listen » nu : le port par défaut s'intercale — la doc le promet.
-  defp port_par_defaut(["--listen" | rest]) do
+  # A bare "--listen": the default port slips in — the docs promise it.
+  defp with_default_port(["--listen" | rest]) do
     case rest do
       [next | _] ->
         case Integer.parse(next) do
-          {_, ""} -> ["--listen" | port_par_defaut(rest)]
-          _ -> ["--listen", "#{Atomboy.Link.default_port()}" | port_par_defaut(rest)]
+          {_, ""} -> ["--listen" | with_default_port(rest)]
+          _ -> ["--listen", "#{Atomboy.Link.default_port()}" | with_default_port(rest)]
         end
 
       [] ->
@@ -139,16 +144,17 @@ defmodule Atomboy.CLI do
     end
   end
 
-  defp port_par_defaut([arg | rest]), do: [arg | port_par_defaut(rest)]
-  defp port_par_defaut([]), do: []
+  defp with_default_port([arg | rest]), do: [arg | with_default_port(rest)]
+  defp with_default_port([]), do: []
 
   defp palette(opts) do
     case Keyword.get(opts, :palette) do
       nil -> {:ok, opts}
       "dmg" -> {:ok, Keyword.put(opts, :palette, :dmg)}
       "gray" -> {:ok, Keyword.put(opts, :palette, :gray)}
+      # Legacy value, like the flag aliases above: "gris" shipped first.
       "gris" -> {:ok, Keyword.put(opts, :palette, :gray)}
-      autre -> {:error, "palette inconnue : #{autre} (dmg or gray)"}
+      other -> {:error, "unknown palette: #{other} (dmg or gray)"}
     end
   end
 
@@ -156,14 +162,14 @@ defmodule Atomboy.CLI do
     if File.exists?(rom) do
       {:ok, rom}
     else
-      {:error, "ROM introuvable : #{rom}"}
+      {:error, "ROM not found: #{rom}"}
     end
   end
 
   defp rom(_argv) do
     {:error,
-     "usage : atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
-       "[--link hôte:port] [--save nom] [--hold N] [--frames N] " <>
+     "usage: atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
+       "[--link host:port] [--save name] [--hold N] [--frames N] " <>
        "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--codes 01VVLLHH,…]"}
   end
 end

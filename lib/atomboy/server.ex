@@ -1,37 +1,34 @@
 defmodule Atomboy.Server do
   @moduledoc """
-  Le mode serveur : atomboy comme moteur derrière une coquille native.
+  Server mode: atomboy as the engine behind a native shell.
 
-  La coquille (SwiftUI sur macOS, ou n'importe quoi qui sait lire un
-  tuyau) lance `atomboy rom.gb --server` et parle un protocole binaire
-  minimal :
+  The shell (SwiftUI on macOS, or anything that can read a pipe) launches
+  `atomboy rom.gb --server` and speaks a minimal binary protocol:
 
-  ## Sortie (stdout)
+  ## Output (stdout)
 
-      <<?F, rgb::binary-69120>>          une frame 160×144 en RGB24
-      <<?A, n::16-big, pcm::binary-n>>   du PCM s16le stéréo 32 768 Hz
+      <<?F, rgb::binary-69120>>          one 160×144 frame in RGB24
+      <<?A, n::16-big, pcm::binary-n>>   s16le stereo PCM at 32,768 Hz
 
-  Le RGB sort du même `Screen.to_rgb` que la fenêtre — palette comprise,
-  menu en surimpression compris : la coquille dessine, elle ne sait rien.
-  Le PCM suit la cadence anti-famine de l'horloge murale (`Audio.cadence`) ;
-  la coquille le joue au fil de l'eau. Les messages de statut (câble…)
-  vont sur stderr — stdout reste un flux binaire pur.
+  The RGB comes out of the same `Screen.to_rgb` as the window — palette
+  included, overlay menu included: the shell draws, it knows nothing. The
+  PCM follows the wall clock's anti-starvation pacing (`Audio.cadence`);
+  the shell plays it as it comes. Status messages (the cable…) go to
+  stderr — stdout stays a pure binary stream.
 
-  ## Entrée (stdin)
+  ## Input (stdin)
 
-  Des enregistrements de deux octets : `<<op, touche>>`, `op` valant `?+`
-  (presse) ou `?-` (relâchement). Touches : `?U ?D ?L ?R` les directions,
-  `?A ?B` les boutons, `?S` Start, `?E` Select, `?M` le menu, `?W` le
-  rembobinage (tenu), `?P` pause — et les actions directes pour la barre
-  de menus native : `?s`/`?r` sauver/charger l'état, `?1`-`?9` la case.
-  Deux opérations portent une valeur plutôt qu'une touche : `<<?V, v>>`
-  pose le volume du mixer (0-100), `<<?X, masque>>` les quatre voix
-  (bits 0-3) — le panneau natif de la coquille s'en sert. La fin de
-  l'entrée (coquille fermée) arrête la partie proprement — sauvegarde
-  écrite.
+  Two-byte records: `<<op, key>>`, where `op` is `?+` (press) or `?-`
+  (release). Keys: `?U ?D ?L ?R` the directions, `?A ?B` the buttons, `?S`
+  Start, `?E` Select, `?M` the menu, `?W` rewind (held), `?P` pause — plus
+  the direct actions for the native menu bar: `?s`/`?r` save/load state,
+  `?1`-`?9` the slot. Two operations carry a value rather than a key:
+  `<<?V, v>>` sets the mixer volume (0-100), `<<?X, mask>>` the four voices
+  (bits 0-3) — the shell's native panel uses these. The end of input (shell
+  closed) stops the game cleanly — save written.
 
-  Tout le reste est la machinerie habituelle : menu dans la frame, états,
-  mixer, câble link (`--listen`/`--link` marchent aussi en serveur).
+  Everything else is the usual machinery: menu inside the frame, states,
+  mixer, link cable (`--listen`/`--link` work in server mode too).
   """
 
   import Bitwise
@@ -49,36 +46,36 @@ defmodule Atomboy.Server do
 
   @frame_us 16_742
 
-  @touches %{
-                ?U => :up,
-                ?D => :down,
-                ?L => :left,
-                ?R => :right,
-                ?A => :a,
-                ?B => :b,
-                ?S => :start,
-                ?E => :select,
-                ?M => :menu,
-                ?W => :rewind,
-                ?P => :pause,
-                ?T => :turbo,
-                # Les actions directes — la barre de menus native s'en sert.
-                ?s => :save_state,
-                ?r => :load_state
-              }
-              |> Map.merge(for n <- 1..9, into: %{}, do: {?0 + n, {:slot, n}})
+  @keys %{
+          ?U => :up,
+          ?D => :down,
+          ?L => :left,
+          ?R => :right,
+          ?A => :a,
+          ?B => :b,
+          ?S => :start,
+          ?E => :select,
+          ?M => :menu,
+          ?W => :rewind,
+          ?P => :pause,
+          ?T => :turbo,
+          # The direct actions — the native menu bar uses these.
+          ?s => :save_state,
+          ?r => :load_state
+        }
+        |> Map.merge(for n <- 1..9, into: %{}, do: {?0 + n, {:slot, n}})
 
-  @boutons [:up, :down, :left, :right, :a, :b, :start, :select, :rewind]
+  @buttons [:up, :down, :left, :right, :a, :b, :start, :select, :rewind]
 
-  @doc "Joue `rom_path` en mode serveur. Mêmes options que la fenêtre."
+  @doc "Plays `rom_path` in server mode. Same options as the window."
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
     sav = Save.path(rom_path, Keyword.get(opts, :save))
 
     with {:ok, link} <- link_up(opts) do
-      # stdout est un flux binaire : en Unicode (le défaut du BEAM), tout
-      # octet ≥ 128 deviendrait deux octets UTF-8 — frames déchirées.
+      # stdout is a binary stream: in Unicode (the BEAM's default), every
+      # byte ≥ 128 would become two UTF-8 bytes — torn frames.
       :io.setopts(:standard_io, encoding: :latin1)
 
       parent = self()
@@ -121,19 +118,19 @@ defmodule Atomboy.Server do
   defp link_up(opts) do
     cond do
       port = Keyword.get(opts, :listen) -> Link.listen(port)
-      lien = Keyword.get(opts, :link) -> connect(lien)
+      target = Keyword.get(opts, :link) -> connect(target)
       true -> {:ok, nil}
     end
   end
 
-  defp connect(lien) do
-    case String.split(lien, ":") do
+  defp connect(target) do
+    case String.split(target, ":") do
       [host, port] -> Link.connect(host, String.to_integer(port))
       [host] -> Link.connect(host, Link.default_port())
     end
   end
 
-  # ── La boucle ───────────────────────────────────────────────────────────────
+  # ── The loop ────────────────────────────────────────────────────────────────
 
   defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: finish(ctx)
 
@@ -155,7 +152,7 @@ defmodule Atomboy.Server do
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
     ram = Codes.applique(ram)
 
-    # En turbo : une frame émise sur quatre, pas de PCM, pas d'échéancier.
+    # In turbo: one frame emitted in four, no PCM, no deadline.
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
 
     {pixels, state, ram} =
@@ -169,15 +166,15 @@ defmodule Atomboy.Server do
 
     {ram, apu, audio} =
       if ctx.turbo do
-        # Les déclenchements se consomment quand même — l'état de l'APU
-        # reste cohérent, seul le PCM se tait.
+        # The triggers are consumed anyway — the APU's state stays
+        # coherent, only the PCM falls silent.
         {_, ram, apu} = APU.samples(ram, ctx.apu, 0)
         {ram, apu, ctx.audio}
       else
-        son(ram, ctx.apu, ctx.audio)
+        sound(ram, ctx.apu, ctx.audio)
       end
 
-    if render?, do: émet_frame(pixels, ctx.palette)
+    if render?, do: emit_frame(pixels, ctx.palette)
 
     deadline =
       if ctx.turbo do
@@ -205,8 +202,8 @@ defmodule Atomboy.Server do
     |> loop()
   end
 
-  # Le PCM dû par l'horloge murale, poussé dans le flux — la coquille joue.
-  defp son(ram, apu, audio) do
+  # The PCM owed by the wall clock, pushed into the stream — the shell plays.
+  defp sound(ram, apu, audio) do
     {audio, needed} = Audio.cadence(audio)
     {pcm, ram, apu} = APU.samples(ram, apu, needed)
 
@@ -217,13 +214,13 @@ defmodule Atomboy.Server do
     {ram, apu, %{audio | sent: audio.sent + needed}}
   end
 
-  defp émet_frame(pixels, palette) do
+  defp emit_frame(pixels, palette) do
     IO.binwrite(:stdio, [<<?F>>, Screen.to_rgb(pixels, palette)])
   end
 
   defp menu_idle(ctx) do
     if ctx.last_frame do
-      émet_frame(Menu.render(ctx.menu, ctx.last_frame), ctx.palette)
+      emit_frame(Menu.render(ctx.menu, ctx.last_frame), ctx.palette)
     end
 
     Process.sleep(50)
@@ -238,7 +235,7 @@ defmodule Atomboy.Server do
       end
 
     pixels = PPU.render_frame(ctx.ram)
-    émet_frame(pixels, ctx.palette)
+    emit_frame(pixels, ctx.palette)
 
     now = System.monotonic_time(:microsecond)
     deadline = max(ctx.deadline, now - 100_000)
@@ -253,43 +250,43 @@ defmodule Atomboy.Server do
 
   defp remember(ctx), do: ctx
 
-  # ── Les touches ─────────────────────────────────────────────────────────────
+  # ── The keys ────────────────────────────────────────────────────────────────
 
   defp drain(ctx) do
     receive do
-      # Le mixer natif de la coquille : volume (?V, 0-100) et masque des
-      # quatre voix (?X, bits 0-3) — appliqués au même ram[:mixer] que le
-      # menu en jeu, replié par l'APU dans sa config par frame.
-      {:touche, ?V, volume} ->
-        drain(%{ctx | ram: mixer_maj(ctx.ram, :volume, min(volume, 100))})
+      # The shell's native mixer: volume (?V, 0-100) and the four-voice mask
+      # (?X, bits 0-3) — applied to the same ram[:mixer] as the in-game
+      # menu, folded by the APU into its per-frame config.
+      {:key, ?V, volume} ->
+        drain(%{ctx | ram: mixer_put(ctx.ram, :volume, min(volume, 100))})
 
-      {:touche, ?X, masque} ->
-        voix =
-          {(masque &&& 1) != 0, (masque &&& 2) != 0, (masque &&& 4) != 0, (masque &&& 8) != 0}
+      {:key, ?X, mask} ->
+        voices =
+          {(mask &&& 1) != 0, (mask &&& 2) != 0, (mask &&& 4) != 0, (mask &&& 8) != 0}
 
-        drain(%{ctx | ram: mixer_maj(ctx.ram, :voices, voix)})
+        drain(%{ctx | ram: mixer_put(ctx.ram, :voices, voices)})
 
-      {:codes, chaîne} ->
-        drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(chaîne))})
+      {:codes, string} ->
+        drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(string))})
 
-      {:touche, op, key} ->
-        case appuie(ctx, op, Map.get(@touches, key)) do
+      {:key, op, key} ->
+        case press(ctx, op, Map.get(@keys, key)) do
           :quit -> :quit
           ctx -> drain(ctx)
         end
 
-      :stdin_fermé ->
-        # La coquille est partie : conclure — sauf en essai borné
-        # (--frames), où l'entrée peut légitimement être déjà close.
+      :stdin_closed ->
+        # The shell is gone: conclude — except in a bounded trial
+        # (--frames), where the input may legitimately be closed already.
         if ctx.max_frames == :infinity, do: :quit, else: ctx
     after
       0 -> ctx
     end
   end
 
-  defp appuie(ctx, _op, nil), do: ctx
+  defp press(ctx, _op, nil), do: ctx
 
-  defp appuie(%{menu: menu} = ctx, ?+, key) when menu != nil do
+  defp press(%{menu: menu} = ctx, ?+, key) when menu != nil do
     {menu, actions} = Menu.press(ctx.menu, key)
 
     case Enum.reduce(actions, %{ctx | menu: menu}, &menu_action/2) do
@@ -298,22 +295,27 @@ defmodule Atomboy.Server do
     end
   end
 
-  defp appuie(%{menu: menu} = ctx, ?-, _key) when menu != nil, do: ctx
+  defp press(%{menu: menu} = ctx, ?-, _key) when menu != nil, do: ctx
 
-  defp appuie(ctx, ?+, :menu),
+  defp press(ctx, ?+, :menu),
     do: %{
       ctx
       | menu:
-          Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false), Map.get(ctx.ram, :mixer)),
+          Menu.open(
+            ctx.state_slot,
+            ctx.palette,
+            Map.get(ctx.ram, :cgb, false),
+            Map.get(ctx.ram, :mixer)
+          ),
         down: MapSet.new()
     }
 
-  defp appuie(ctx, ?+, :pause), do: appuie(ctx, ?+, :menu)
+  defp press(ctx, ?+, :pause), do: press(ctx, ?+, :menu)
 
-  # Le turbo : indisponible câble branché (le protocole série exige le
-  # tempo) ; à la sortie, la cadence audio repart de zéro — pas de rafale
-  # de rattrapage héritée du sprint.
-  defp appuie(ctx, ?+, :turbo) do
+  # Turbo: unavailable with the cable plugged in (the serial protocol
+  # demands the tempo); on the way out, the audio pacing restarts from zero
+  # — no catch-up burst inherited from the sprint.
+  defp press(ctx, ?+, :turbo) do
     cond do
       Map.has_key?(ctx.ram, :link) ->
         ctx
@@ -330,12 +332,13 @@ defmodule Atomboy.Server do
         %{ctx | turbo: true}
     end
   end
-  defp appuie(ctx, ?+, :save_state), do: menu_action(:save_state, ctx)
-  defp appuie(ctx, ?+, :load_state), do: menu_action(:load_state, ctx)
-  defp appuie(ctx, ?+, {:slot, n}), do: %{ctx | state_slot: n}
-  defp appuie(ctx, ?+, key) when key in @boutons, do: %{ctx | down: MapSet.put(ctx.down, key)}
-  defp appuie(ctx, ?-, key) when key in @boutons, do: %{ctx | down: MapSet.delete(ctx.down, key)}
-  defp appuie(ctx, _op, _key), do: ctx
+
+  defp press(ctx, ?+, :save_state), do: menu_action(:save_state, ctx)
+  defp press(ctx, ?+, :load_state), do: menu_action(:load_state, ctx)
+  defp press(ctx, ?+, {:slot, n}), do: %{ctx | state_slot: n}
+  defp press(ctx, ?+, key) when key in @buttons, do: %{ctx | down: MapSet.put(ctx.down, key)}
+  defp press(ctx, ?-, key) when key in @buttons, do: %{ctx | down: MapSet.delete(ctx.down, key)}
+  defp press(ctx, _op, _key), do: ctx
 
   defp menu_action(_action, :quit), do: :quit
 
@@ -365,6 +368,8 @@ defmodule Atomboy.Server do
   defp menu_action({:mixer, m}, ctx), do: %{ctx | ram: Map.put(ctx.ram, :mixer, m)}
   defp menu_action(:quit, _ctx), do: :quit
 
+  # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
+  # on-disk convention `Atomboy.Save` also spells out.
   defp state_path(ctx) do
     if ctx.state_slot == 1 do
       ctx.state_base <> ".state"
@@ -373,42 +378,42 @@ defmodule Atomboy.Server do
     end
   end
 
-  defp mixer_maj(ram, clé, valeur) do
+  defp mixer_put(ram, key, value) do
     mixer = Map.get(ram, :mixer, Menu.mixer_default())
-    Map.put(ram, :mixer, Map.put(mixer, clé, valeur))
+    Map.put(ram, :mixer, Map.put(mixer, key, value))
   end
 
-  # ── L'entrée ────────────────────────────────────────────────────────────────
+  # ── The input ───────────────────────────────────────────────────────────────
 
-  # Deux octets par événement, lus au fil de l'eau ; la fin du flux (la
-  # coquille est partie) conclut la partie.
+  # Two bytes per event, read as they come; the end of the stream (the shell
+  # is gone) concludes the game.
   defp read_stdin(parent) do
     case :file.open(~c"/dev/fd/0", [:read, :binary, :raw]) do
       {:ok, f} -> read_loop(parent, f)
-      _ -> send(parent, :stdin_fermé)
+      _ -> send(parent, :stdin_closed)
     end
   end
 
   defp read_loop(parent, f) do
     case :file.read(f, 2) do
-      # ?C : les codes GameShark — longueur puis la liste ASCII, qui
-      # REMPLACE l'ensemble actif (une liste vide efface tout).
-      {:ok, <<?C, longueur>>} ->
-        chaîne =
-          case :file.read(f, longueur) do
-            {:ok, données} when longueur > 0 -> données
+      # ?C: the GameShark codes — a length, then the ASCII list, which
+      # REPLACES the active set (an empty list clears everything).
+      {:ok, <<?C, len>>} ->
+        string =
+          case :file.read(f, len) do
+            {:ok, data} when len > 0 -> data
             _ -> ""
           end
 
-        send(parent, {:codes, chaîne})
+        send(parent, {:codes, string})
         read_loop(parent, f)
 
       {:ok, <<op, key>>} ->
-        send(parent, {:touche, op, key})
+        send(parent, {:key, op, key})
         read_loop(parent, f)
 
-      _fin ->
-        send(parent, :stdin_fermé)
+      _eof ->
+        send(parent, :stdin_closed)
     end
   end
 end

@@ -5,19 +5,19 @@ defmodule Atomboy.CLITest do
 
   @rom "test/fixtures/dmg-acid2.gb"
 
-  test "--listen nu prend le port par défaut" do
+  test "a bare --listen takes the default port" do
     assert {:ok, @rom, opts} = CLI.parse([@rom, "--window", "--listen", "--save", "will"])
     assert opts[:listen] == 7373
     assert opts[:save] == "will"
     assert opts[:window] == true
   end
 
-  test "--listen avec port explicite le garde" do
+  test "--listen with an explicit port keeps it" do
     assert {:ok, @rom, opts} = CLI.parse([@rom, "--listen", "9999"])
     assert opts[:listen] == 9999
   end
 
-  test "--listen nu en fin d'arguments" do
+  test "a bare --listen at the end of the arguments" do
     assert {:ok, @rom, opts} = CLI.parse([@rom, "--listen"])
     assert opts[:listen] == 7373
   end
