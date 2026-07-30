@@ -50,10 +50,12 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
 #define PANEL_W 240
 #define PANEL_H 320
 
-/* 40 MHz is what these modules are specified for and what they all take. The
- * ILI9341's own limit for writes is higher and 80 MHz usually works; that is a
- * thing to try once the picture is known to be right, not before. */
-#define SPI_HZ (40 * 1000 * 1000)
+/* 10 MHz, and deliberately slow. These modules take 40 and often 80, but only
+ * on a board where the traces are traces. On loose jumper wires 40 MHz is a
+ * coin toss: the clock rings, the data is sampled wrong, the panel ignores
+ * every command and stays in the white it powered up in -- which is exactly
+ * what it did. Speed is the last thing to raise, not the first. */
+#define SPI_HZ (10 * 1000 * 1000)
 
 #define GB_W 160
 #define GB_H 144
@@ -141,24 +143,36 @@ static esp_lcd_panel_handle_t panel_open(void) {
   return panel;
 }
 
-/* Three solid screens before anything subtle. If they read red, green, blue in
- * that order the byte order and the colour order are both right; if they read
- * blue, green, red the BGR flag above is wrong, and if they read something
- * unrelated the wiring is. One of the few tests that costs nothing and rules
- * out three separate mistakes at once. */
+/* Three solid screens before anything subtle, and the *whole* panel each time.
+ * Painting only the centre proves nothing: the 240x320 around it is never
+ * written, so it keeps whatever it powered up in, and a panel that ignored
+ * every command looks identical to one that obeyed them.
+ *
+ * Read what happens, in this order:
+ *
+ *   red, green, blue      byte order and colour order are both right
+ *   blue, green, red      LCD_RGB_ELEMENT_ORDER_BGR above is inverted
+ *   still white           no command is landing: wiring, or SPI still too fast
+ *   noise or tearing      data lands but is sampled wrong: slower still
+ *
+ * A line at a time, because one screenful is 150 KB and the bus config only
+ * promises a frame's worth. */
 static void panel_prove(esp_lcd_panel_handle_t panel, uint16_t *scratch) {
   static const uint8_t primaries[3][3] = {{0xFF, 0, 0}, {0, 0xFF, 0}, {0, 0, 0xFF}};
 
   for (int i = 0; i < 3; i++) {
     const uint16_t colour = rgb565_be(primaries[i]);
 
-    for (int p = 0; p < GB_PIXELS; p++) {
-      scratch[p] = colour;
+    for (int x = 0; x < PANEL_W; x++) {
+      scratch[x] = colour;
     }
 
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y, ORIGIN_X + GB_W,
-                                              ORIGIN_Y + GB_H, scratch));
-    vTaskDelay(pdMS_TO_TICKS(400));
+    for (int y = 0; y < PANEL_H; y++) {
+      ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, y, PANEL_W, y + 1, scratch));
+    }
+
+    ESP_LOGI(TAG, "painted the whole panel %s", i == 0 ? "red" : i == 1 ? "green" : "blue");
+    vTaskDelay(pdMS_TO_TICKS(1200));
   }
 }
 
