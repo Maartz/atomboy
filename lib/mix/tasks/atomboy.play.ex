@@ -1,66 +1,65 @@
 defmodule Mix.Tasks.Atomboy.Play do
-  @shortdoc "Joue une ROM Game Boy dans le terminal"
+  @shortdoc "Plays a Game Boy ROM in the terminal"
 
   @moduledoc """
-  La console dans le terminal : l'émulateur tourne à la cadence de la dalle,
-  le clavier tient lieu de croix et de boutons.
+  The console in the terminal: the emulator runs at the panel's cadence, and
+  the keyboard stands in for the D-pad and the buttons.
 
       bin/play "Tetris (World) (Rev 1).gb"
       bin/play zelda.gb --hold 15
 
-  Le lanceur `bin/play` équivaut à `ELIXIR_ERL_OPTIONS="-noinput" mix
-  atomboy.play …` : sans `-noinput`, le lecteur interne du BEAM vole un
-  octet sur trois au clavier et les flèches n'arrivent jamais entières —
-  la tâche refuse alors de démarrer, avec ce mode d'emploi.
+  The `bin/play` launcher is equivalent to `ELIXIR_ERL_OPTIONS="-noinput" mix
+  atomboy.play …`: without `-noinput`, the BEAM's own tty reader steals one
+  byte in three from the keyboard and arrow sequences never arrive whole — so
+  the task refuses to start, printing these instructions instead.
 
-  ## Touches
+  ## Keys
 
-      flèches    la croix        x  A        c  B
-      Entrée     Start           ␣  Select   q ou Ctrl-C  quitter
+      arrows     the D-pad       x  A        c  B
+      Enter      Start           ␣  Select   q or Ctrl-C  quit
 
-  ## Sauvegardes
+  ## Saves
 
-  La RAM à pile de la cartouche vit dans un `.sav` à côté de la ROM — la
-  convention des émulateurs, fichiers échangeables dans les deux sens.
-  Rechargée au lancement, écrite à la sortie et toutes les ~10 s dès que
-  le jeu a écrit quelque chose.
+  The cartridge's battery-backed RAM lives in a `.sav` next to the ROM — the
+  emulator convention, so the files travel both ways. Reloaded on launch,
+  written on exit and every ~10 s as soon as the game has written something.
 
   ## Options
 
-    * `--window` — jouer dans une vraie fenêtre (wxWidgets) plutôt que dans
-      le terminal : vrais événements clavier, pixels nets à l'échelle, aucun
-      des prérequis du terminal (ni `bin/play`, ni taille minimale).
-    * `--hold N` — frames de maintien par frappe (défaut 10), pour les
-      terminaux sans protocole clavier kitty ; avec lui (Ghostty…), l'état
-      des touches est réel et ce réglage ne sert plus.
-    * `--frames N` — s'arrêter après N frames (essais sans clavier).
-    * `--sound` / `--no-sound` — forcer ou couper le son (défaut : actif en
-      interactif si ffplay est installé — `brew install ffmpeg`).
-    * `--palette dmg|gris` — le vert de la dalle d'origine (défaut) ou les
-      gris neutres.
-    * `--dump f.pgm` — écrire la dernière frame en image à la sortie.
-    * `--save nom` — un profil de sauvegarde : `.sav` et `.state`
-      deviennent `rom.nom.sav`/`rom.nom.state`. Indispensable pour relier
-      deux instances du même jeu sur la même machine — deux joueurs, deux
-      parties. Et en jeu, les touches `1`-`9` choisissent la case d'état
-      courante pour s/r — neuf instantanés par partie.
-    * `--listen [port]` / `--link hôte:port` — le câble link en TCP : un
-      côté écoute (7373 par défaut), l'autre appelle, et les deux consoles
-      échangent leurs octets série comme par le vrai câble — échanges
-      Pokémon compris. ⇄ au statut.
+    * `--window` — play in a real window (wxWidgets) rather than in the
+      terminal: real keyboard events, crisp pixels at scale, and none of the
+      terminal's prerequisites (neither `bin/play` nor a minimum size).
+    * `--hold N` — hold frames per keystroke (default 10), for terminals
+      without the kitty keyboard protocol; with it (Ghostty…), key state is
+      real and this setting no longer matters.
+    * `--frames N` — stop after N frames (runs without a keyboard).
+    * `--sound` / `--no-sound` — force sound on or off (default: on when
+      interactive if ffplay is installed — `brew install ffmpeg`).
+    * `--palette dmg|gray` — the green of the original panel (default) or
+      neutral grays.
+    * `--dump f.pgm` — write the last frame as an image on exit.
+    * `--save name` — a save profile: `.sav` and `.state` become
+      `rom.name.sav`/`rom.name.state`. Essential for linking two instances of
+      the same game on one machine — two players, two save files. And in
+      game, keys `1`-`9` pick the current state slot for s/r — nine snapshots
+      per save.
+    * `--listen [port]` / `--link host:port` — the link cable over TCP: one
+      side listens (7373 by default), the other calls, and the two consoles
+      trade their serial bytes just as they did over the real cable — Pokémon
+      trades included. ⇄ in the status line.
 
-  ## En jeu
+  ## In game
 
-    * `s` fige la machine entière dans un `.state` à côté de la ROM,
-      `r` la ranime — sauver avant un boss, réessayer à l'infini.
-    * `Tab` bascule l'avance rapide (rendu 1/4, son coupé) — les intros
-      passent en secondes.
-    * `Retour arrière`, tenu, rembobine — jusqu'à quarante secondes en
-      arrière, dix frames par pas. Mort sur un boss ? Remonte le temps.
-    * `p` met en pause.
+    * `s` freezes the whole machine into a `.state` next to the ROM, `r`
+      revives it — save before a boss, retry forever.
+    * `Tab` toggles fast-forward (quarter rendering, sound muted) — intros go
+      by in seconds.
+    * `Backspace`, held down, rewinds — up to forty seconds back, ten frames
+      per step. Died on a boss? Turn back time.
+    * `p` pauses.
 
-  L'affichage demande 160 colonnes sur 73 lignes — réduire la police
-  (Cmd -) suffit généralement.
+  The display wants 160 columns by 73 lines — shrinking the font (Cmd -) is
+  usually enough.
   """
 
   use Mix.Task
@@ -71,13 +70,13 @@ defmodule Mix.Tasks.Atomboy.Play do
 
     case Atomboy.CLI.parse(args) do
       {:ok, rom, opts} ->
-        {fenetre, opts} = Keyword.pop(opts, :window, false)
-        {serveur, opts} = Keyword.pop(opts, :server, false)
+        {window, opts} = Keyword.pop(opts, :window, false)
+        {server, opts} = Keyword.pop(opts, :server, false)
 
         runner =
           cond do
-            serveur -> Atomboy.Server
-            fenetre -> Atomboy.Window
+            server -> Atomboy.Server
+            window -> Atomboy.Window
             true -> Atomboy.Play
           end
 

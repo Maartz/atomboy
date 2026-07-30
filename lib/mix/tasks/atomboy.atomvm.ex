@@ -1,36 +1,36 @@
 defmodule Mix.Tasks.Atomboy.Atomvm do
-  @shortdoc "Vérifie que le code tourne sous AtomVM (build generic_unix)"
+  @shortdoc "Checks that the code runs under AtomVM (generic_unix build)"
 
   @moduledoc """
-  Le garde-fou AtomVM : empaquette l'application et l'exécute sur le build
-  `generic_unix`.
+  The AtomVM guardrail: packs the application and runs it on the `generic_unix`
+  build.
 
       mix atomboy.atomvm
 
-  ## Pourquoi ce n'est pas la boucle de dev
+  ## Why this is not the dev loop
 
-  Toute l'itération se fait sur OTP standard, où l'on a ExUnit, le tracing et un
-  REPL. AtomVM n'implémente qu'un sous-ensemble des instructions BEAM et d'OTP —
-  et ce sous-ensemble ne se découvre pas en lisant la doc, qui est en retard sur
-  la source.
+  All the iteration happens on standard OTP, where ExUnit, tracing and a REPL
+  are available. AtomVM implements only a subset of the BEAM instructions and of
+  OTP — and that subset is not discovered by reading the docs, which lag behind
+  the source.
 
-  Ce que ce check attrape ne se voit pas sur le Mac : une instruction BEAM
-  absente de la table d'AtomVM, une fonction d'OTP manquante, une construction
-  Elixir qui suppose une bibliothèque standard complète. C'est peu coûteux
-  aujourd'hui et très coûteux à la phase 2, quand des semaines de code reposeront
-  dessus. À lancer après chaque famille d'opcodes, pas après chaque compilation.
+  What this check catches is invisible on the Mac: a BEAM instruction missing
+  from AtomVM's table, a missing OTP function, an Elixir construct that assumes
+  a complete standard library. It is cheap today and very expensive in phase 2,
+  when weeks of code will rest on it. Run it after each family of opcodes, not
+  after each compile.
 
-  ## Où est AtomVM
+  ## Where AtomVM is
 
-  Le build `generic_unix` est cherché dans `ATOMVM_BUILD`, sinon dans
-  `../AtomVM/build` à côté du projet.
+  The `generic_unix` build is looked up in `ATOMVM_BUILD`, otherwise in
+  `../AtomVM/build` next to the project.
 
-  ## Ce qui est empaqueté
+  ## What gets packed
 
-  Les modules de l'application, moins les tâches Mix — elles dépendent de Mix,
-  qui n'existe pas sous AtomVM, et n'ont rien à faire dans ce qui sera flashé.
-  S'y ajoutent `atomvmlib.avm` et `exavmlib.avm`, les bibliothèques standard
-  d'AtomVM pour Erlang et Elixir.
+  The application's modules, minus the Mix tasks — they depend on Mix, which
+  does not exist under AtomVM, and have no business in what will be flashed.
+  Added to those are `atomvmlib.avm` and `exavmlib.avm`, AtomVM's standard
+  libraries for Erlang and Elixir.
   """
 
   use Mix.Task
@@ -57,21 +57,21 @@ defmodule Mix.Tasks.Atomboy.Atomvm do
       not File.regular?(Path.join(build, "src/AtomVM")) ->
         {:error,
          """
-         Binaire AtomVM introuvable dans #{build}.
+         AtomVM binary not found in #{build}.
 
-         Indique un autre emplacement avec ATOMVM_BUILD, ou construis le build
-         generic_unix :
+         Point somewhere else with ATOMVM_BUILD, or build the generic_unix
+         build:
 
-             cd /chemin/vers/AtomVM && mkdir -p build && cd build
+             cd /path/to/AtomVM && mkdir -p build && cd build
              cmake .. && make -j8 AtomVM PackBEAM atomvmlib exavmlib
 
-         Sur macOS, AtomVM exige MbedTLS 2.x ou 3.x — pas la 4.x que Homebrew
-         installe par défaut. Il faut `brew install mbedtls@3` puis configurer
-         avec -DMBEDTLS_ROOT_DIR=/opt/homebrew/opt/mbedtls@3.
+         On macOS, AtomVM requires MbedTLS 2.x or 3.x — not the 4.x that
+         Homebrew installs by default. It takes `brew install mbedtls@3` and
+         then configuring with -DMBEDTLS_ROOT_DIR=/opt/homebrew/opt/mbedtls@3.
          """}
 
       not File.regular?(Path.join(build, "libs/atomvmlib.avm")) ->
-        {:error, "atomvmlib.avm absent de #{build} — lance `make atomvmlib exavmlib`."}
+        {:error, "atomvmlib.avm missing from #{build} — run `make atomvmlib exavmlib`."}
 
       true ->
         {:ok, build}
@@ -105,16 +105,16 @@ defmodule Mix.Tasks.Atomboy.Atomvm do
 
     cond do
       code != 0 ->
-        Mix.raise("AtomVM est sorti en erreur (code #{code}) :\n#{output}")
+        Mix.raise("AtomVM exited with an error (code #{code}):\n#{output}")
 
       String.contains?(output, @success) ->
-        Mix.shell().info("AtomVM : le code se charge et s'exécute.\n\n#{String.trim(output)}")
+        Mix.shell().info("AtomVM: the code loads and runs.\n\n#{String.trim(output)}")
 
       true ->
-        # Sortie 0 mais pas de marqueur : le programme n'est pas allé au bout.
-        # Un `undef` sur une fonction absente d'AtomVM ressemble exactement à ça.
+        # Exit 0 but no marker: the program did not make it to the end. An
+        # `undef` on a function missing from AtomVM looks exactly like this.
         Mix.raise("""
-        AtomVM n'a pas produit le marqueur de succès. Sortie brute :
+        AtomVM did not produce the success marker. Raw output:
 
         #{String.trim(output)}
         """)

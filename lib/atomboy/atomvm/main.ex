@@ -1,45 +1,45 @@
 defmodule Atomboy.AtomVM.Main do
   @moduledoc """
-  Point d'entrée embarqué : smoke test puis mesure de débit, sur AtomVM.
+  The embedded entry point: smoke test, then throughput measurement, on AtomVM.
 
-  Tourne à l'identique sur le build `generic_unix` (Mac) et sur ESP32 — c'est
-  le même `.avm`. La version Mac sert de contrôle : si un chiffre ESP32 semble
-  aberrant, on compare d'abord au même programme sur le même VM en local.
+  Runs identically on the `generic_unix` build (Mac) and on ESP32 — it is the
+  same `.avm`. The Mac run serves as a control: if an ESP32 figure looks
+  aberrant, compare it first against the same program on the same VM locally.
 
-  ## Pourquoi ce bench n'est pas `mix atomboy.bench`
+  ## Why this bench is not `mix atomboy.bench`
 
-  Le bench Mix remplit les 64 Ko d'adressage de `LD B, C`, soit une map de
-  65 536 entrées. Le firmware ESP32 utilisé n'active pas la PSRAM : le tas vit
-  dans la SRAM interne, et une map de cette taille n'y tient pas.
+  The Mix bench fills the whole 64 KB of address space with `LD B, C`, which
+  means a 65,536-entry map. The ESP32 firmware in use does not enable PSRAM:
+  the heap lives in internal SRAM, and a map that size does not fit.
 
-  Ici la mémoire ne contient que le petit programme du smoke test ; tout le
-  reste de l'espace lit 0, c'est-à-dire `NOP`. Le débit mesuré est donc celui
-  d'une boucle fetch + dispatch + NOP : un **plafond**, pas une moyenne. La
-  comparaison utile est ESP32 contre Mac *sur ce même programme*, pas contre le
-  bench Mix.
+  Here, memory holds only the smoke test's little program; all the rest of the
+  space reads 0, that is, `NOP`. The throughput measured is therefore that of a
+  fetch + dispatch + NOP loop: a **ceiling**, not an average. The useful
+  comparison is ESP32 against Mac *on this very program*, not against the Mix
+  bench.
 
-  ## Chiffre attendu
+  ## Expected figure
 
-  Le brief estime AtomVM/ESP32 à 20 000–100 000 instructions Game Boy par
-  seconde, sans mesure. C'est précisément ce que ce module va remplacer par un
-  nombre.
+  The brief estimates AtomVM/ESP32 at 20,000–100,000 Game Boy instructions per
+  second, without measuring. That is precisely what this module is here to
+  replace with a number.
   """
 
   alias Atomboy.CPU.State
   alias Atomboy.Memory.Flat
 
-  # :atomvm n'existe que sous AtomVM ; sur OTP ce module ne tourne jamais.
+  # :atomvm exists only under AtomVM; on OTP this module never runs.
   @compile {:no_warn_undefined, :atomvm}
 
-  # LD B,C ; LD (HL),B ; LD A,(HL) ; NOP — le même programme que le smoke test
-  # du garde-fou generic_unix.
+  # LD B,C ; LD (HL),B ; LD A,(HL) ; NOP — the same program as the smoke test
+  # of the generic_unix guardrail.
   @program %{0x0000 => 0x41, 0x0001 => 0x70, 0x0002 => 0x7E, 0x0003 => 0x00}
 
-  # Le bench est borné en temps, pas en pas : 5 s de mesure quelle que soit la
-  # vitesse de la cible. La version bornée en pas a coûté 158 s sur ESP32 à
-  # 631 instr/s — un chiffre qu'on ne connaissait justement pas avant de
-  # mesurer, ce qui est toute l'ironie d'un bench à durée dépendante du
-  # résultat.
+  # The bench is bounded in time, not in steps: 5 s of measurement whatever the
+  # speed of the target. The step-bounded version cost 158 s on ESP32 at
+  # 631 instr/s — a figure that was precisely what nobody knew before
+  # measuring, which is the whole irony of a bench whose duration depends on
+  # its result.
   @budget_ms 5_000
   @chunk 1_000
   @max_steps 10_000_000
@@ -59,10 +59,10 @@ defmodule Atomboy.AtomVM.Main do
 
     :erlang.display({:atomboy, :done})
 
-    # Sur ESP32, un start/0 qui retourne peut redémarrer la carte et noyer le
-    # résultat dans les logs de boot : on reste en vie. Sur generic_unix c'est
-    # l'inverse — la sortie standard n'est flushée qu'à la terminaison du
-    # processus, donc il faut sortir pour que quiconque voie quoi que ce soit.
+    # On ESP32, a start/0 that returns can reboot the board and drown the
+    # result in the boot logs: so we stay alive. On generic_unix it is the
+    # opposite — standard output is only flushed when the process terminates,
+    # so we have to exit for anyone to see anything at all.
     case :atomvm.platform() do
       :esp32 -> idle()
       _ -> 0
@@ -98,8 +98,8 @@ defmodule Atomboy.AtomVM.Main do
     mem = Flat.new(@program)
     state = %State{c: 0x42, h: 0xC0, sp: 0xFFFE}
 
-    # Tour de chauffe : stabilise la mesure, et vérifie que la boucle tient en
-    # mémoire avant de partir pour cinq secondes.
+    # Warm-up lap: steadies the measurement, and checks that the loop fits in
+    # memory before setting off for five seconds.
     run(state, mem, @chunk, 0)
 
     {steps, elapsed} =
@@ -108,7 +108,7 @@ defmodule Atomboy.AtomVM.Main do
         {{state, mem}, @chunk}
       end)
 
-    # Tout en entiers : pas de dépendance au formatage flottant d'AtomVM.
+    # All in integers: no dependency on AtomVM's float formatting.
     per_second = if elapsed > 0, do: div(steps * 1000, elapsed), else: :too_fast
 
     :erlang.display({:steps, steps})
@@ -124,15 +124,15 @@ defmodule Atomboy.AtomVM.Main do
   end
 
   @doc false
-  # Mesure par tranches : chaque appel de `slice` rend `{acc, unités}` ; on
-  # additionne le temps **actif** seul, et on rend la main entre deux tranches.
+  # Measures in slices: each call to `slice` returns `{acc, units}`; we add up
+  # the **active** time alone, and hand control back between two slices.
   #
-  # Le souffle entre tranches n'est pas décoratif : sur ESP32, une boucle BEAM
-  # qui monopolise la tâche AtomVM pendant cinq secondes affame la tâche IDLE
-  # de FreeRTOS, et le task watchdog aboie dans la console toutes les cinq
-  # secondes. Le `receive after` bloque la tâche un instant, IDLE respire, et
-  # le temps dormi n'entre pas dans la mesure. La boucle de frame de la vraie
-  # phase 3 devra faire pareil.
+  # The breath between slices is not decorative: on ESP32, a BEAM loop that
+  # hogs the AtomVM task for five seconds starves FreeRTOS's IDLE task, and the
+  # task watchdog barks in the console every five seconds. The `receive after`
+  # blocks the task for a moment, IDLE breathes, and the time slept does not
+  # enter the measurement. The frame loop of the real phase 3 will have to do
+  # the same.
   def measure(acc, slice, units \\ 0, active_ms \\ 0) do
     t0 = :erlang.monotonic_time(:millisecond)
     {acc, slice_units} = slice.(acc)
@@ -147,11 +147,11 @@ defmodule Atomboy.AtomVM.Main do
     end
   end
 
-  # 20 ms et pas moins : sur ESP32, AtomVM convertit ce délai en ticks
-  # FreeRTOS par division entière (`timeout_ms / portTICK_PERIOD_MS`, tick de
-  # 10 ms avec CONFIG_FREERTOS_HZ=100). Un délai inférieur au tick vaut zéro —
-  # la tâche ne bloque pas du tout, IDLE reste affamée et le watchdog aboie
-  # exactement comme sans souffle. Vécu, pas déduit.
+  # 20 ms and no less: on ESP32, AtomVM converts this delay into FreeRTOS ticks
+  # by integer division (`timeout_ms / portTICK_PERIOD_MS`, a 10 ms tick with
+  # CONFIG_FREERTOS_HZ=100). A delay below the tick amounts to zero — the task
+  # does not block at all, IDLE stays starved and the watchdog barks exactly as
+  # it does without a breath. Lived, not deduced.
   defp breathe do
     receive do
     after
@@ -159,27 +159,27 @@ defmodule Atomboy.AtomVM.Main do
     end
   end
 
-  # Une frame DMG : 154 scanlines × 456 T-cycles.
+  # One DMG frame: 154 scanlines × 456 T-cycles.
   @frame_cycles 70_224
-  # Le débit de T-cycles qu'une DMG soutient : 4,194304 MHz.
+  # The T-cycle throughput a DMG sustains: 4.194304 MHz.
   @dmg_hz 4_194_304
 
-  # Un bloc de 16 octets — 12 instructions variées, 64 T-cycles — répété sur
-  # tout l'espace d'adressage. Le prédécesseur était un défilé de NOP :
-  # l'opcode le mieux placé du dispatch, un bench qui mesurait la complaisance
-  # de son propre programme (×10,6 d'écart constaté selon la position de
-  # l'opcode dominant, avant l'arbre binaire). Ce bloc tire dans toute la
-  # table, préfixe CB compris.
+  # A 16-byte block — 12 varied instructions, 64 T-cycles — repeated over the
+  # whole address space. Its predecessor was a parade of NOPs: the best-placed
+  # opcode in the dispatch, a bench that measured the complacency of its own
+  # program (a ×10.6 spread observed depending on where the dominant opcode
+  # sat, before the binary tree). This block fires across the whole table, CB
+  # prefix included.
   @bench_block <<0x3E, 0x55, 0x06, 0x33, 0x80, 0x04, 0xB1, 0x2F, 0xCB, 0x37, 0xA8, 0x15, 0x1F,
                  0xE6, 0x0F, 0x7D>>
 
   defp bench_rom, do: :binary.copy(@bench_block, div(0x10000, byte_size(@bench_block)))
 
-  # La boucle rapide, appelée comme la boucle de frame l'appellera : un budget
-  # d'une frame par appel, l'état matérialisé entre deux, et la sémantique
-  # cartouche de CartLoop — fetch ROM sans test de map, le modèle mémoire d'un
-  # vrai jeu. Le chiffre rendu est celui qui compte pour le projet — le
-  # pourcentage du temps réel.
+  # The fast loop, called the way the frame loop will call it: one frame's
+  # budget per call, the state materialised in between, and CartLoop's
+  # cartridge semantics — ROM fetch with no map lookup, the memory model of a
+  # real game. The number it returns is the one that matters for the project —
+  # the percentage of real time.
   defp loop_bench do
     rom = bench_rom()
     state = %State{c: 0x42, h: 0xC0, sp: 0xFFFE}
@@ -188,8 +188,8 @@ defmodule Atomboy.AtomVM.Main do
 
     {frames, elapsed} =
       measure(state, fn state ->
-        # La ram repart vide à chaque frame : le bench mesure le CPU, pas la
-        # croissance d'une map d'écritures qu'aucun PPU ne consomme encore.
+        # The ram starts empty again on every frame: the bench measures the
+        # CPU, not the growth of a map of writes that no PPU consumes yet.
         {state, _ram, _cycles} = Atomboy.CPU.CartLoop.run(state, rom, %{}, @frame_cycles)
         {state, 1}
       end)

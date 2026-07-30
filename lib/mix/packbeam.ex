@@ -1,42 +1,40 @@
 defmodule Mix.Atomboy.Packbeam do
   @moduledoc """
-  Appelle le `PackBEAM` d'un build AtomVM, quelle qu'en soit la génération.
+  Calls the `PackBEAM` of an AtomVM build, whichever generation it is.
 
-  L'outil a changé d'interface entre AtomVM 0.7 (novembre 2025) et le main
-  actuel (0.8) : l'ancien prend `PackBEAM <sortie> <entrées>+` et démarre sur le
-  premier module de l'archive ; le nouveau fonctionne par sous-commandes,
-  `packbeam create --start <module> <sortie> <entrées>+`.
+  The tool changed its interface between AtomVM 0.7 (November 2025) and current
+  main (0.8): the old one takes `PackBEAM <output> <inputs>+` and starts on the
+  first module in the archive; the new one works through sub-commands,
+  `packbeam create --start <module> <output> <inputs>+`.
 
-  On doit parler aux deux : le firmware flashé sur l'ESP32 date de novembre et
-  ses bibliothèques viennent du build assorti, tandis que les expériences JIT
-  se font sur main. La génération est détectée en interrogeant l'outil
-  lui-même — la sortie de `help` des nouvelles versions annonce ses
-  sous-commandes.
+  We have to speak both: the firmware flashed onto the ESP32 dates from
+  November and its libraries come from the matching build, while the JIT
+  experiments happen on main. The generation is detected by asking the tool
+  itself — the `help` output of the newer versions announces its sub-commands.
   """
 
   @doc """
-  Construit `output` à partir de `inputs`, démarrage sur `start_module`.
+  Builds `output` out of `inputs`, starting on `start_module`.
 
-  Sur l'ancienne CLI, le module de démarrage est placé en tête d'archive —
-  c'était la convention. Sur la nouvelle, il est passé à `--start`.
+  On the old CLI, the start module is placed at the head of the archive — that
+  was the convention. On the new one, it is passed to `--start`.
   """
   @spec create(Path.t(), Path.t(), [Path.t()], module(), keyword()) :: :ok
   def create(build, output, inputs, start_module, options \\ []) do
     packbeam = Path.join(build, "tools/packbeam/PackBEAM")
 
     unless File.regular?(packbeam) do
-      Mix.raise("PackBEAM introuvable : #{packbeam}")
+      Mix.raise("PackBEAM not found: #{packbeam}")
     end
 
     File.rm(output)
 
-    # Le nom que le VM connaît : "Elixir.Atomboy.AtomVM.Main", pas la forme
-    # abrégée d'inspect/1.
+    # The name the VM knows: "Elixir.Atomboy.AtomVM.Main", not the abbreviated
+    # form inspect/1 gives.
     module_name = Atom.to_string(start_module)
 
-    # `--prune` (garder la seule fermeture transitive du module de départ)
-    # n'existe que sur la CLI à sous-commandes ; l'ancienne empaquette tout,
-    # tant pis pour elle.
+    # `--prune` (keep only the transitive closure of the start module) exists
+    # only on the sub-command CLI; the old one packs everything, too bad for it.
     prune = if options[:prune], do: ["--prune"], else: []
 
     args =
@@ -48,16 +46,16 @@ defmodule Mix.Atomboy.Packbeam do
 
     case System.cmd(packbeam, args, stderr_to_stdout: true) do
       {_out, 0} ->
-        # L'ancienne CLI sort en 0 même quand elle n'a rien compris à ses
-        # arguments : la seule preuve d'un empaquetage est le fichier.
+        # The old CLI exits 0 even when it understood nothing of its arguments:
+        # the only proof of a successful pack is the file.
         unless File.regular?(output) do
-          Mix.raise("PackBEAM est sorti en 0 mais n'a pas produit #{output}")
+          Mix.raise("PackBEAM exited 0 but did not produce #{output}")
         end
 
         :ok
 
       {out, code} ->
-        Mix.raise("PackBEAM a échoué (code #{code}) :\n#{out}")
+        Mix.raise("PackBEAM failed (code #{code}):\n#{out}")
     end
   end
 
