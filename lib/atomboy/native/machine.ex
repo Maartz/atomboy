@@ -43,26 +43,30 @@ defmodule Atomboy.Native.Machine do
   speed, since `KEY1` is a Game Boy Color register and this loop is DMG; the GBC
   video DMAs (GDMA/HDMA) and the link cable, for the same reason.
 
-  ## Composing with the interpreter rather than copying it
+  ## Composing with the interpreter
 
-  The 500 opcode handlers are not rewritten here: they come from
-  `Atomboy.Native.Emit.body/1` and `Atomboy.Native.ALU.routines/0`, the same
-  generators `Interp` feeds on. What this module does re-emit is the dispatch
-  skeleton -- the fetch, the slow path, the interrupt service, the jump tables --
-  because `Interp` exposes only `image/3`, and an image is a finished binary with
-  its exit already welded to `materialise`. The machine loop needs that exit to
-  land on *its* code, once per scanline, 154 times per frame. Given the choice
-  between editing `interp.ex` and re-emitting sixty instructions whose semantics
-  are pinned by `Atomboy.CPU.Loop.fetch/17` and by the equivalence tests, this
-  stage re-emits. The skeleton is small; the handlers, which are not, are shared.
+  Nothing about dispatch is written here. The 500 opcode handlers come from
+  `Atomboy.Native.Emit.body/1` and `Atomboy.Native.ALU.routines/0`; the fetch, the
+  slow path and the interrupt service come from
+  `Atomboy.Native.Interp.routines/1`, the jump tables from
+  `Atomboy.Native.Interp.tables/0`, the record and the exits from
+  `Atomboy.Native.Interp.exits/1` -- with the one edge this loop needs different
+  handed over as an argument: an exhausted budget lands on `line_done` instead of
+  on the interpreter's exit, once per scanline, 154 times per frame.
+
+  That argument is recent. This module used to re-emit some sixty instructions
+  whose semantics are pinned by `Atomboy.CPU.Loop.fetch/17`, because `Interp`
+  exposed only a finished image with its exit already welded on. Two copies of a
+  hardware contract are two things to get wrong independently, and the equivalence
+  tests would only have said which one much later.
 
   ## The memory seam: where a write stops being a store
 
   `Atomboy.Native.Bus` writes bytes into a flat 64 KB space. That is the right
   contract for the CPU, and the wrong one for a console: on real hardware some
   addresses *do* something when written. `Atomboy.CPU.CartLoop` intercepts them
-  in `ram_write/3`, and the three interceptions a DMG game cannot live without
-  are reproduced here, in `mmio_write`:
+  in `ram_write/3`, and the interceptions a DMG game cannot live without are
+  reproduced here, in the routine `Bus.seam/0` names:
 
     * **0xFF00, the joypad.** The game writes which of the two matrix rows it
       wants, and reads the lines back in the low nibble, active low. Storing the
@@ -82,13 +86,11 @@ defmodule Atomboy.Native.Machine do
   hardware, and in a flat memory they would rewrite the cartridge under the
   program's feet.
 
-  Only the three store forms that address memory absolutely go through the seam
-  -- `LDH (a8), A`, `LD (C), A`, `LD (a16), A` -- because those are the forms
-  games use for registers, and routing every write would put a branch on the
-  hot path of `LD (HL), r`. A write to an I/O register through `(HL)` therefore
-  lands as a plain byte. It is a known hole, not an oversight; closing it means
-  giving `Bus.write/2` a hook, which is a change to a file this stage does not
-  own.
+  **Every** store form reaches this routine, and it took a hook in `Bus` to make
+  that true. While only the three forms addressing memory absolutely were routed
+  -- `LDH (a8), A`, `LD (C), A`, `LD (a16), A` -- a game asking for an OAM DMA
+  through `LD HL, $FF46 / LD (HL), A` laid down a plain byte and got no transfer.
+  See `Atomboy.Native.Bus` for the shape of the check and what it costs.
 
   ## The pixels
 
@@ -107,45 +109,57 @@ defmodule Atomboy.Native.Machine do
   framebuffer from the top. Every frame overwrites the last, so what comes back is
   the frame a panel would be showing.
 
-  The framebuffer -- 160 × 144 bytes, one shade per pixel -- sits in the image's
-  data, **outside** the 64 KB. Outside is the point rather than a convenience: a
-  DMG has no framebuffer anywhere in its address space, the panel is fed a line at
-  a time as the PPU produces it, and a buffer the game could address would be an
-  invention this emulator would then have to keep. It exists here only because the
-  pixels must survive until the run ends and cross a serial port; on the C6 it is
-  what the DMA to the real panel will read from.
+  The framebuffer -- `Atomboy.Native.PPU.frame_bytes/0` bytes, one shade per
+  pixel -- sits in the image's data, **outside** the 64 KB. Outside is the point
+  rather than a convenience: a DMG has no framebuffer anywhere in its address
+  space, the panel is fed a line at a time as the PPU produces it, and a buffer
+  the game could address would be an invention this emulator would then have to
+  keep. It exists here only because the pixels must survive until the run ends and
+  cross a serial port; on the C6 it is what the DMA to the real panel will read
+  from.
 
   Rendering is off by default, and the default earns its keep twice: a run that
   only has to agree on memory does not pay 144 scanlines per frame, and the two
   regimes measured apart are what turn one number into two. Measured on hero.gb
   under `qemu -icount shift=0`, marginal cost per frame in steady state:
 
-      CPU and cadence      339,517 RV32 instructions
-      with the renderer    976,255       -- the PPU is 636,738 of them
-      code                 16,040 bytes, against the C6's 32 KB of icache
+      CPU and cadence      339,443 RV32 instructions
+      with the renderer    976,181       -- the PPU is 636,738 of them
+      code                 16,808 bytes, against the C6's 32 KB of icache
+
+  Routing every store through the seam instead of only the three absolute forms
+  cost 768 bytes of code and, on this game, *saved* 74 instructions per frame:
+  the forms that used to call the seam unconditionally now compare two registers
+  first, and hero writes more I/O registers absolutely than it writes bytes
+  through `(HL)`.
 
   ## The protocol
 
-  `Interp`'s, extended by appending rather than by changing: state, frame count and
-  64 KB baked into the image; a 24-byte record followed by the final 64 KB coming
-  back over the serial port, and then the frame if one was drawn. A reader that
-  knows only the record and the memory finds both exactly where they were.
+  `Interp`'s, extended by appending rather than by changing: state, frame count,
+  the timer's phase and 64 KB baked into the image; a 24-byte record followed by
+  the final 64 KB coming back over the serial port, then the frame if one was
+  drawn, then the timer's phase again. A reader that knows only the record and the
+  memory finds both exactly where they were, and one that also knows about pixels
+  finds those unmoved too -- appending is the only extension that keeps that true,
+  which is why the timer went last and not into the record.
+
   The `cycles` field carries the total across every line of every frame, not the
-  last line's, which is the only number a caller could want. The timer's
-  sub-counters start at zero and are not returned, so an image runs whole frames
-  from a known state -- chaining two runs to make one is exact for the CPU and
-  the memory, and loses at most 455 cycles of timer phase.
+  last line's, which is the only number a caller could want.
+
+  The timer's sub-counters -- the fractions of a DIV and a TIMA period that no
+  register shows -- travel in both directions. Feeding the phase a run reports
+  back into the next image is what makes chaining exact: ten frames run as one
+  image and ten run as ten now agree on the timer as well as on the CPU and the
+  memory. They used to start at zero on every image, which lost up to 455 cycles
+  of phase per boundary.
   """
 
   import Bitwise
 
-  alias Atomboy.CPU.Insn
   alias Atomboy.CPU.State
-  alias Atomboy.CPU.Table
   alias Atomboy.Native.ALU
   alias Atomboy.Native.Asm
   alias Atomboy.Native.Bus
-  alias Atomboy.Native.Emit
   alias Atomboy.Native.Image
   alias Atomboy.Native.Interp
   alias Atomboy.Native.PPU
@@ -153,14 +167,11 @@ defmodule Atomboy.Native.Machine do
   alias Atomboy.Native.Regs
   alias Atomboy.Native.RV32
 
-  @ime Regs.control_bits().ime
-  @halted Regs.control_bits().halted
-  @pending Regs.control_bits().pending
-
   # The cadence, from `Atomboy.Screen`. Same names, same values -- a divergence
-  # here would be a divergence nobody reads.
+  # here would be a divergence nobody reads. The visible height is the renderer's
+  # to own: it is the frame's, not the loop's.
   @line_cycles 456
-  @visible 144
+  @visible PPU.height()
   @lines 154
 
   @joyp 0xFF00
@@ -180,17 +191,16 @@ defmodule Atomboy.Native.Machine do
   @periods [1024, 16, 64, 256]
 
   @memory 0x10000
-  @instret 0xC02
-
-  # The three store forms routed through the I/O seam: `LDH (a8), A`,
-  # `LD (C), A`, `LD (a16), A`.
-  @routed [0xE0, 0xE2, 0xEA]
 
   # The machine's own state, in a word block the CPU slice cannot reach: the
   # scanline, the frames left to run, the timer's two sub-counters, the cycle
   # total, and the two the renderer needs. It lives in memory rather than in
   # registers because the interpreter owns almost all of them, and the one that is
   # left points here.
+  #
+  # The two sub-counters are adjacent on purpose: the run reports them as one
+  # eight-byte region rather than as two fields, so there is one offset to keep
+  # right instead of two.
   @ms_ly 0
   @ms_frames 4
   @ms_div 8
@@ -199,10 +209,9 @@ defmodule Atomboy.Native.Machine do
   @ms_window 20
   @ms_pixels 24
   @ms_size 28
+  @ms_timer_size 8
 
-  # The framebuffer: one byte per pixel, one shade 0..3, as `Atomboy.PPU` returns
-  # them.
-  @frame_bytes PPU.width() * @visible
+  @frame_bytes PPU.frame_bytes()
 
   @state_pointer :s11
 
@@ -218,7 +227,7 @@ defmodule Atomboy.Native.Machine do
   @spec visible() :: 144
   def visible, do: @visible
 
-  @doc "The bytes of one rendered frame -- 160 × 144, one shade per pixel."
+  @doc "The bytes of one rendered frame -- `Atomboy.Native.PPU.frame_bytes/0`."
   @spec frame_bytes() :: 23040
   def frame_bytes, do: @frame_bytes
 
@@ -236,6 +245,9 @@ defmodule Atomboy.Native.Machine do
       pay for 144 scanlines of rendering per frame, and keeping the two regimes
       apart is what makes the two cost measurements mean anything. With rendering
       off the PPU's routines are not even assembled into the image.
+    * `:timer` -- the divider's and TIMA's sub-counters to start from, as
+      `{div, tima}`. Zero by default, which is a fresh console; handing back what
+      a previous run reported is what makes two chained runs exact.
   """
   @spec image(binary(), State.t(), pos_integer(), keyword()) :: Asm.assembled()
   def image(memory, %State{} = state, frames, opts \\ [])
@@ -247,15 +259,14 @@ defmodule Atomboy.Native.Machine do
         driver(render?),
         scanline(),
         line_done(render?),
-        fetch(),
-        slow_fetch(),
+        Interp.routines(budget_exit: :line_done),
         exits(render?),
-        mmio(),
-        handlers(),
+        seam(),
+        Interp.handlers(),
         ALU.routines(),
         if(render?, do: PPU.routines(), else: [])
       ],
-      data(memory, state, frames, render?)
+      data(memory, state, frames, render?, Keyword.get(opts, :timer, {0, 0}))
     )
   end
 
@@ -263,13 +274,15 @@ defmodule Atomboy.Native.Machine do
   What the guest reports at the end of the last frame.
 
   `pixels` is the last frame rendered, or `nil` when the image ran without a
-  renderer.
+  renderer. `timer` is the phase the two sub-counters stopped on, ready to be
+  handed to the next `image/4` as `:timer`.
   """
   @type result :: %{
           state: State.t(),
           memory: binary(),
           pixels: binary() | nil,
           cycles: non_neg_integer(),
+          timer: {non_neg_integer(), non_neg_integer()},
           status: :ok | :unknown_opcode,
           opcode: 0..0xFF,
           instret: non_neg_integer(),
@@ -281,13 +294,15 @@ defmodule Atomboy.Native.Machine do
   Runs `frames` frames under qemu and decodes what came back.
 
   Same shape as `Atomboy.Native.Run.run/4`, one level up: the budget is a number
-  of frames, not of cycles, and the hardware advances in between. `:render` goes
-  to `image/4`; everything else goes to `Atomboy.Native.Qemu.run/2`.
+  of frames, not of cycles, and the hardware advances in between. `:render` and
+  `:timer` go to `image/4`; everything else goes to `Atomboy.Native.Qemu.run/2`.
   """
   @spec run(binary(), State.t(), pos_integer(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(memory, %State{} = state, frames, opts \\ []) do
     render? = Keyword.get(opts, :render, false)
-    image = image(memory, state, frames, render: render?)
+
+    image =
+      image(memory, state, frames, render: render?, timer: Keyword.get(opts, :timer, {0, 0}))
 
     case Qemu.run(image.code, opts) do
       %{status: :timeout, duration_us: us} ->
@@ -309,40 +324,26 @@ defmodule Atomboy.Native.Machine do
 
   # ══ The driver ═══════════════════════════════════════════════════════════════
   #
-  # `Interp`'s driver, plus the machine's own state: the pointer to the word
-  # block, the frame count out of the header, and the sub-counters at zero.
+  # `Interp`'s preamble, plus what only a console has: the console's write bounds,
+  # the pointer to the machine's word block, the frame count out of the header,
+  # and the timer's phase -- also out of the header, which is what lets a run
+  # continue another one rather than restart it.
 
   defp driver(render?) do
+    header = Interp.header_offsets()
+
     [
-      Asm.label(:driver),
-      Asm.la(Regs.dispatch(), :table_base),
-      Asm.la(Regs.mem(), :memory_gb),
+      Interp.prologue(),
+      Bus.bounds(:console),
       Asm.la(@state_pointer, :machine_state),
-      RV32.li(Regs.mask16(), 0xFFFF),
-      RV32.li(Regs.cycles(), 0),
-      Asm.la(:t2, :initial_state),
-      RV32.lbu(Regs.a(), :t2, 0),
-      RV32.lbu(Regs.f(), :t2, 1),
-      RV32.lbu(Regs.b(), :t2, 2),
-      RV32.lbu(Regs.c(), :t2, 3),
-      RV32.lbu(Regs.d(), :t2, 4),
-      RV32.lbu(Regs.e(), :t2, 5),
-      # H and L arrive split in the header and join here, as in `Interp`.
-      RV32.lbu(:t0, :t2, 6),
-      RV32.lbu(:t1, :t2, 7),
-      RV32.slli(:t0, :t0, 8),
-      RV32.or_(Regs.hl(), :t0, :t1),
-      RV32.lhu(Regs.sp(), :t2, 8),
-      RV32.lhu(Regs.pc(), :t2, 10),
-      RV32.lbu(Regs.control(), :t2, 12),
-      RV32.lw(:t0, :t2, 16),
+      RV32.lw(:t0, :t2, header.word),
       RV32.sw(:t0, @state_pointer, @ms_frames),
-      RV32.sw(:zero, @state_pointer, @ms_div),
-      RV32.sw(:zero, @state_pointer, @ms_tima),
+      RV32.lbu(:t0, :t2, header.div),
+      RV32.sw(:t0, @state_pointer, @ms_div),
+      RV32.lhu(:t0, :t2, header.tima),
+      RV32.sw(:t0, @state_pointer, @ms_tima),
       RV32.sw(:zero, @state_pointer, @ms_total),
-      # The retired-instruction baseline. Exact only under `-icount shift=0`,
-      # which is why the measurement asks for it.
-      RV32.csrrs(:s9, @instret, :zero),
+      Interp.instret_baseline(),
       Asm.label(:frame_loop),
       RV32.sw(:zero, @state_pointer, @ms_ly),
 
@@ -573,131 +574,24 @@ defmodule Atomboy.Native.Machine do
     ]
   end
 
-  # ══ The fetch ════════════════════════════════════════════════════════════════
-  #
-  # `Interp`'s, with one difference and only one: the exhausted budget lands on
-  # `line_done` instead of `materialise`. That single edge is the whole reason
-  # this skeleton is re-emitted here.
-
-  defp fetch do
-    [
-      Asm.label(:fetch),
-      Asm.bgeu(Regs.cycles(), Regs.budget(), :to_line_done),
-      Asm.bnez(Regs.control(), :to_slow),
-      Asm.label(:fast),
-      RV32.add(:t0, Regs.mem(), Regs.pc()),
-      RV32.lbu(Regs.opcode(), :t0, 0),
-      RV32.addi(Regs.pc(), Regs.pc(), 1),
-      RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16()),
-      RV32.slli(:t0, Regs.opcode(), 2),
-      RV32.add(:t0, Regs.dispatch(), :t0),
-      RV32.lw(:t0, :t0, 0),
-      RV32.jr(:t0),
-
-      # The trampolines sit behind the `jr`, which never falls into them: a
-      # conditional branch reaches ±4 KB, and the handlers occupy far more.
-      Asm.label(:to_line_done),
-      Asm.j(:line_done),
-      Asm.label(:to_slow),
-      Asm.j(:slow_fetch)
-    ]
-  end
-
-  # ══ The slow path ════════════════════════════════════════════════════════════
-  #
-  # `Atomboy.CPU.Loop.fetch/17`'s order, clause for clause: promoting an armed
-  # EI, then HALT, then the interrupt service, then dispatch. Any permutation
-  # diverges from the oracle on a program arming an EI just before an interrupt
-  # lands, and the differential test is what would say so, much later.
-
-  defp slow_fetch do
-    [
-      Asm.label(:slow_fetch),
-      RV32.andi(:t0, Regs.control(), @pending),
-      Asm.beqz(:t0, :slow_halt),
-      RV32.ori(Regs.control(), Regs.control(), @ime),
-      RV32.andi(Regs.control(), Regs.control(), bnot(@pending)),
-      Asm.j(:fetch),
-
-      # HALT sleeps in 4 T steps. Waking does not depend on IME -- only the
-      # service does.
-      Asm.label(:slow_halt),
-      RV32.andi(:t0, Regs.control(), @halted),
-      Asm.beqz(:t0, :slow_irq),
-      Asm.call(:pending_irq),
-      Asm.bnez(:t1, :slow_wake),
-      RV32.addi(Regs.cycles(), Regs.cycles(), 4),
-      Asm.j(:fetch),
-      Asm.label(:slow_wake),
-      RV32.andi(Regs.control(), Regs.control(), bnot(@halted)),
-      Asm.j(:fetch),
-      Asm.label(:slow_irq),
-      Asm.call(:pending_irq),
-      Asm.beqz(:t1, :fast),
-      service(),
-      pending_irq()
-    ]
-  end
-
-  # The service: the vector's address is 0x40 + 8 × the lowest armed bit's index,
-  # PC goes onto the stack, IME falls, 20 T. IF is sampled **before** the pushes,
-  # as in the oracle: a stack landing on 0xFF0F masks the earlier value.
-  defp service do
-    [
-      RV32.sub(:t4, :zero, :t1),
-      RV32.and_(:t4, :t1, :t4),
-      RV32.lbu(:t6, :t0, 0),
-      RV32.li(:a0, 0x40),
-      RV32.mv(:a1, :t4),
-      Asm.label(:vector_loop),
-      RV32.andi(:t3, :a1, 1),
-      Asm.bnez(:t3, :vector_ready),
-      RV32.srli(:a1, :a1, 1),
-      RV32.addi(:a0, :a0, 8),
-      Asm.j(:vector_loop),
-      Asm.label(:vector_ready),
-      Bus.move_stack(-2),
-      Bus.write16(Regs.sp(), Regs.pc()),
-      RV32.li(:t0, @irq_if),
-      RV32.add(:t0, Regs.mem(), :t0),
-      RV32.xori(:t1, :t4, 0xFF),
-      RV32.and_(:t1, :t6, :t1),
-      RV32.sb(:t1, :t0, 0),
-      RV32.andi(Regs.control(), Regs.control(), bnot(@ime)),
-      RV32.mv(Regs.pc(), :a0),
-      RV32.addi(Regs.cycles(), Regs.cycles(), 20),
-      Asm.j(:fetch)
-    ]
-  end
-
-  # `t1`: the armed and enabled sources. `t0` keeps IF's address, which the
-  # service reuses. IE reads off the same pointer, displaced by 0xF0.
-  defp pending_irq do
-    [
-      Asm.label(:pending_irq),
-      RV32.li(:t0, @irq_if),
-      RV32.add(:t0, Regs.mem(), :t0),
-      RV32.lbu(:t1, :t0, 0),
-      RV32.lbu(:t2, :t0, 0xFFFF - @irq_if),
-      RV32.and_(:t1, :t1, :t2),
-      RV32.andi(:t1, :t1, 0x1F),
-      RV32.ret()
-    ]
-  end
-
   # ══ The I/O seam ═════════════════════════════════════════════════════════════
   #
-  # `a0` the guest address, `t0` the byte. Clobbers t0-t6, a0 and ra; every SM83
-  # register survives, the opcode in `a1` included.
+  # Where `Atomboy.Native.Bus` sends a store whose address falls outside the range
+  # a store is only a store in. `a0` the guest address, `t0` the byte -- and the
+  # byte has **already** been written when the address is at or above 0xFF00, which
+  # is what keeps the check off the fast path. Anything this routine has to do
+  # differently, it does by writing again.
+  #
+  # Clobbers t0-t4, a0 and ra; every SM83 register survives, the opcode in `a1`
+  # included.
+  #
+  # Nothing here guards the cartridge: a store below 0x8000 never reaches this
+  # routine, because `Bus` drops it before the store rather than after -- which is
+  # the only order that works, there being no way to un-write a byte.
 
-  defp mmio do
+  defp seam do
     [
-      Asm.label(:mmio_write),
-
-      # Below 0x8000 the cartridge answers, not memory: an MBC register, or
-      # nothing at all. Storing there would rewrite the program.
-      RV32.li(:t1, 0x8000),
-      Asm.bltu(:a0, :t1, :mmio_done),
+      Asm.label(Bus.seam()),
 
       # 0xFF00: the matrix recomposed, as `Atomboy.Joypad.write/2` does it. Bits
       # 7-6 read high, the selection is kept, and the four lines of the selected
@@ -722,11 +616,9 @@ defmodule Atomboy.Native.Machine do
       # oracle handles either: the byte is merely stored.
       Asm.label(:mmio_dma),
       RV32.li(:t1, @dma),
-      Asm.bne(:a0, :t1, :mmio_store),
+      Asm.bne(:a0, :t1, :mmio_done),
       RV32.li(:t1, 0x80),
-      Asm.bltu(:t0, :t1, :mmio_store),
-      RV32.add(:t1, Regs.mem(), :a0),
-      RV32.sb(:t0, :t1, 0),
+      Asm.bltu(:t0, :t1, :mmio_done),
       RV32.slli(:t2, :t0, 8),
       RV32.add(:t2, Regs.mem(), :t2),
       RV32.li(:t3, 0xFE00),
@@ -734,8 +626,8 @@ defmodule Atomboy.Native.Machine do
       RV32.li(:t4, 0xA0),
       Asm.label(:dma_loop),
       Asm.beqz(:t4, :mmio_done),
-      RV32.lbu(:t5, :t2, 0),
-      RV32.sb(:t5, :t3, 0),
+      RV32.lbu(:t1, :t2, 0),
+      RV32.sb(:t1, :t3, 0),
       RV32.addi(:t2, :t2, 1),
       RV32.addi(:t3, :t3, 1),
       RV32.addi(:t4, :t4, -1),
@@ -749,169 +641,37 @@ defmodule Atomboy.Native.Machine do
   end
 
   # ══ The exits ════════════════════════════════════════════════════════════════
+  #
+  # `Interp`'s record, then the regions, in the order they go on the wire. The
+  # memory first because that is where it has always been, the frame after it, and
+  # the timer's phase last -- appending is what lets a reader that knows only the
+  # first region keep working.
 
   defp exits(render?) do
-    [
-      Asm.label(:materialise),
-      RV32.li(:t2, Interp.statuses().ok),
-      Asm.j(:report),
-      Asm.label(:unknown_opcode),
-      RV32.li(:t2, Interp.statuses().unknown_opcode),
-      report(),
-      dump(render?)
-    ]
-  end
-
-  # `Interp`'s record, byte for byte -- `t2` carries the status, `a1` the opcode,
-  # and `putc` only clobbers t0 and t1.
-  defp report do
-    [
-      Asm.label(:report),
-      RV32.csrrs(:s10, @instret, :zero),
-      RV32.sub(:s10, :s10, :s9),
-      byte_out(RV32.li(:a0, Interp.magic())),
-      byte_out(RV32.mv(:a0, Regs.a())),
-      byte_out(RV32.mv(:a0, Regs.f())),
-      byte_out(RV32.mv(:a0, Regs.b())),
-      byte_out(RV32.mv(:a0, Regs.c())),
-      byte_out(RV32.mv(:a0, Regs.d())),
-      byte_out(RV32.mv(:a0, Regs.e())),
-      byte_out(RV32.srli(:a0, Regs.hl(), 8)),
-      byte_out(RV32.andi(:a0, Regs.hl(), 0xFF)),
-      byte_out(RV32.mv(:a0, Regs.sp())),
-      byte_out(RV32.srli(:a0, Regs.sp(), 8)),
-      byte_out(RV32.mv(:a0, Regs.pc())),
-      byte_out(RV32.srli(:a0, Regs.pc(), 8)),
-      byte_out(RV32.mv(:a0, Regs.control())),
-      byte_out(RV32.mv(:a0, Regs.cycles())),
-      byte_out(RV32.srli(:a0, Regs.cycles(), 8)),
-      byte_out(RV32.srli(:a0, Regs.cycles(), 16)),
-      byte_out(RV32.srli(:a0, Regs.cycles(), 24)),
-      byte_out(RV32.mv(:a0, :t2)),
-      byte_out(RV32.mv(:a0, Regs.opcode())),
-      byte_out(RV32.mv(:a0, :s10)),
-      byte_out(RV32.srli(:a0, :s10, 8)),
-      byte_out(RV32.srli(:a0, :s10, 16)),
-      byte_out(RV32.srli(:a0, :s10, 24))
-    ]
-  end
-
-  defp byte_out(load), do: [load, Asm.call(:putc)]
-
-  # The 64 KB, then the pixels if there are any. Appending rather than
-  # interleaving keeps the protocol backward compatible: a reader that knows only
-  # the record and the memory finds them exactly where they were, and stops.
-  defp dump(render?) do
-    [
-      Asm.label(:dump),
-      region(:memory, Asm.la(:t3, :memory_gb), @memory),
+    pixels =
       if render? do
-        region(:pixels, Asm.la(:t3, :framebuffer), @frame_bytes)
+        [{:pixels, [Asm.la(:t3, :framebuffer)], @frame_bytes}]
       else
         []
-      end,
-      Asm.j(:poweroff)
-    ]
-  end
-
-  # One region out over the serial port. `putc` clobbers t0 and t1 only, so the
-  # cursor and the count live in t3 and t4.
-  defp region(name, load, length) do
-    [
-      load,
-      RV32.li(:t4, length),
-      Asm.label(:"dump_#{name}"),
-      Asm.beqz(:t4, :"dump_#{name}_done"),
-      RV32.lbu(:a0, :t3, 0),
-      Asm.call(:putc),
-      RV32.addi(:t3, :t3, 1),
-      RV32.addi(:t4, :t4, -1),
-      Asm.j(:"dump_#{name}"),
-      Asm.label(:"dump_#{name}_done")
-    ]
-  end
-
-  # ══ The handlers ═════════════════════════════════════════════════════════════
-  #
-  # `Emit`'s, unchanged, except the three store forms that go through the seam --
-  # they keep their labels, so dispatch knows nothing about the difference.
-
-  defp handlers do
-    base =
-      for %Insn{prefix: nil} = insn <- Table.base(),
-          insn.opcode not in @routed,
-          (body = Emit.body(insn)) != :unsupported do
-        [Asm.label(label(insn.opcode)), body]
       end
 
-    extended =
-      for %Insn{prefix: :cb} = insn <- Table.extended(),
-          (body = Emit.body(insn)) != :unsupported do
-        [Asm.label(label_cb(insn.opcode)), body]
-      end
-
-    routed =
-      for %Insn{prefix: nil} = insn <- Table.base(), insn.opcode in @routed do
-        [Asm.label(label(insn.opcode)), store_body(insn)]
-      end
-
-    [prefix(), routed, base, extended]
-  end
-
-  # LDH (a8), A -- the immediate names a high-page register, which is exactly
-  # where the seam matters.
-  defp store_body(%Insn{opcode: 0xE0, cycles: cycles}) do
-    Emit.read_immediate(:t0) ++
-      Bus.high_page(:t0, :a0) ++
-      [RV32.mv(:t0, Regs.a()), Asm.call(:mmio_write)] ++
-      Emit.finish(cycles)
-  end
-
-  # LD (C), A -- the same page, addressed by a register. Potion's kernel copies
-  # its DMA routine into HRAM through this form.
-  defp store_body(%Insn{opcode: 0xE2, cycles: cycles}) do
-    Bus.high_page(Regs.c(), :a0) ++
-      [RV32.mv(:t0, Regs.a()), Asm.call(:mmio_write)] ++
-      Emit.finish(cycles)
-  end
-
-  # LD (a16), A -- absolute, and the form assemblers produce for `ld ($FF46), a`.
-  defp store_body(%Insn{opcode: 0xEA, cycles: cycles}) do
-    Emit.read_immediate16(:a0) ++
-      [RV32.mv(:t0, Regs.a()), Asm.call(:mmio_write)] ++
-      Emit.finish(cycles)
-  end
-
-  # The 0xCB prefix reads another byte and jumps into the second table, reached
-  # through a constant displacement of 1024 -- the two tables are contiguous.
-  defp prefix do
-    [
-      Asm.label(:h_cb),
-      RV32.add(:t0, Regs.mem(), Regs.pc()),
-      RV32.lbu(:t0, :t0, 0),
-      RV32.addi(Regs.pc(), Regs.pc(), 1),
-      RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16()),
-      RV32.slli(:t0, :t0, 2),
-      RV32.add(:t0, Regs.dispatch(), :t0),
-      RV32.lw(:t0, :t0, 4 * 256),
-      RV32.jr(:t0)
-    ]
+    Interp.exits(
+      [{:memory, [Asm.la(:t3, :memory_gb)], @memory}] ++
+        pixels ++
+        [
+          {:timer, [Asm.la(:t3, :machine_state), RV32.addi(:t3, :t3, @ms_div)], @ms_timer_size}
+        ]
+    )
   end
 
   # ══ The data ═════════════════════════════════════════════════════════════════
 
-  defp data(memory, state, frames, render?) do
+  defp data(memory, state, frames, render?, timer) do
     [
-      {:align, 4},
-      Asm.label(:table_base),
-      table_base(),
-      # No alignment in between: the prefix relies on a displacement of exactly
-      # 1024.
-      Asm.label(:table_cb),
-      table_cb(),
+      Interp.tables(),
       {:align, 4},
       Asm.label(:initial_state),
-      header(state, frames),
+      Interp.header(state, frames, timer: timer),
       Asm.label(:machine_state),
       {:space, @ms_size},
       Asm.label(:tima_periods),
@@ -940,46 +700,6 @@ defmodule Atomboy.Native.Machine do
     ]
   end
 
-  defp table_base do
-    covered = covered(nil)
-
-    for opcode <- 0..0xFF do
-      cond do
-        opcode == Emit.cb_prefix() and Emit.prefix_covered?() -> {:addr, :h_cb}
-        MapSet.member?(covered, opcode) -> {:addr, label(opcode)}
-        true -> {:addr, :unknown_opcode}
-      end
-    end
-  end
-
-  defp table_cb do
-    covered = covered(:cb)
-
-    for opcode <- 0..0xFF do
-      if MapSet.member?(covered, opcode) do
-        {:addr, label_cb(opcode)}
-      else
-        {:addr, :unknown_opcode}
-      end
-    end
-  end
-
-  defp covered(prefix) do
-    MapSet.new(for {^prefix, opcode} <- Emit.coverage(), do: opcode)
-  end
-
-  defp label(opcode), do: :"h_#{Integer.to_string(opcode, 16)}"
-  defp label_cb(opcode), do: :"cb_#{Integer.to_string(opcode, 16)}"
-
-  # `Interp`'s header, with the last word carrying frames instead of a cycle
-  # budget: one level up, the unit of time is the frame.
-  defp header(%State{} = state, frames) do
-    control = state.ime + if(state.halted, do: 2, else: 0) + state.ime_pending * 4
-
-    <<state.a, state.f, state.b, state.c, state.d, state.e, state.h, state.l, state.sp::16-little,
-      state.pc::16-little, control, 0, 0, 0, frames::32-little>>
-  end
-
   # ══ The record, read back ════════════════════════════════════════════════════
 
   defp decode(serial, duration_us, size, render?) do
@@ -989,7 +709,7 @@ defmodule Atomboy.Native.Machine do
     case serial do
       <<^magic, a, f, b, c, d, e, h, l, sp::16-little, pc::16-little, control, cycles::32-little,
         status, opcode, instret::32-little, memory::binary-size(@memory),
-        frame::binary-size(pixels)>> ->
+        frame::binary-size(pixels), div_sub::32-little, tima_sub::32-little>> ->
         {:ok,
          %{
            state: %State{
@@ -1010,6 +730,7 @@ defmodule Atomboy.Native.Machine do
            memory: memory,
            pixels: if(render?, do: frame, else: nil),
            cycles: cycles,
+           timer: {div_sub, tima_sub},
            status: status_name(status),
            opcode: opcode,
            instret: instret,

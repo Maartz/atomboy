@@ -140,6 +140,7 @@ defmodule Atomboy.Native.PPU do
   alias Atomboy.Native.RV32
 
   @width 160
+  @height 144
   @oam 0xFE00
   @io_page 0xFF00
   @sprite_limit 10
@@ -175,6 +176,21 @@ defmodule Atomboy.Native.PPU do
   @doc "The DMG scanline's width, in pixels and in bytes."
   @spec width() :: 160
   def width, do: @width
+
+  @doc """
+  How many scanlines a DMG frame shows -- the visible ones, vblank excluded.
+
+  The renderer draws one line at a time and has no use for the number itself;
+  it owns it because the frame the lines make up needs an owner. It used to have
+  none: the width lived here, the height in `Atomboy.Screen`, and whoever wanted
+  a framebuffer multiplied one by the other and kept the answer.
+  """
+  @spec height() :: 144
+  def height, do: @height
+
+  @doc "One frame's size in bytes -- 160 × 144, one shade per pixel."
+  @spec frame_bytes() :: 23040
+  def frame_bytes, do: @width * @height
 
   @doc "How many sprites a scanline shows -- the hardware's limit, in OAM order."
   @spec sprite_limit() :: 10

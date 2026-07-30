@@ -15,18 +15,18 @@ defmodule Atomboy.NativeMachineTest do
   array. The two only agree if they start from the same bytes, and the map's
   defaults are not always the ones the CPU would read -- `Atomboy.Timer` treats an
   absent TAC as zero, where the CPU reading the same absent key gets 0xFF and a
-  running timer. So the boot I/O state is written out explicitly, in `seed/0`,
-  and both sides receive it: the oracle as map entries, the guest as bytes. That
-  is not a concession to the harness, it is the post-boot state a real DMG hands
-  the cartridge, which neither model bakes in.
+  running timer. So the boot I/O state is written out explicitly, and both sides
+  receive it: the oracle as map entries, the guest as bytes. It lives in
+  `Atomboy.Native.Boot`, which is also where the reasons are written down; `seed/0`
+  is just the local name for it.
 
   ## What is not compared, and why
 
     * **0x0000-0x7FFF** is compared to the ROM itself rather than to the oracle:
       the point is that the guest did not write there. A flat memory has no MBC
       to swallow a bank-select write, so a program writing to 0x2000 would rewrite
-      its own code -- `mmio_write` drops those writes, and this is the assertion
-      that says so.
+      its own code -- `Atomboy.Native.Bus` drops those writes before they land, and
+      this is the assertion that says so.
     * **0xA000-0xBFFF**, the cartridge RAM, sits behind the MBC's enable latch on
       the oracle side and is plain memory natively. No program here has SRAM.
     * **0xE000-0xFDFF**, the WRAM echo, is rewired to 0xC000 by the oracle and is
@@ -41,6 +41,7 @@ defmodule Atomboy.NativeMachineTest do
 
   alias Atomboy.CPU.CartLoop
   alias Atomboy.CPU.State
+  alias Atomboy.Native.Boot
   alias Atomboy.Native.Machine
   alias Atomboy.PPU
   alias Atomboy.Screen
@@ -200,6 +201,51 @@ defmodule Atomboy.NativeMachineTest do
 
       assert :binary.at(result.memory, 0x2000) == :binary.at(memory, 0x2000)
     end
+
+    test "a register written through (HL) reaches the seam like any other" do
+      # The hole this test was written to close. `LD (a16), A` is what an
+      # assembler emits for `ld ($FF46), a`, and for a long while it was the only
+      # store form the seam saw: a program that puts a register's address in HL
+      # and writes through the pointer -- which is what a compiler does, and what
+      # any loop over a table of registers does -- laid down a plain byte. No OAM
+      # DMA, so no sprite anywhere; and a joypad selection stored raw, so every
+      # button on the selected row read as held.
+      #
+      # Both are asked for here through `(HL)` and nothing else. Verified by
+      # mutation: with the store forms routed one by one instead of through
+      # `Atomboy.Native.Bus`, this test fails twice over -- OAM comes back empty
+      # and the pad byte comes back as the 0x20 that was written rather than as
+      # the matrix the hardware would show.
+      rom =
+        ROM.build(
+          [
+            {:label, :main},
+            {:ld, :hl, 0xFF46},
+            {:ld, :a, 0xC0},
+            {:ld, {:mem, :hl}, :a},
+            {:ld, :hl, 0xFF00},
+            {:ld, :a, 0x20},
+            {:ld, {:mem, :hl}, :a},
+            {:ld, :a, {:mem, :hl}},
+            {:ld, {:mem, 0xC0A0}, :a},
+            {:label, :loop},
+            {:jr, {:label, :loop}}
+          ],
+          title: "HLSEAM"
+        )
+
+      # The page the DMA is asked to copy: 0xC000-0xC09F, marked so a byte landing
+      # at the wrong offset is visible. The pad's answer goes just past it.
+      page = for offset <- 0..0x9F, into: %{}, do: {0xC000 + offset, offset}
+
+      result = equivalence!(rom, 1, nil, page)
+
+      copied = for offset <- 0..0x9F, do: :binary.at(result.memory, 0xFE00 + offset)
+      assert copied == Enum.to_list(0..0x9F), "the DMA did not happen through (HL)"
+
+      assert :binary.at(result.memory, 0xC0A0) == 0xEF,
+             "the pad read back the byte that was written, not the matrix"
+    end
   end
 
   # ══ Differential frames ══════════════════════════════════════════════════════
@@ -330,6 +376,64 @@ defmodule Atomboy.NativeMachineTest do
 
       assert :binary.at(result.memory, 0xC000) == 0x00, "no button is pressed in this stage"
       assert :binary.at(result.memory, 0xC001) == 0x00
+    end
+  end
+
+  # ══ Chaining one run onto another ════════════════════════════════════════════
+
+  describe "the timer's phase across runs" do
+    test "two runs of one frame equal one run of two, timer included" do
+      # A frame is 70,224 T-cycles and a TIMA period at TAC 0x04 is 1024: the
+      # frame leaves 592 cycles of phase that no register shows. Two frames run as
+      # one image carry it across the boundary, because the sub-counter lives in
+      # the image. Two frames run as two images used to drop it, and the second
+      # frame then counted 68 increments where it owed 69 -- one TIMA short,
+      # for ever, at every boundary a caller made.
+      #
+      # So the protocol now carries the phase both ways, and this is the test that
+      # says what it buys: the same two frames, split, come out byte-identical.
+      # The `refute` at the end is what makes that mean something -- without the
+      # phase the split run really does differ.
+      rom =
+        ROM.build(
+          [
+            {:label, :main},
+            {:di},
+            {:xor, :a, :a},
+            {:ldh, {:high, 0x05}, :a},
+            {:ldh, {:high, 0x06}, :a},
+            {:ldh, {:high, 0x0F}, :a},
+            {:ld, :a, 0x04},
+            {:ldh, {:high, 0x07}, :a},
+            {:label, :loop},
+            {:jr, {:label, :loop}}
+          ],
+          title: "PHASE"
+        )
+
+      # Two frames in one image, checked against the oracle on the way past: the
+      # Elixir timer keeps its own sub-counter in the memory map, so it chains
+      # across frames without being asked and is the reference for what chaining
+      # should produce.
+      whole = equivalence!(rom, 2)
+
+      refute whole.timer == {0, 0}, "the phase is zero, so this test proves nothing"
+
+      first =
+        Machine.run!(memory(rom, Map.merge(Screen.boot_ram(rom, true), seed())), state(rom), 1)
+
+      chained = Machine.run!(first.memory, first.state, 1, timer: first.timer)
+      restarted = Machine.run!(first.memory, first.state, 1)
+
+      assert chained.state == whole.state
+      assert chained.timer == whole.timer
+      assert chained.memory == whole.memory, "a chained run diverged from an uninterrupted one"
+
+      refute restarted.memory == whole.memory,
+             "dropping the phase changed nothing -- the test cannot see the bug it guards"
+
+      assert :binary.at(restarted.memory, 0xFF05) + 1 == :binary.at(whole.memory, 0xFF05),
+             "the frame that lost its phase should owe exactly one TIMA increment"
     end
   end
 
@@ -545,9 +649,9 @@ defmodule Atomboy.NativeMachineTest do
   # generated machine loop, and demands nothing tells them apart: the CPU state,
   # the ROM left untouched, and every byte of the compared regions. Returns the
   # native result so the caller can additionally name what it expects.
-  defp equivalence!(rom, frames, state \\ nil) do
+  defp equivalence!(rom, frames, state \\ nil, extra \\ %{}) do
     state = state || Screen.boot_state(rom, true)
-    ram = Map.merge(Screen.boot_ram(rom, true), seed())
+    ram = Screen.boot_ram(rom, true) |> Map.merge(seed()) |> Map.merge(extra)
 
     {expected, oracle_ram} = oracle(state, rom, ram, frames)
     result = Machine.run!(memory(rom, ram), state, frames)
@@ -730,43 +834,15 @@ defmodule Atomboy.NativeMachineTest do
 
   defp hero, do: Screen.load(Path.join([__DIR__, "..", "games", "hero.gb"]))
 
+  defp state(rom), do: Screen.boot_state(rom, true)
+
   # ══ The shared boot state ════════════════════════════════════════════════════
 
-  # The I/O registers the machine loop and the timer read, written out explicitly.
-  #
-  # This is what lets the two models start from the same bytes. `Atomboy.Timer`
-  # reads an absent TAC as zero -- a timer at rest -- where the CPU reading the
-  # same absent address gets 0xFF from the open bus, which is an *enabled* timer
-  # at the slowest rate. One of the two is wrong about a register nobody wrote;
-  # writing it removes the question. `Screen` has the same habit with LCDC, whose
-  # default it spells 0x91 in `step_line/4`.
-  # The eight the renderer reads are here for the same reason, and it is worth
-  # naming because their defaults are not zero: `Atomboy.PPU` spells BGP, OBP0 and
-  # OBP1 as 0xE4 when absent -- the identity palette -- where the open bus would
-  # give 0xFF, the palette that maps every colour to the darkest shade. A frame
-  # compared without seeding them differs in every pixel.
-  defp seed do
-    %{
-      0xFF00 => 0xFF,
-      0xFF04 => 0x00,
-      0xFF05 => 0x00,
-      0xFF06 => 0x00,
-      0xFF07 => 0x00,
-      0xFF0F => 0x00,
-      0xFF40 => 0x91,
-      0xFF41 => 0x00,
-      0xFF42 => 0x00,
-      0xFF43 => 0x00,
-      0xFF44 => 0x00,
-      0xFF45 => 0x00,
-      0xFF47 => 0xE4,
-      0xFF48 => 0xE4,
-      0xFF49 => 0xE4,
-      0xFF4A => 0x00,
-      0xFF4B => 0x00,
-      0xFFFF => 0x00
-    }
-  end
+  # The I/O registers the machine loop, the timer and the renderer read, written
+  # out explicitly -- `Atomboy.Native.Boot` says which and why. It used to be a
+  # literal here and another one inside `Atomboy.Native.PPUBench`, and a palette
+  # spelled twice is a palette that will eventually be spelled two ways.
+  defp seed, do: Boot.io_state()
 
   # The flat 64 KB the guest receives: the ROM below 0x8000, and above it exactly
   # what the oracle's map would read back -- 0xFF where nothing was written, which

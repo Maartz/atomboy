@@ -32,6 +32,13 @@ defmodule Atomboy.Native.Regs do
   **F stays packed in bits 7-4.** Unpacking it would break `PUSH AF`, `DAA`,
   and above all the 1:1 contract with `Atomboy.CPU.ALU` that the exhaustive
   flag differential test depends on.
+
+  **Two registers hold constants nothing computes.** `rom_top` and `io_base`
+  bound the addresses where a store is only a store, and `Atomboy.Native.Bus`
+  compares against them on every write. They land on `gp` and `tp` -- the global
+  and thread pointers, which a bare-metal image has no use for -- because the
+  alternative was materialising `0xFF00` on the hot path of every store, and
+  `0xFF00` does not fit an immediate.
   """
 
   alias Atomboy.Native.RV32
@@ -52,7 +59,9 @@ defmodule Atomboy.Native.Regs do
     control: :s6,
     dispatch: :s7,
     mask16: :s8,
-    opcode: :a1
+    opcode: :a1,
+    rom_top: :gp,
+    io_base: :tp
   ]
 
   for {role, register} <- @map do

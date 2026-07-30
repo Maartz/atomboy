@@ -27,6 +27,23 @@ defmodule Atomboy.Native.Interp do
   today. Caching `IF & IE` and invalidating it on writes is the obvious
   optimisation; it comes after the first honest number, not before.
 
+  ## Why this module has two faces
+
+  `image/3` assembles a complete, runnable interpreter: that is what the
+  equivalence tests and the bench task use. But the interpreter is not the only
+  thing that wants a fetch, a slow path, an interrupt service and a jump table --
+  `Atomboy.Native.Machine` wraps a console's cadence around exactly the same
+  skeleton, and the *only* thing it needs to change is where an exhausted budget
+  lands: on its end-of-scanline code rather than on this module's exit.
+
+  So the skeleton is exposed piece by piece -- `prologue/0`, `routines/1`,
+  `handlers/0`, `tables/0`, `exits/1`, `header/3` -- with that one edge as an
+  argument, and `image/3` is written in terms of them like any other caller. The
+  machine loop used to carry its own copy of some sixty instructions whose
+  semantics are pinned by `Atomboy.CPU.Loop.fetch/17`; a second copy of a
+  hardware contract is a second thing to get wrong, and it took a parameter to
+  remove it.
+
   ## The protocol
 
   The image carries the initial state, the budget and the 64 KB of memory; it
@@ -34,6 +51,12 @@ defmodule Atomboy.Native.Interp do
   Nothing crosses during execution: everything is baked into the image and
   everything comes out at the end. A harness with no dialogue is a harness that
   cannot lose sync.
+
+  `exits/1` takes the regions that follow the record as a list, and that is what
+  keeps the protocol extensible without being rewritten: a caller appends what it
+  has to send -- `Atomboy.Native.Machine` sends a frame and its timer phase --
+  and a reader that knows only the record and the memory still finds them exactly
+  where they were.
   """
 
   import Bitwise
@@ -58,6 +81,11 @@ defmodule Atomboy.Native.Interp do
   @instret 0xC02
   @memory 0x10000
 
+  # Where each field sits in the header the image carries. Bytes 13 to 15 were
+  # padding until the timer's sub-counters moved in: an image that can be handed
+  # a phase is an image whose runs chain.
+  @header %{div: 13, tima: 14, word: 16}
+
   # `unsupported_state` disappeared with stage eight: there is no longer a state
   # the guest refuses to run.
   @statuses %{ok: 0, unknown_opcode: 1}
@@ -66,13 +94,22 @@ defmodule Atomboy.Native.Interp do
   @spec statuses() :: %{atom() => 0..255}
   def statuses, do: @statuses
 
-  @doc "The size of the result record, before the memory dump."
+  @doc "The size of the result record, before the regions that follow it."
   @spec record_size() :: pos_integer()
   def record_size, do: @record_size
 
   @doc "The byte that opens a result record."
   @spec magic() :: 0..255
   def magic, do: @magic
+
+  @doc """
+  Where each field sits in the image's header, in bytes.
+
+  `:word` is the last one, and its meaning belongs to the caller: a cycle budget
+  here, a frame count one level up.
+  """
+  @spec header_offsets() :: %{div: 13, tima: 14, word: 16}
+  def header_offsets, do: @header
 
   @doc """
   Assembles an image running `budget` T-cycles from `state` over `memory`.
@@ -84,7 +121,14 @@ defmodule Atomboy.Native.Interp do
   @spec image(binary(), State.t(), pos_integer()) :: Asm.assembled()
   def image(memory, %State{} = state, budget) when byte_size(memory) == @memory do
     Image.build(
-      [driver(), fetch(), slow_fetch(), exits(), handlers(), ALU.routines()],
+      [
+        driver(),
+        routines(),
+        exits([{:memory, [Asm.la(:t3, :memory_gb)], @memory}]),
+        Bus.flat_seam(),
+        handlers(),
+        ALU.routines()
+      ],
       data(memory, state, budget)
     )
   end
@@ -93,12 +137,34 @@ defmodule Atomboy.Native.Interp do
 
   defp driver do
     [
+      prologue(),
+      Bus.bounds(:flat),
+      RV32.lw(Regs.budget(), :t2, @header.word),
+      instret_baseline(),
+      Asm.j(:fetch)
+    ]
+  end
+
+  @doc """
+  The driver's preamble: the registers a run needs, and the state out of the
+  header.
+
+  Leaves `t2` pointing at the header, so a caller reads the last word -- a cycle
+  budget for `image/3`, a frame count for `Atomboy.Native.Machine` -- and
+  whatever else it put there itself. Nothing is jumped to and nothing is
+  measured yet: installing the seam's bounds and reading the retired-instruction
+  baseline are the caller's, because where the baseline is read decides what the
+  reported number includes.
+  """
+  @spec prologue() :: [Asm.item()]
+  def prologue do
+    [
       Asm.label(:driver),
       Asm.la(Regs.dispatch(), :table_base),
       Asm.la(Regs.mem(), :memory_gb),
       RV32.li(Regs.mask16(), 0xFFFF),
       RV32.li(Regs.cycles(), 0),
-      Asm.la(:t2, :etat_initial),
+      Asm.la(:t2, :initial_state),
       RV32.lbu(Regs.a(), :t2, 0),
       RV32.lbu(Regs.f(), :t2, 1),
       RV32.lbu(Regs.b(), :t2, 2),
@@ -113,22 +179,49 @@ defmodule Atomboy.Native.Interp do
       RV32.or_(Regs.hl(), :t0, :t1),
       RV32.lhu(Regs.sp(), :t2, 8),
       RV32.lhu(Regs.pc(), :t2, 10),
-      RV32.lbu(Regs.control(), :t2, 12),
-      RV32.lw(Regs.budget(), :t2, 16),
-      # The baseline of the retired-instruction counter. Under
-      # `qemu -icount shift=0` il est exact ; sans, il rend une valeur factice,
-      # et c'est pourquoi le banc impose l'option.
-      RV32.csrrs(:s9, @instret, :zero),
-      Asm.j(:fetch)
+      RV32.lbu(Regs.control(), :t2, 12)
+    ]
+  end
+
+  @doc """
+  Samples the retired-instruction counter -- the baseline the record reports
+  against.
+
+  Under `qemu -icount shift=0` the CSR is exact; without it, it returns a
+  fictitious value, and that is why the bench insists on the option.
+  """
+  @spec instret_baseline() :: [Asm.item()]
+  def instret_baseline, do: [RV32.csrrs(:s9, @instret, :zero)]
+
+  # ══ Le squelette ═════════════════════════════════════════════════════════════
+
+  @doc """
+  The dispatch skeleton: the fetch, the slow path, the interrupt service.
+
+  Options:
+
+    * `:budget_exit` -- the label an exhausted budget jumps to. `:materialise`
+      by default, which is where `image/3` reports and stops; the machine loop
+      passes its end-of-scanline label instead, and that single edge is the whole
+      difference between an interpreter and a console.
+
+  The `0xCB` prefix is not here but in `handlers/0`: it is reached from the jump
+  table like any other entry, and it carries a handler's name.
+  """
+  @spec routines(keyword()) :: [Asm.item()]
+  def routines(opts \\ []) do
+    [
+      fetch(Keyword.get(opts, :budget_exit, :materialise)),
+      slow_fetch()
     ]
   end
 
   # ══ Le fetch ═════════════════════════════════════════════════════════════════
 
-  defp fetch do
+  defp fetch(budget_exit) do
     [
       Asm.label(:fetch),
-      Asm.bgeu(Regs.cycles(), Regs.budget(), :to_materialise),
+      Asm.bgeu(Regs.cycles(), Regs.budget(), :to_budget_exit),
       Asm.bnez(Regs.control(), :to_slow),
       Asm.label(:fast),
       RV32.add(:t0, Regs.mem(), Regs.pc()),
@@ -145,8 +238,8 @@ defmodule Atomboy.Native.Interp do
       # reaches +/-4 KB, and the handlers will end up occupying far more than
       # that. Jumping close first, then far, puts range out of the question for
       # good.
-      Asm.label(:to_materialise),
-      Asm.j(:materialise),
+      Asm.label(:to_budget_exit),
+      Asm.j(budget_exit),
       Asm.label(:to_slow),
       Asm.j(:slow_fetch)
     ]
@@ -256,21 +349,33 @@ defmodule Atomboy.Native.Interp do
 
   # ══ Les sorties ══════════════════════════════════════════════════════════════
 
-  defp exits do
+  @doc """
+  The two exits, the record, and the regions that follow it.
+
+  A region is `{name, load, length}`: `load` is whatever puts its first address
+  into `t3`, which is why a caller can send a slice of its own state and not only
+  a labelled block. The order given is the order on the wire, and appending is
+  the only way to extend it -- everything a reader already knows how to find must
+  stay where it was.
+  """
+  @spec exits([{atom(), [Asm.item()], pos_integer()}]) :: [Asm.item()]
+  def exits(regions) do
     [
       Asm.label(:materialise),
       RV32.li(:t2, @statuses.ok),
       Asm.j(:report),
       Asm.label(:unknown_opcode),
       RV32.li(:t2, @statuses.unknown_opcode),
-      report(),
-      dump()
+      record(),
+      Asm.label(:dump),
+      for({name, load, length} <- regions, do: region(name, load, length)),
+      Asm.j(:poweroff)
     ]
   end
 
   # `putc` only clobbers t0 and t1: t2 carries the status throughout, a1 the
   # opcode, and every state register survives.
-  defp report do
+  defp record do
     [
       Asm.label(:report),
       # Read before anything else: the report itself must not count.
@@ -306,26 +411,33 @@ defmodule Atomboy.Native.Interp do
   # `sb` only lays down the low eight bits: nothing to mask before emitting.
   defp byte_out(load), do: [load, Asm.call(:putc)]
 
-  defp dump do
+  # One region out over the serial port. `putc` clobbers t0 and t1 only, so the
+  # cursor and the count live in t3 and t4.
+  defp region(name, load, length) do
     [
-      Asm.label(:dump),
-      RV32.mv(:t3, Regs.mem()),
-      RV32.li(:t4, @memory),
-      Asm.label(:dump_loop),
-      Asm.beqz(:t4, :dump_done),
+      load,
+      RV32.li(:t4, length),
+      Asm.label(:"dump_#{name}"),
+      Asm.beqz(:t4, :"dump_#{name}_done"),
       RV32.lbu(:a0, :t3, 0),
       Asm.call(:putc),
       RV32.addi(:t3, :t3, 1),
       RV32.addi(:t4, :t4, -1),
-      Asm.j(:dump_loop),
-      Asm.label(:dump_done),
-      Asm.j(:poweroff)
+      Asm.j(:"dump_#{name}"),
+      Asm.label(:"dump_#{name}_done")
     ]
   end
 
   # ══ Les gestionnaires ════════════════════════════════════════════════════════
 
-  defp handlers do
+  @doc """
+  Every opcode handler the backend can emit, each behind its own label.
+
+  The bodies come from `Atomboy.Native.Emit.body/1`, so there is exactly one
+  description of what an instruction does no matter which image it ends up in.
+  """
+  @spec handlers() :: [Asm.item()]
+  def handlers do
     base =
       for %Insn{prefix: nil} = insn <- Table.base(),
           (corps = Emit.body(insn)) != :unsupported do
@@ -366,19 +478,30 @@ defmodule Atomboy.Native.Interp do
 
   defp data(memory, state, budget) do
     [
+      tables(),
       {:align, 4},
-      Asm.label(:table_base),
-      table_base(),
-      # Contiguous, with no alignment in between: the prefix relies on a
-      # displacement of exactly 1024.
-      Asm.label(:table_cb),
-      table_cb(),
-      {:align, 4},
-      Asm.label(:etat_initial),
+      Asm.label(:initial_state),
       header(state, budget),
       {:align, 4},
       Asm.label(:memory_gb),
       memory
+    ]
+  end
+
+  @doc """
+  The two jump tables, for the image's data section.
+
+  They are contiguous and deliberately unaligned with respect to each other: the
+  prefix reaches the second one through a displacement of exactly 1024.
+  """
+  @spec tables() :: [Asm.item()]
+  def tables do
+    [
+      {:align, 4},
+      Asm.label(:table_base),
+      table_base(),
+      Asm.label(:table_cb),
+      table_cb()
     ]
   end
 
@@ -416,11 +539,22 @@ defmodule Atomboy.Native.Interp do
   defp label(opcode), do: :"h_#{Integer.to_string(opcode, 16)}"
   defp label_cb(opcode), do: :"cb_#{Integer.to_string(opcode, 16)}"
 
-  defp header(%State{} = state, budget) do
+  @doc """
+  The image's header: the CPU state, the timer's phase, and one caller's word.
+
+  `:timer` carries the divider's and TIMA's sub-counters as `{div, tima}` -- the
+  fractions of a period neither register shows. They are zero for an interpreter,
+  which has no timer; handing them over is what lets a console's runs chain frame
+  to frame instead of restarting the phase on every image.
+  """
+  @spec header(State.t(), non_neg_integer(), keyword()) :: binary()
+  def header(%State{} = state, word, opts \\ []) do
     control =
       state.ime + if(state.halted, do: 2, else: 0) + state.ime_pending * 4
 
+    {div_sub, tima_sub} = Keyword.get(opts, :timer, {0, 0})
+
     <<state.a, state.f, state.b, state.c, state.d, state.e, state.h, state.l, state.sp::16-little,
-      state.pc::16-little, control, 0, 0, 0, budget::32-little>>
+      state.pc::16-little, control, div_sub, tima_sub::16-little, word::32-little>>
   end
 end

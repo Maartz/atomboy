@@ -68,7 +68,7 @@ defmodule Atomboy.Native.PPUBench do
 
   @instret 0xC02
   @memory 0x10000
-  @width 160
+  @width PPU.width()
 
   # ══ The case payload ═════════════════════════════════════════════════════════
   #
@@ -90,8 +90,10 @@ defmodule Atomboy.Native.PPUBench do
 
   # The registers `Atomboy.PPU` defaults when a key is missing. A case must pin
   # them, or the two sides read different memory and the comparison means
-  # nothing.
-  @io_defaults %{0xFF40 => 0x91, 0xFF47 => 0xE4, 0xFF48 => 0xE4, 0xFF49 => 0xE4}
+  # nothing. Which four they are is this module's business; what they hold is
+  # `Atomboy.Native.Boot`'s, so that the machine loop's harness and this one
+  # cannot drift apart on a palette.
+  @io_defaults Map.take(Atomboy.Native.Boot.io_state(), [0xFF40, 0xFF47, 0xFF48, 0xFF49])
 
   @doc "How many bytes one case occupies in the image."
   @spec stride() :: pos_integer()
@@ -130,12 +132,12 @@ defmodule Atomboy.Native.PPUBench do
   @spec ram(map()) :: map()
   def ram(fields) do
     registers = %{
-      0xFF40 => Map.get(fields, :lcdc, 0x91),
+      0xFF40 => Map.get(fields, :lcdc, @io_defaults[0xFF40]),
       0xFF42 => Map.get(fields, :scy, 0),
       0xFF43 => Map.get(fields, :scx, 0),
-      0xFF47 => Map.get(fields, :bgp, 0xE4),
-      0xFF48 => Map.get(fields, :obp0, 0xE4),
-      0xFF49 => Map.get(fields, :obp1, 0xE4),
+      0xFF47 => Map.get(fields, :bgp, @io_defaults[0xFF47]),
+      0xFF48 => Map.get(fields, :obp0, @io_defaults[0xFF48]),
+      0xFF49 => Map.get(fields, :obp1, @io_defaults[0xFF49]),
       0xFF4A => Map.get(fields, :wy, 0),
       0xFF4B => Map.get(fields, :wx, 0)
     }

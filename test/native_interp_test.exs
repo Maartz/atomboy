@@ -320,7 +320,7 @@ defmodule Atomboy.NativeInterpTest do
         if faulty do
           next_result = Run.run!(memory, state, budget + 1)
 
-          assert next_result.statut == :unknown_opcode
+          assert next_result.status == :unknown_opcode
           assert next_result.opcode == faulty
         end
       end
@@ -366,7 +366,7 @@ defmodule Atomboy.NativeInterpTest do
         if faulty do
           next_result = Run.run!(memory, state, budget + 1)
 
-          assert next_result.statut == :unknown_opcode
+          assert next_result.status == :unknown_opcode
           assert next_result.opcode == faulty
         end
       end
