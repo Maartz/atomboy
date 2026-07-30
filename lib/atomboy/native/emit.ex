@@ -34,6 +34,7 @@ defmodule Atomboy.Native.Emit do
   alias Atomboy.CPU.Table
   alias Atomboy.Native.ALU
   alias Atomboy.Native.Asm
+  alias Atomboy.Native.Bus
   alias Atomboy.Native.RV32
   alias Atomboy.Native.Regs
 
@@ -111,6 +112,80 @@ defmodule Atomboy.Native.Emit do
     [Asm.call(ALU.etiquette(m))] ++ fin(cycles)
   end
 
+  # ── Les opérandes mémoire ───────────────────────────────────────────────────
+  #
+  # `(HL)` est l'encodage `r = 6` : il traverse les mêmes familles que les sept
+  # registres, d'où des clauses jumelles de celles ci-dessus, à l'accès près.
+
+  def body(%Insn{mnemonic: :ld, operands: [{:reg, dst}, :hl_ind], cycles: cycles}) do
+    Bus.lire(Regs.hl(), :t0) ++ Regs.write8({:reg, dst}, :t0) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :ld, operands: [:hl_ind, {:reg, src}], cycles: cycles}) do
+    Regs.read8({:reg, src}, :t0) ++ Bus.ecrire(Regs.hl(), :t0) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :ld, operands: [:hl_ind, {:imm, 8}], cycles: cycles}) do
+    lire_immediat(:t0) ++ Bus.ecrire(Regs.hl(), :t0) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: m, operands: [{:reg, :a}, :hl_ind], cycles: cycles})
+      when m in @alu do
+    Bus.lire(Regs.hl(), :a0) ++ [Asm.call(ALU.etiquette(@routine[m]))] ++ fin(cycles)
+  end
+
+  # INC (HL) et DEC (HL) — le lu-modifié-écrit, la seule forme de la table qui
+  # touche deux fois la même adresse.
+  def body(%Insn{mnemonic: m, operands: [:hl_ind], cycles: cycles}) when m in [:inc, :dec] do
+    Bus.lire(Regs.hl(), :a0) ++
+      [Asm.call(ALU.etiquette(m))] ++
+      Bus.ecrire(Regs.hl(), :a0) ++ fin(cycles)
+  end
+
+  # LD A, (BC/DE/HL+/HL-) et les écritures symétriques. L'ajustement de HL suit
+  # l'accès : l'adresse est celle d'avant l'incrément.
+  def body(%Insn{mnemonic: :ld, operands: [{:reg, :a}, {:ind, _} = source], cycles: cycles}) do
+    Bus.adresse(source, :t0) ++
+      Bus.lire(:t0, Regs.a()) ++
+      Bus.ajuster(source) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :ld, operands: [{:ind, _} = cible, {:reg, :a}], cycles: cycles}) do
+    Bus.adresse(cible, :t0) ++
+      Bus.ecrire(:t0, Regs.a()) ++
+      Bus.ajuster(cible) ++ fin(cycles)
+  end
+
+  # La page haute — les registres d'entrée-sortie, adressés sur un octet.
+  def body(%Insn{mnemonic: :ldh, operands: [{:reg, :a}, :a8_ind], cycles: cycles}) do
+    lire_immediat(:t0) ++
+      Bus.page_haute(:t0, :t0) ++
+      Bus.lire(:t0, Regs.a()) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :ldh, operands: [:a8_ind, {:reg, :a}], cycles: cycles}) do
+    lire_immediat(:t0) ++
+      Bus.page_haute(:t0, :t0) ++
+      Bus.ecrire(:t0, Regs.a()) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :ldh, operands: [{:reg, :a}, :c_ind], cycles: cycles}) do
+    Bus.page_haute(Regs.c(), :t0) ++ Bus.lire(:t0, Regs.a()) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :ldh, operands: [:c_ind, {:reg, :a}], cycles: cycles}) do
+    Bus.page_haute(Regs.c(), :t0) ++ Bus.ecrire(:t0, Regs.a()) ++ fin(cycles)
+  end
+
+  # L'adressage absolu — le seul opérande de deux octets de cette étape.
+  def body(%Insn{mnemonic: :ld, operands: [{:reg, :a}, :a16_ind], cycles: cycles}) do
+    lire_immediat16(:t0) ++ Bus.lire(:t0, Regs.a()) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :ld, operands: [:a16_ind, {:reg, :a}], cycles: cycles}) do
+    lire_immediat16(:t0) ++ Bus.ecrire(:t0, Regs.a()) ++ fin(cycles)
+  end
+
   def body(%Insn{}), do: :non_supporté
 
   @doc """
@@ -127,6 +202,24 @@ defmodule Atomboy.Native.Emit do
       RV32.addi(Regs.pc(), Regs.pc(), 1),
       RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16())
     ]
+  end
+
+  @doc """
+  Charge le mot immédiat de deux octets qui suit l'opcode, petit-boutien.
+
+  Deux lectures d'un octet plutôt qu'une lecture de deux : le second octet est
+  à `PC + 1` **replié sur 16 bits**, et un opcode posé à `0xFFFF` prend donc son
+  opérande haut à l'adresse `0`. Un `lhu` à `mem + PC` lirait un octet hors des
+  64 Ko.
+  """
+  @spec lire_immediat16(RV32.reg()) :: [Asm.item()]
+  def lire_immediat16(dest) do
+    lire_immediat(dest) ++
+      lire_immediat(:t2) ++
+      [
+        RV32.slli(:t2, :t2, 8),
+        RV32.or_(dest, dest, :t2)
+      ]
   end
 
   @doc """

@@ -29,7 +29,7 @@ defmodule Atomboy.NativeInterpTest do
   @seeds 1..8
 
   describe "la couverture" do
-    test "les étapes 1 et 3 couvrent les familles sans accès mémoire" do
+    test "les étapes 1, 3 et 4 couvrent les familles émises" do
       couverts = MapSet.new(Emit.couverture())
 
       assert {nil, 0x00} in couverts, "NOP"
@@ -43,19 +43,30 @@ defmodule Atomboy.NativeInterpTest do
       assert {nil, 0x27} in couverts, "DAA"
       assert {nil, 0x3F} in couverts, "CCF"
       assert {nil, 0x3E} in couverts, "LD A, d8"
+      assert {nil, 0x46} in couverts, "LD B, (HL)"
+      assert {nil, 0x70} in couverts, "LD (HL), B"
+      assert {nil, 0x86} in couverts, "ADD A, (HL)"
+      assert {nil, 0x34} in couverts, "INC (HL)"
+      assert {nil, 0x36} in couverts, "LD (HL), d8"
+      assert {nil, 0x22} in couverts, "LD (HL+), A"
+      assert {nil, 0x1A} in couverts, "LD A, (DE)"
+      assert {nil, 0xE0} in couverts, "LDH (a8), A"
+      assert {nil, 0xF2} in couverts, "LDH A, (C)"
+      assert {nil, 0xEA} in couverts, "LD (a16), A"
 
       # 0x76 est HALT, pas un LD : le trou dans le bloc x=1.
       refute {nil, 0x76} in couverts, "HALT n'est pas un LD"
-      # Tout ce qui touche (HL) attend l'étape 4.
-      refute {nil, 0x46} in couverts, "LD B, (HL)"
-      refute {nil, 0x70} in couverts, "LD (HL), B"
-      refute {nil, 0x86} in couverts, "ADD A, (HL)"
-      refute {nil, 0x34} in couverts, "INC (HL)"
-      refute {nil, 0x36} in couverts, "LD (HL), d8"
+      # Le 16 bits, la pile et les sauts attendent les étapes 5 et 6.
+      refute {nil, 0x01} in couverts, "LD BC, d16"
+      refute {nil, 0x03} in couverts, "INC BC"
+      refute {nil, 0xC5} in couverts, "PUSH BC"
+      refute {nil, 0x18} in couverts, "JR e8"
+      refute {nil, 0x08} in couverts, "LD (a16), SP"
 
-      # 1 NOP + 49 LD r,r' + 56 ALU A,r + 8 ALU A,d8 + 14 INC/DEC r
-      # + 8 accumulateur + 7 LD r,d8.
-      assert MapSet.size(couverts) == 143
+      # 143 (étapes 1 et 3) + 7 LD r,(HL) + 7 LD (HL),r + 1 LD (HL),d8
+      # + 8 ALU A,(HL) + 2 INC/DEC (HL) + 8 indirections par paire
+      # + 4 page haute + 2 adressage absolu.
+      assert MapSet.size(couverts) == 182
     end
 
     test "la correspondance mnémonique → primitive suit celle de Gen" do
@@ -129,7 +140,7 @@ defmodule Atomboy.NativeInterpTest do
         memoire = programme_aleatoire()
         state = etat_aleatoire()
 
-        {attendu, memoire_oracle, budget} = oracle(memoire, state, @steps)
+        {attendu, memoire_oracle, budget, fautif} = oracle(memoire, state, @steps)
 
         resultat = Run.run!(memoire, state, budget)
 
@@ -145,6 +156,17 @@ defmodule Atomboy.NativeInterpTest do
               do: {addr, octet_oracle, octet_natif}
 
         assert divergences == []
+
+        # Les programmes s'auto-modifient — `LD (HL), r` écrit parfois sur le
+        # chemin de PC — et fabriquent alors des opcodes que le natif ne sait
+        # pas encore émettre. L'équivalence porte sur le préfixe sain ; un
+        # cycle de plus doit faire échouer le natif sur *cet* opcode-là.
+        if fautif do
+          suite = Run.run!(memoire, state, budget + 1)
+
+          assert suite.statut == :opcode_inconnu
+          assert suite.opcode == fautif
+        end
       end
     end
   end
@@ -168,7 +190,12 @@ defmodule Atomboy.NativeInterpTest do
 
   # Un octet par adresse, tiré de ce que le natif sait émettre. Aucun n'étant un
   # saut, PC parcourt l'espace linéairement et reboucle — chaque tirage est un
-  # programme valide de bout en bout, et aucun n'écrit en mémoire à ce stade.
+  # programme valide de bout en bout.
+  #
+  # Depuis que les écritures mémoire existent, ces programmes s'auto-modifient :
+  # sur les huit graines, six finissent par fabriquer un opcode hors couverture
+  # devant PC et deux vont au bout des 5 000 pas. C'est le cas le plus dur que
+  # le harnais puisse produire, et c'est gratuit.
   defp programme_aleatoire do
     opcodes = for {nil, op} <- Emit.couverture(), do: op
 
@@ -193,23 +220,34 @@ defmodule Atomboy.NativeInterpTest do
     }
   end
 
-  # N pas d'oracle sur une mémoire plate initialisée depuis le programme. Le
-  # budget rendu est la somme exacte des cycles de ces N pas : si le natif
-  # comptait autrement, il exécuterait un nombre différent d'instructions et
-  # les états divergeraient.
+  # N pas d'oracle sur une mémoire plate initialisée depuis le programme. Rend
+  # `{état, mémoire, budget_en_cycles, opcode_fautif | nil}`.
+  #
+  # Le budget est la somme exacte des cycles de ces pas : si le natif comptait
+  # autrement, il exécuterait un nombre différent d'instructions et les états
+  # divergeraient. L'oracle s'arrête de lui-même dès que PC désigne un opcode
+  # hors de ce que le natif sait émettre — sinon il continuerait seul, et la
+  # divergence dirait « le natif s'est arrêté » plutôt que « le natif s'est
+  # trompé », ce qui est une tout autre information.
   defp oracle(memoire, state, steps) do
     plate =
       Flat.new(
         for {byte, addr} <- Enum.with_index(:binary.bin_to_list(memoire)), do: {addr, byte}
       )
 
-    boucle(state, plate, 0, steps)
+    boucle(state, plate, 0, steps, MapSet.new(for {nil, op} <- Emit.couverture(), do: op))
   end
 
-  defp boucle(st, mem, cycles, 0), do: {st, mem, cycles}
+  defp boucle(st, mem, cycles, 0, _couverts), do: {st, mem, cycles, nil}
 
-  defp boucle(st, mem, cycles, steps) do
-    {st, mem, pas} = Atomboy.CPU.tick(st, mem)
-    boucle(st, mem, cycles + pas, steps - 1)
+  defp boucle(st, mem, cycles, steps, couverts) do
+    opcode = Flat.read8(mem, st.pc)
+
+    if MapSet.member?(couverts, opcode) do
+      {st, mem, pas} = Atomboy.CPU.tick(st, mem)
+      boucle(st, mem, cycles + pas, steps - 1, couverts)
+    else
+      {st, mem, cycles, opcode}
+    end
   end
 end
