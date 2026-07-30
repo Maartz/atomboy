@@ -1,23 +1,23 @@
 defmodule Atomboy.Joypad do
   @moduledoc """
-  Le registre P1/JOYP (0xFF00), avec de vraies touches au bout des lignes.
+  The P1/JOYP register (0xFF00), with real keys at the end of the lines.
 
-  Le matériel croise deux nappes de quatre lignes — directions et boutons —
-  sélectionnées par les bits 5-4 (actifs à zéro) que le jeu écrit. La lecture
-  renvoie dans le quartet bas l'état des lignes sélectionnées, actives à
-  zéro : bit à 0 = touche pressée. Les deux nappes sélectionnées à la fois se
-  combinent en ET — deux touches sur la même ligne tirent le fil ensemble.
+  The hardware crosses two rows of four lines — directions and buttons —
+  selected by bits 5-4 (active low) that the game writes. A read returns, in
+  the low nibble, the state of the selected lines, active low: bit at 0 = key
+  pressed. Both rows selected at once combine with an AND — two keys on the
+  same line pull the wire together.
 
-  L'état des touches vit dans la map des écritures sous deux clés hors
-  adresse, un quartet par nappe, à 1 = relâché comme les lignes :
+  The key state lives in the map of writes under two non-address keys, one
+  nibble per row, 1 = released as on the lines:
 
-      :joy_dpad   bit 0 Droite   bit 1 Gauche   bit 2 Haut     bit 3 Bas
-      :joy_btns   bit 0 A        bit 1 B        bit 2 Select   bit 3 Start
+      :joy_dpad   bit 0 Right   bit 1 Left   bit 2 Up       bit 3 Down
+      :joy_btns   bit 0 A       bit 1 B      bit 2 Select   bit 3 Start
 
-  Deux entrées : `write/2` quand le jeu écrit la sélection, `set/3` quand le
-  monde extérieur (clavier, GPIO un jour) change les touches — chacune
-  recompose l'octet lisible, et une pression neuve lève le bit 4 d'IF,
-  l'interruption joypad.
+  Two entry points: `write/2` when the game writes the selection, `set/3`
+  when the outside world (keyboard, GPIO one day) changes the keys — each one
+  recomposes the readable byte, and a freshly pressed key raises bit 4 of IF,
+  the joypad interrupt.
   """
 
   import Bitwise
@@ -26,8 +26,8 @@ defmodule Atomboy.Joypad do
   @joyp 0xFF00
 
   @doc """
-  Le jeu écrit 0xFF00 : la sélection (bits 5-4) est retenue, les lignes
-  recomposées. Bits 7-6 à 1, comme le bus.
+  The game writes 0xFF00: the selection (bits 5-4) is kept, the lines
+  recomposed. Bits 7-6 at 1, as on the bus.
   """
   @spec write(map(), byte()) :: map()
   def write(ram, value) do
@@ -35,9 +35,9 @@ defmodule Atomboy.Joypad do
   end
 
   @doc """
-  Le monde extérieur pose l'état des deux nappes — un quartet chacune,
-  à 1 = relâché. L'octet lisible est recomposé avec la sélection en place,
-  et toute touche nouvellement pressée lève l'interruption joypad (IF bit 4).
+  The outside world sets the state of both rows — one nibble each, 1 =
+  released. The readable byte is recomposed with the selection in place, and
+  any freshly pressed key raises the joypad interrupt (IF bit 4).
   """
   @spec set(map(), 0..15, 0..15) :: map()
   def set(ram, dpad, btns) do
@@ -55,7 +55,7 @@ defmodule Atomboy.Joypad do
     end
   end
 
-  # Les lignes sélectionnées, en ET — nappe non sélectionnée : tout relâché.
+  # The selected lines, ANDed — an unselected row reads all released.
   defp compose(ram, select) do
     lines = 0x0F
     lines = if (select &&& 0x10) == 0, do: lines &&& Map.get(ram, :joy_dpad, 0x0F), else: lines

@@ -1,32 +1,32 @@
 defmodule Atomboy.Play.Audio do
   @moduledoc """
-  La sortie son : un port vers `ffplay`, nourri en PCM brut.
+  The sound output: a port to `ffplay`, fed raw PCM.
 
-  L'APU produit ses échantillons stéréo s16le frame par frame ; ffplay les
-  lit sur son entrée standard et les joue — `-nodisp -v quiet` pour qu'il
-  reste invisible et muet sur nos écrans. Production et consommation vont
-  toutes deux au temps réel : le tampon du tuyau reste à l'équilibre, la
-  latence est celle d'ffplay (~un dixième de seconde).
+  The APU produces its s16le stereo samples frame by frame; ffplay reads
+  them on its standard input and plays them — `-nodisp -v quiet` so that it
+  stays invisible and silent on our screens. Production and consumption
+  both run in real time: the pipe's buffer stays at equilibrium, and the
+  latency is ffplay's own (~a tenth of a second).
 
-  Sans ffplay installé, `open/0` rend `nil` et le jeu joue en silence —
-  `brew install ffmpeg` pour l'entendre.
+  Without ffplay installed, `open/0` returns `nil` and the game plays in
+  silence — `brew install ffmpeg` to hear it.
   """
 
   alias Atomboy.APU
 
   @rate 32_768
-  # L'avance entretenue sur le lecteur : ~63 ms — la marge qui absorbe la
-  # gigue d'une frame lente sans que le tampon ne touche le fond.
+  # The lead kept over the player: ~63 ms — the margin that absorbs the
+  # jitter of one slow frame without letting the buffer hit the bottom.
   @lead 2048
-  # Un retard au-delà d'une demi-seconde (pause, blocage) ne se rattrape
-  # pas en rafale : on recale l'horloge.
+  # A lag beyond half a second (a pause, a stall) is not caught up in a
+  # burst: we reset the clock instead.
   @max_burst div(@rate, 2)
 
   defstruct [:port, :t0, sent: 0]
 
   @type t :: %__MODULE__{}
 
-  @doc "Ouvre le lecteur, ou `nil` sans ffplay."
+  @doc "Opens the player, or `nil` without ffplay."
   @spec open() :: t() | nil
   def open do
     case System.find_executable("ffplay") do
@@ -50,11 +50,11 @@ defmodule Atomboy.Play.Audio do
   end
 
   @doc """
-  La frame de son, asservie à l'horloge murale : produit exactement ce que
-  le temps réel écoulé exige — que la boucle de jeu tourne à 58 ou 60 fps,
-  le flux vise 32 768 échantillons/s et le tampon d'ffplay ne meurt jamais
-  de faim. Sans lecteur, jette les déclenchements ; un lecteur disparu
-  coupe le son sans arrêter la partie.
+  The sound frame, slaved to the wall clock: produces exactly what the
+  elapsed real time demands — whether the game loop runs at 58 or 60 fps,
+  the stream aims at 32,768 samples/s and ffplay's buffer never starves.
+  Without a player, discards the triggers; a player that has vanished
+  silences the sound without stopping the game.
   """
   @spec stream(t() | nil, map(), APU.t()) :: {map(), APU.t(), t() | nil}
   def stream(nil, ram, apu), do: {Map.delete(ram, :apu_triggers), apu, nil}
@@ -70,9 +70,9 @@ defmodule Atomboy.Play.Audio do
   end
 
   @doc """
-  Ce que l'horloge murale exige maintenant : `{audio, n}` — l'état avancé
-  et le nombre d'échantillons dus. Le cœur anti-famine, partagé entre le
-  flux ffplay et le mode serveur (qui pousse le PCM ailleurs).
+  What the wall clock demands right now: `{audio, n}` — the advanced state
+  and the number of samples owed. The anti-starvation core, shared between
+  the ffplay stream and server mode (which pushes the PCM elsewhere).
   """
   @spec cadence(%{t0: integer(), sent: non_neg_integer()}) ::
           {%{t0: integer(), sent: non_neg_integer()}, non_neg_integer()}
@@ -82,7 +82,7 @@ defmodule Atomboy.Play.Audio do
 
     case due - audio.sent do
       n when n > @max_burst ->
-        # Recaler : t0 tel que le dû retombe à l'avance nominale.
+        # Reset: pick t0 so that the debt falls back to the nominal lead.
         t0 = now - div((audio.sent + @lead) * 1_000_000, @rate)
         {%{audio | t0: t0}, @lead}
 
@@ -100,7 +100,7 @@ defmodule Atomboy.Play.Audio do
     ArgumentError -> :dead
   end
 
-  @doc "Referme le tuyau — ffplay sort sur la fin de flux."
+  @doc "Closes the pipe — ffplay exits on end of stream."
   @spec close(t() | nil) :: :ok
   def close(nil), do: :ok
 

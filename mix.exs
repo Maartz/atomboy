@@ -9,8 +9,8 @@ defmodule Atomboy.MixProject do
       version: version(),
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
-      # wx (la fenêtre native) vit dans OTP, pas dans nos deps : sans ceci,
-      # mix élague son chemin de code et :wx devient introuvable.
+      # wx (the native window) lives in OTP, not in our deps: without this,
+      # mix prunes its code path and :wx becomes unreachable.
       prune_code_paths: false,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
@@ -18,11 +18,11 @@ defmodule Atomboy.MixProject do
     ]
   end
 
-  # La version porte le SHA du commit (et l'heure si l'arbre est sale) :
-  # le binaire Burrito extrait son contenu dans un cache nommé par version —
-  # sans cela, un rebuild de même numéro fait tourner l'ancien code. Chaque
-  # build a désormais sa clé ; le cache s'accumule dans
-  # ~/Library/Application Support/.burrito, à purger de temps en temps.
+  # The version carries the commit SHA (and the time if the tree is dirty):
+  # the Burrito binary extracts its contents into a cache named after the
+  # version — without this, a rebuild under the same number runs the old code.
+  # Every build now has its own key; the cache piles up in
+  # ~/Library/Application Support/.burrito, to be purged now and then.
   defp version do
     case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
       {sha, 0} ->
@@ -35,9 +35,10 @@ defmodule Atomboy.MixProject do
         "#{@version}+#{String.trim(sha)}#{dirty}"
 
       _ ->
-        # Sans dépôt (build Docker : le contexte n'embarque pas .git), le
-        # SHA arrive par l'environnement — ou la version reste nue. Un ARG
-        # Docker non fourni arrive en chaîne vide, pas en absence.
+        # With no repository (Docker build: the context does not carry .git),
+        # the SHA arrives through the environment — or the version stays bare.
+        # A Docker ARG that was not supplied arrives as an empty string, not as
+        # an absence.
         case System.get_env("ATOMBOY_SHA") do
           sha when sha in [nil, ""] -> @version
           sha -> "#{@version}+#{sha}"
@@ -46,14 +47,14 @@ defmodule Atomboy.MixProject do
   end
 
   def application do
-    # Pas de `extra_applications` : tout ce qui est listé ici finit dans le
-    # packbeam flashé sur l'ESP32, et AtomVM n'a ni :logger ni la majorité
-    # d'OTP. Autant que la contrainte morde dès la phase 1 sur le Mac plutôt
-    # qu'à la phase 2 quand le code aura pris l'habitude.
+    # No `extra_applications`: everything listed here ends up in the packbeam
+    # flashed onto the ESP32, and AtomVM has neither :logger nor most of OTP.
+    # Better that the constraint bites from phase 1 on the Mac than in phase 2
+    # once the code has grown used to the comfort.
     #
-    # En prod (l'exécutable Burrito), l'app démarre Atomboy.CLI — le point
-    # d'entrée du binaire distribué. Jamais en dev/test : `mix test` ne doit
-    # pas lancer une partie.
+    # In prod (the Burrito executable), the app starts Atomboy.CLI — the entry
+    # point of the distributed binary. Never in dev/test: `mix test` must not
+    # start a game.
     if Mix.env() == :prod, do: [mod: {Atomboy.CLI, []}], else: []
   end
 
@@ -61,11 +62,11 @@ defmodule Atomboy.MixProject do
   defp elixirc_paths(_env), do: ["lib"]
 
   defp deps do
-    # Une seule dépendance, et cantonnée à l'empaquetage : Burrito enveloppe
-    # la release (app + BEAM entier) dans un exécutable unique par plateforme.
-    # Le cœur de l'émulateur reste sans dépendance — chaque ajout serait du
-    # code à faire tenir dans AtomVM, qui n'implémente qu'un sous-ensemble
-    # d'OTP. Le JSON du corpus est décodé par le module `JSON` d'Elixir 1.18.
+    # A single dependency, and confined to packaging: Burrito wraps the release
+    # (app + the whole BEAM) into one executable per platform. The emulator's
+    # core stays dependency-free — every addition would be more code to fit
+    # inside AtomVM, which implements only a subset of OTP. The corpus JSON is
+    # decoded by Elixir 1.18's `JSON` module.
     [
       {:burrito, "~> 1.0", runtime: false}
     ]

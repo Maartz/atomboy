@@ -1,33 +1,33 @@
 defmodule Atomboy.Blargg do
   @moduledoc """
-  Fait tourner une ROM de test blargg et lit son verdict sur le lien série.
+  Runs a blargg test ROM and reads its verdict off the serial link.
 
-  Les ROMs de la génération `cpu_instrs` publient leurs résultats caractère
-  par caractère sur le lien série — un octet dans 0xFF01, bit 7 de 0xFF02
-  pour l'envoyer. `Atomboy.CPU.CartLoop` capture chaque envoi à l'écriture
-  dans le tampon `:serial` de sa map ; ici on ne fait que scruter ce tampon
-  entre deux tranches d'exécution, à la recherche de `Passed` ou `Failed`.
+  The ROMs of the `cpu_instrs` generation publish their results character by
+  character on the serial link — one byte into 0xFF01, bit 7 of 0xFF02 to send
+  it. `Atomboy.CPU.CartLoop` captures every send at write time into the
+  `:serial` buffer of its map; here we do nothing but peer into that buffer
+  between two slices of execution, looking for `Passed` or `Failed`.
 
-  La sémantique cartouche de CartLoop est indispensable : blargg pilote le MBC
-  en écrivant sous 0x8000, et le modèle plat de `Loop` laisserait ces
-  écritures masquer la ROM.
+  CartLoop's cartridge semantics are indispensable: blargg drives the MBC by
+  writing below 0x8000, and `Loop`'s flat model would let those writes mask
+  the ROM.
 
-  L'état initial est celui que la boot ROM DMG laisse au jeu : PC 0x100,
-  SP 0xFFFE, AF 0x01B0, BC 0x0013, DE 0x00D8, HL 0x014D. Le registre LY
-  (0xFF44) est pré-écrit à 0x90 — la ligne du vblank — pour les attentes
-  d'écran ; blargg est conçu pour ne pas bloquer si LY ne bouge pas, mais
-  autant lui répondre quelque chose de sensé.
+  The initial state is the one the DMG boot ROM leaves to the game: PC 0x100,
+  SP 0xFFFE, AF 0x01B0, BC 0x0013, DE 0x00D8, HL 0x014D. The LY register
+  (0xFF44) is pre-written to 0x90 — the vblank line — for screen waits;
+  blargg is designed not to hang if LY never moves, but we may as well answer
+  it something sensible.
   """
 
   alias Atomboy.CPU.State
 
-  # Une frame entre deux inspections du tampon série.
+  # One frame between two inspections of the serial buffer.
   @frame_cycles 70_224
 
   @type verdict :: {:passed, String.t()} | {:failed, String.t()} | {:timeout, String.t()}
 
   @doc """
-  Exécute la ROM jusqu'au verdict, ou `max_cycles` au plus.
+  Runs the ROM until the verdict, or `max_cycles` at most.
   """
   @spec run(Path.t(), pos_integer()) :: verdict()
   def run(rom_path, max_cycles \\ 500_000_000) do
@@ -63,8 +63,8 @@ defmodule Atomboy.Blargg do
     {:timeout, serial(ram)}
   end
 
-  # Une frame de 154 scanlines par tour, via la brique commune — LY vit, le
-  # vblank se lève, le timer bat : 02-interrupts mesure tout ça.
+  # One frame of 154 scanlines per turn, through the shared building block —
+  # LY lives, vblank rises, the timer beats: 02-interrupts measures all of it.
   defp execute(state, rom, ram, budget_left) do
     {state, ram} =
       Enum.reduce(0..153, {state, ram}, fn ly, {state, ram} ->

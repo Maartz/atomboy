@@ -7,20 +7,20 @@ defmodule Atomboy.SaveTest do
 
   @moduletag :tmp_dir
 
-  test "le chemin du .sav remplace l'extension de la ROM" do
+  test "the .sav path replaces the ROM's extension" do
     assert Save.path("roms/zelda.gb") == "roms/zelda.sav"
   end
 
-  test "le profil s'intercale — deux joueurs, une ROM" do
-    assert Save.path("roms/argent.gbc", "j1") == "roms/argent.j1.sav"
-    assert Save.state_path("roms/argent.gbc", "j1") == "roms/argent.j1.state"
-    assert Save.state_path("roms/argent.gbc", "j1", 3) == "roms/argent.j1.case3.state"
-    assert Save.state_path("roms/argent.gbc", nil, 1) == "roms/argent.state"
-    assert Save.state_path("roms/argent.gbc", nil, 7) == "roms/argent.case7.state"
+  test "the profile slots in — two players, one ROM" do
+    assert Save.path("roms/silver.gbc", "p1") == "roms/silver.p1.sav"
+    assert Save.state_path("roms/silver.gbc", "p1") == "roms/silver.p1.state"
+    assert Save.state_path("roms/silver.gbc", "p1", 3) == "roms/silver.p1.case3.state"
+    assert Save.state_path("roms/silver.gbc", nil, 1) == "roms/silver.state"
+    assert Save.state_path("roms/silver.gbc", nil, 7) == "roms/silver.case7.state"
   end
 
-  test "aller-retour : ce que le jeu écrit se recharge à l'identique", %{tmp_dir: dir} do
-    sav = Path.join(dir, "partie.sav")
+  test "round trip: what the game writes reloads identically", %{tmp_dir: dir} do
+    sav = Path.join(dir, "game.sav")
 
     ram = %{:cram_enabled => true, :cram_dirty => true, 0xA000 => 0x42, 0xBFFF => 0x99}
     ram = Save.flush(ram, sav)
@@ -29,26 +29,26 @@ defmodule Atomboy.SaveTest do
     assert File.exists?(sav)
     assert byte_size(File.read!(sav)) == 0x2000
 
-    recharge = Save.load(%{}, sav)
-    assert recharge[0xA000] == 0x42
-    assert recharge[0xBFFF] == 0x99
-    # Un octet jamais écrit se recharge à zéro — pas en bus ouvert.
-    assert recharge[0xA001] == 0
+    reloaded = Save.load(%{}, sav)
+    assert reloaded[0xA000] == 0x42
+    assert reloaded[0xBFFF] == 0x99
+    # A byte never written reloads as zero — not as open bus.
+    assert reloaded[0xA001] == 0
   end
 
-  test "sans écriture du jeu, flush ne crée rien", %{tmp_dir: dir} do
-    sav = Path.join(dir, "rien.sav")
+  test "with no write from the game, flush creates nothing", %{tmp_dir: dir} do
+    sav = Path.join(dir, "nothing.sav")
     ram = Save.flush(%{0xA000 => 0x42}, sav)
 
     refute File.exists?(sav)
     assert ram[0xA000] == 0x42
   end
 
-  test "sans fichier, load rend la map telle quelle" do
-    assert Save.load(%{a: 1}, "/nulle/part.sav") == %{a: 1}
+  test "with no file, load returns the map as it is" do
+    assert Save.load(%{a: 1}, "/nowhere/at/all.sav") == %{a: 1}
   end
 
-  test "un .sav trop long est tronqué aux 8 Ko de la SRAM", %{tmp_dir: dir} do
+  test "a .sav that is too long is truncated to the SRAM's 8 KB", %{tmp_dir: dir} do
     sav = Path.join(dir, "long.sav")
     File.write!(sav, :binary.copy(<<0x11>>, 0x3000))
 
@@ -57,7 +57,7 @@ defmodule Atomboy.SaveTest do
     refute Map.has_key?(ram, 0xC000)
   end
 
-  test "un instantané fige et ranime la machine entière", %{tmp_dir: dir} do
+  test "a snapshot freezes and revives the whole machine", %{tmp_dir: dir} do
     path = Path.join(dir, "boss.state")
     state = %State{pc: 0x1234, a: 0x42}
     ram = %{0xC000 => 7, :rom_banks => 2}
@@ -67,17 +67,17 @@ defmodule Atomboy.SaveTest do
     assert {:ok, {^state, ^ram, ^apu}} = Save.read_state(path)
   end
 
-  test "un instantané absent ou corrompu rend :error", %{tmp_dir: dir} do
-    assert Save.read_state(Path.join(dir, "absent.state")) == :error
+  test "a snapshot that is missing or corrupt returns :error", %{tmp_dir: dir} do
+    assert Save.read_state(Path.join(dir, "missing.state")) == :error
 
-    corrompu = Path.join(dir, "corrompu.state")
-    File.write!(corrompu, "pas un terme erlang")
-    assert Save.read_state(corrompu) == :error
+    corrupt = Path.join(dir, "corrupt.state")
+    File.write!(corrupt, "not an erlang term")
+    assert Save.read_state(corrupt) == :error
   end
 
-  test "le jeu qui écrit sa SRAM marque la map à sauver" do
-    # LD A,0x0A ; LD (0x0000),A — déverrouille la RAM cartouche.
-    # LD A,0x42 ; LD (0xA000),A — écrit un octet de sauvegarde.
+  test "a game writing its SRAM marks the map as needing a save" do
+    # LD A,0x0A ; LD (0x0000),A — unlocks the cartridge RAM.
+    # LD A,0x42 ; LD (0xA000),A — writes one byte of save data.
     rom =
       <<0x3E, 0x0A, 0xEA, 0x00, 0x00, 0x3E, 0x42, 0xEA, 0x00, 0xA0>> <>
         :binary.copy(<<0>>, 0x8000 - 10)
@@ -88,17 +88,17 @@ defmodule Atomboy.SaveTest do
     assert ram[0xA000] == 0x42
   end
 
-  test "MBC3 : la sauvegarde fait 32 Ko, quatre banques qui se suivent" do
+  test "MBC3: the save is 32 KB, four banks one after another" do
     ram = %{
       :mbc => :mbc3,
       :cram_dirty => true,
       0xA000 => 0x11,
-      0xA000 + 0x10000 => 0x22,
-      0xA000 + 0x30000 => 0x44
+      (0xA000 + 0x10000) => 0x22,
+      (0xA000 + 0x30000) => 0x44
     }
 
     dir = System.tmp_dir!()
-    sav = Path.join(dir, "argent-#{System.unique_integer([:positive])}.sav")
+    sav = Path.join(dir, "silver-#{System.unique_integer([:positive])}.sav")
     Save.flush(ram, sav)
 
     data = File.read!(sav)
@@ -107,13 +107,13 @@ defmodule Atomboy.SaveTest do
     assert :binary.at(data, 0x2000) == 0x22
     assert :binary.at(data, 0x6000) == 0x44
 
-    recharge = Save.load(%{mbc: :mbc3}, sav)
-    assert recharge[0xA000 + 0x10000] == 0x22
+    reloaded = Save.load(%{mbc: :mbc3}, sav)
+    assert reloaded[0xA000 + 0x10000] == 0x22
     File.rm(sav)
   end
 
-  test "la SRAM verrouillée ignore l'écriture, sans marque" do
-    # LD A,0x42 ; LD (0xA000),A — sans déverrouillage préalable.
+  test "locked SRAM ignores the write, and marks nothing" do
+    # LD A,0x42 ; LD (0xA000),A — with no prior unlock.
     rom = <<0x3E, 0x42, 0xEA, 0x00, 0xA0>> <> :binary.copy(<<0>>, 0x8000 - 5)
     {_state, ram, _cycles} = CartLoop.run(%State{pc: 0}, rom, %{}, 24)
 

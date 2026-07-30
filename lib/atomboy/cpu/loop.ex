@@ -1,39 +1,37 @@
 defmodule Atomboy.CPU.Loop do
   @moduledoc """
-  La boucle rapide : le même CPU que `Atomboy.CPU`, sans map sur le chemin
-  chaud.
+  The fast loop: the same CPU as `Atomboy.CPU`, with no map on the hot path.
 
-  Générée depuis la même `Atomboy.CPU.Table` que l'oracle, avec les mêmes
-  primitives `Atomboy.CPU.ALU` — seule la convention d'appel change :
+  Generated from the same `Atomboy.CPU.Table` as the oracle, with the same
+  `Atomboy.CPU.ALU` primitives — only the calling convention changes:
 
-    * les dix registres voyagent en **arguments de fonction**, jamais dans une
-      structure ; en code natif AOT ce sont des registres machine ;
-    * chaque instruction se termine par un **appel terminal** vers le fetch
-      suivant — pas de valeur de retour par pas, pas d'allocation ;
-    * le fetch lit une **ROM binary** (`:binary.at/2`), pas une map ;
-    * l'état n'est matérialisé en `Atomboy.CPU.State` qu'à l'épuisement du
-      **budget de cycles** — une fois par scanline dans la boucle de frame, au
-      lieu d'une fois par instruction.
+    * the ten registers travel as **function arguments**, never inside a struct;
+      in AOT native code they become machine registers;
+    * every instruction ends in a **tail call** to the next fetch — no return
+      value per step, no allocation;
+    * the fetch reads a **ROM binary** (`:binary.at/2`), not a map;
+    * the state is only materialised into an `Atomboy.CPU.State` once the **cycle
+      budget** runs out — once per scanline in the frame loop, instead of once
+      per instruction.
 
-  Les écritures mémoire vont dans une map threadée en argument : rare par
-  rapport au fetch, et remplaçable par la resource NIF du brief sans toucher
-  aux clauses — le générateur est le seul à connaître `ram_write/3`.
+  Memory writes go into a map threaded through as an argument: rare compared to
+  the fetch, and replaceable by the brief's NIF resource without touching a
+  single clause — the generator is the only thing that knows about `ram_write/3`.
 
-  ## Contrat
+  ## Contract
 
-  `run/4` exécute des instructions entières jusqu'à ce que le compteur de
-  cycles **atteigne ou dépasse** le budget : la dernière instruction peut
-  déborder, le débordement est visible dans le compte renvoyé. Le PPU
-  consommera ce surplus en le décomptant du budget suivant.
+  `run/4` executes whole instructions until the cycle counter **reaches or
+  exceeds** the budget: the last instruction may overshoot, and the overshoot is
+  visible in the returned count. The PPU will absorb that surplus by deducting it
+  from the next budget.
 
-  Interruptions : `ime` voyage dans la boucle — RETI le rallume, EI/DI le
-  manipuleront. `ie` et `halted` traversent `run/4` inchangés tant qu'aucune
-  instruction ne les touche.
+  Interrupts: `ime` travels through the loop — RETI switches it back on, EI/DI
+  will manipulate it. `ie` and `halted` pass through `run/4` unchanged as long as
+  no instruction touches them.
 
-  La justesse de ce module n'est pas testée directement : elle est héritée.
-  L'oracle passe les vecteurs SM83 ; le test d'équivalence croisée vérifie que
-  `run/4` produit, sur des programmes aléatoires, exactement l'état et la
-  mémoire de N pas d'oracle.
+  This module's correctness is not tested directly: it is inherited. The oracle
+  passes the SM83 vectors; the cross-equivalence test checks that `run/4`
+  produces, on random programs, exactly the state and memory of N oracle steps.
   """
 
   import Bitwise
@@ -44,15 +42,15 @@ defmodule Atomboy.CPU.Loop do
 
   require Gen
 
-  @typedoc "La ROM : l'espace d'adressage de 64 Ko, immuable."
+  @typedoc "The ROM: the 64 KB address space, immutable."
   @type rom :: binary()
 
-  @typedoc "Les écritures : adresse → octet, prioritaire sur la ROM en lecture."
+  @typedoc "The writes: address → byte, taking priority over the ROM on reads."
   @type ram :: %{optional(0..0xFFFF) => 0..0xFF}
 
   @doc """
-  Exécute depuis `state` jusqu'à `budget` T-cycles. Renvoie
-  `{state, ram, cycles_consommés}`.
+  Runs from `state` for up to `budget` T-cycles. Returns
+  `{state, ram, cycles_consumed}`.
   """
   @spec run(State.t(), rom(), ram(), pos_integer()) :: {State.t(), ram(), non_neg_integer()}
   def run(%State{} = st, rom, ram, budget) when byte_size(rom) == 0x10000 do
@@ -97,26 +95,26 @@ defmodule Atomboy.CPU.Loop do
 
   # ── Fetch ───────────────────────────────────────────────────────────────────
 
-  # Budget épuisé : matérialisation, l'unique construction de la boucle.
+  # Budget exhausted: materialisation, the loop's one and only construction.
   defp fetch(_rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending)
        when cycles >= budget do
     {{a, f, b, c, d, e, h, l, sp, pc, ime, halted, ime_pending}, ram, cycles}
   end
 
-  # La promotion d'un EI armé — même point que dans l'oracle : l'entrée du pas.
+  # Promoting an armed EI — the same point as in the oracle: entering the step.
   defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, _ime, halted, 1) do
     fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, 1, halted, 0)
   end
 
-  # Le fetch passe par la même vue rom+ram que les lectures d'opérandes : la
-  # Game Boy exécute réellement du code depuis la RAM (les routines OAM-DMA
-  # tournent en HRAM), et le test d'équivalence l'a exigé dès son premier run —
-  # les programmes aléatoires s'auto-modifient. Le surcoût est un test de map
-  # sur la ram des écritures ; le jour du vrai MMU, le découpage par région
-  # (fetch ROM sans map, fetch RAM avec) se fera dans le générateur.
-  # HALT : le processeur dort par pas de 4 T tant que rien n'est en attente —
-  # même granularité que le tick de l'oracle, l'équivalence en dépend. Le
-  # réveil est gratuit, le service éventuel se joue à la passe suivante.
+  # The fetch goes through the same rom+ram view as operand reads: the Game Boy
+  # really does execute code out of RAM (the OAM-DMA routines run in HRAM), and
+  # the equivalence test demanded it on its very first run — random programs
+  # self-modify. The extra cost is one map lookup on the writes map; the day the
+  # real MMU lands, the split by region (ROM fetch without the map, RAM fetch
+  # with it) will happen in the generator.
+  # HALT: the processor sleeps in 4 T steps as long as nothing is pending — the
+  # same granularity as the oracle's tick, and the equivalence depends on it.
+  # Waking up is free; any servicing happens on the next pass.
   defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, ime, true, pending) do
     if (mem_read(rom, ram, 0xFF0F) &&& mem_read(rom, ram, 0xFFFF) &&& 0x1F) == 0 do
       fetch(rom, ram, budget, cycles + 4, a, f, b, c, d, e, h, l, sp, pc, ime, true, pending)
@@ -125,8 +123,8 @@ defmodule Atomboy.CPU.Loop do
     end
   end
 
-  # IME actif : une source en attente détourne l'exécution — IME retombe, le
-  # bit d'IF s'efface, PC part sur la pile, le vecteur prend la main. 20 T.
+  # IME set: a pending source diverts execution — IME drops, the IF bit clears,
+  # PC goes onto the stack, the vector takes over. 20 T.
   defp fetch(rom, ram, budget, cycles, a, f, b, c, d, e, h, l, sp, pc, 1, halted, pending) do
     irq = mem_read(rom, ram, 0xFF0F) &&& mem_read(rom, ram, 0xFFFF) &&& 0x1F
 
@@ -216,11 +214,11 @@ defmodule Atomboy.CPU.Loop do
   defp irq_index(0x08), do: 3
   defp irq_index(0x10), do: 4
 
-  # ── Le dispatch ─────────────────────────────────────────────────────────────
+  # ── The dispatch ────────────────────────────────────────────────────────────
   #
-  # Un arbre à deux étages émis par Gen — voir son commentaire sur le
-  # select_val linéaire du JIT. 0xCB fetch le second octet et redispatche vers
-  # exec_cb, même arbre sur la table étendue.
+  # A two-level tree emitted by Gen — see its comment on the JIT's linear
+  # select_val. 0xCB fetches the second byte and dispatches again into exec_cb,
+  # the same tree over the extended table.
 
   defp exec(unquote_splicing(Gen.head_args(:loop))) do
     unquote(
@@ -244,12 +242,12 @@ defmodule Atomboy.CPU.Loop do
     raise Atomboy.CPU.Unimplemented, opcode: opcode, prefix: :cb, pc: pc - 2 &&& 0xFFFF
   end
 
-  # ── Mémoire ─────────────────────────────────────────────────────────────────
+  # ── Memory ──────────────────────────────────────────────────────────────────
 
   @compile {:inline, mem_read: 3, ram_write: 3}
 
-  # Les écritures masquent la ROM. `0` est une valeur valide : le repli sur la
-  # ROM ne se fait que sur absence réelle (`nil`).
+  # Writes mask the ROM. `0` is a valid value: falling back to the ROM only
+  # happens on genuine absence (`nil`).
   defp mem_read(rom, ram, addr) do
     case ram do
       %{^addr => value} -> value

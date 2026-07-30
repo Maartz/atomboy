@@ -1,17 +1,17 @@
 defmodule Atomboy.Screen do
   @moduledoc """
-  La boucle de frame : le CPU avance scanline par scanline, LY vit, le PPU
-  rend.
+  The frame loop: the CPU advances scanline by scanline, LY lives, the PPU
+  renders.
 
-  C'est la structure que le brief prévoyait : le CPU tourne pour 456 T-cycles
-  — une scanline — puis le matériel simulé avance d'un cran. Ici « le matériel »
-  se réduit à LY (0xFF44), que les jeux scrutent pour attendre le vblank ; le
-  registre est écrit dans la map entre deux tranches, exactement là où le PPU
-  de la phase 3 viendra se brancher.
+  This is the structure the brief called for: the CPU runs for 456 T-cycles
+  — one scanline — then the simulated hardware moves up a notch. Here "the
+  hardware" boils down to LY (0xFF44), which games poll while waiting for
+  vblank; the register is written into the map between two slices, exactly
+  where the phase-3 PPU came to plug itself in.
 
-  Le rendu se fait ligne à ligne pendant la partie visible de la dernière
-  frame demandée — les registres de défilement sont donc lus à la scanline,
-  comme sur la dalle, pas figés en fin de frame.
+  Rendering happens line by line during the visible part of the last frame
+  requested — so the scroll registers are read at the scanline, as on the
+  panel, not frozen at the end of the frame.
   """
 
   import Bitwise
@@ -25,9 +25,9 @@ defmodule Atomboy.Screen do
   @lines 154
 
   @doc """
-  Exécute `frames` frames depuis l'état de démarrage et rend la dernière.
+  Runs `frames` frames from the boot state and returns the last one.
 
-  Renvoie `{frame, state, ram}`.
+  Returns `{frame, state, ram}`.
   """
   @spec run(Path.t(), pos_integer(), keyword()) :: {PPU.frame(), State.t(), map()}
   def run(rom_path, frames, opts \\ []) do
@@ -43,8 +43,8 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  L'état des registres à la sortie de la ROM de boot DMG — le point de départ
-  de tout jeu.
+  The state of the registers on leaving the DMG boot ROM — the starting
+  point of every game.
   """
   @spec boot_state() :: State.t()
   def boot_state do
@@ -63,12 +63,12 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  La map mémoire de départ : nombre de banques, famille de MBC (en-tête
-  0x147 : MBC3 pour 0x0F-0x13, MBC5 pour 0x19-0x1E, MBC1 sinon) et mode
-  couleur (0x143 : 0x80 « enhanced », 0xC0 « only »).
+  The starting memory map: the number of banks, the MBC family (header
+  0x147: MBC3 for 0x0F-0x13, MBC5 for 0x19-0x1E, MBC1 otherwise) and color
+  mode (0x143: 0x80 "enhanced", 0xC0 "only").
 
-  `dmg?` force la machine monochrome — l'équivalent de glisser la
-  cartouche dans une vraie DMG.
+  `dmg?` forces the monochrome machine — the equivalent of slotting the
+  cartridge into a real DMG.
   """
   @spec boot_ram(binary(), boolean()) :: map()
   def boot_ram(rom, dmg? \\ false) do
@@ -89,8 +89,8 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  L'état de boot selon la cartouche : A vaut 0x11 sur Game Boy Color —
-  c'est ainsi que les jeux « enhanced » choisissent leurs couleurs.
+  The boot state according to the cartridge: A is 0x11 on a Game Boy Color —
+  that is how "enhanced" games choose their colors.
   """
   @spec boot_state(binary(), boolean()) :: State.t()
   def boot_state(rom, dmg? \\ false) do
@@ -102,8 +102,8 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  Une frame de machine : 154 scanlines, rendues si `render?`.
-  Renvoie `{pixels, state, ram}` — pixels vide sans rendu.
+  One machine frame: 154 scanlines, rendered if `render?`.
+  Returns `{pixels, state, ram}` — pixels is empty without rendering.
   """
   @spec frame(State.t(), binary(), map(), boolean()) :: {PPU.frame(), State.t(), map()}
   def frame(state, rom, ram, render?) do
@@ -124,32 +124,32 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  Une scanline de machine : LY avance, le vblank se lève à la ligne 144, le
-  CPU tourne 456 T-cycles, le timer les rattrape. La brique commune de toute
-  boucle de frame — Screen, le runner blargg, et la phase 3 un jour.
+  One machine scanline: LY advances, vblank rises at line 144, the CPU runs
+  456 T-cycles, the timer catches up with them. The common brick of every
+  frame loop — Screen, the blargg runner, and phase 3 one day.
   """
   @spec step_line(State.t(), binary(), map(), 0..153) :: {State.t(), map()}
   def step_line(state, rom, ram, ly) do
     lcd_on? = band(Map.get(ram, 0xFF40, 0x91), 0x80) != 0
     ram = ppu_line(ram, ly, lcd_on?)
 
-    # En double vitesse (KEY1, GBC), le CPU avale deux fois plus de cycles
-    # par scanline — le PPU, lui, garde son rythme.
+    # At double speed (KEY1, GBC) the CPU swallows twice as many cycles per
+    # scanline — the PPU keeps its own rhythm.
     budget = @line_cycles * Map.get(ram, :speed, 1)
     {state, ram, cycles} = CartLoop.run(state, rom, ram, budget)
 
-    # Le GDMA posé pendant la ligne se consomme aussitôt la ligne finie —
-    # au pire 456 cycles de retard sur le matériel, qui copie sur-le-champ.
+    # A GDMA posted during the line is consumed as soon as the line is done
+    # — at worst 456 cycles behind the hardware, which copies on the spot.
     ram = gdma(rom, ram)
     ram = hdma(rom, ram, ly, lcd_on?)
 
-    # Le câble link se résout à la scanline — la latence du vrai matériel.
+    # The link cable resolves at the scanline — real hardware latency.
     ram = if :erlang.is_map_key(:link, ram), do: Atomboy.Link.line(ram), else: ram
     {state, Atomboy.Timer.advance(ram, cycles)}
   end
 
-  # Le transfert général (GDMA) : posé par l'écriture de HDMA5, exécuté ici
-  # — la source peut être en ROM banquée, que seule cette boucle a en main.
+  # The general transfer (GDMA): posted by the write to HDMA5, executed here
+  # — the source may sit in banked ROM, which only this loop holds.
   defp gdma(rom, ram) do
     case Map.get(ram, :gdma) do
       nil ->
@@ -161,8 +161,8 @@ defmodule Atomboy.Screen do
     end
   end
 
-  # Le HDMA : un bloc de seize octets par HBlank de ligne visible, écran
-  # allumé. Fini, HDMA5 relit 0xFF.
+  # HDMA: one sixteen-byte block per HBlank of a visible line, screen on.
+  # Once finished, HDMA5 reads back as 0xFF.
   defp hdma(rom, ram, ly, lcd_on?) do
     case Map.get(ram, :hdma) do
       {src, dst, blocks} when lcd_on? and ly < @visible ->
@@ -185,17 +185,17 @@ defmodule Atomboy.Screen do
     end)
   end
 
-  # Écran éteint : le PPU ne balaye plus. LY reste à zéro, aucun vblank, aucune
-  # coïncidence — le matériel arrête le générateur, pas seulement l'affichage.
+  # Screen off: the PPU no longer scans. LY stays at zero, no vblank, no
+  # coincidence — the hardware stops the generator, not just the display.
   #
-  # C'est un piège à conséquences lointaines : les jeux éteignent l'écran pour
-  # recharger la VRAM (Pokémon le fait à chaque changement de carte, escaliers
-  # compris) et continuent d'appeler leur moteur sonore depuis la boucle
-  # principale, interruptions ouvertes. Un vblank fantôme rappelle alors ce
-  # moteur par-dessus lui-même : son compteur de canaux, partagé, repart de
-  # zéro, la boucle extérieure ne s'arrête plus à huit, son pointeur de
-  # structure marche jusque dans la pile, et le CPU finit par exécuter du
-  # texte de dialogue — l'opcode illégal E3, à des secondes de sa cause.
+  # This is a trap with far-reaching consequences: games turn the screen off
+  # to reload VRAM (Pokémon does it on every map change, staircases
+  # included) and keep calling their sound engine from the main loop, with
+  # interrupts open. A phantom vblank then re-enters that engine on top of
+  # itself: its shared channel counter restarts from zero, the outer loop no
+  # longer stops at eight, its structure pointer walks all the way into the
+  # stack, and the CPU ends up executing dialogue text — illegal opcode E3,
+  # seconds away from its cause.
   defp ppu_line(ram, _ly, false) do
     ram
     |> Map.put(0xFF44, 0)
@@ -205,9 +205,8 @@ defmodule Atomboy.Screen do
   defp ppu_line(ram, ly, true) do
     ram = Map.put(ram, 0xFF44, ly)
 
-    # L'entrée en vblank lève le bit 0 d'IF — l'interruption que les jeux
-    # attendent pour toucher la VRAM. Le service lui-même vit dans le fetch
-    # de la boucle.
+    # Entering vblank raises bit 0 of IF — the interrupt games wait for
+    # before touching VRAM. The servicing itself lives in the loop's fetch.
     ram =
       if ly == @visible do
         Map.update(ram, 0xFF0F, 0x01, &bor(&1, 0x01))
@@ -215,9 +214,9 @@ defmodule Atomboy.Screen do
         ram
       end
 
-    # La coïncidence LY=LYC : le bit 2 de STAT la reflète, et si le jeu a armé
-    # le bit 6, l'interruption STAT part — c'est l'outil des effets raster, et
-    # dmg-acid2 s'endormait dessus.
+    # The LY=LYC coincidence: bit 2 of STAT reflects it, and if the game has
+    # armed bit 6 the STAT interrupt fires — this is the tool of raster
+    # effects, and dmg-acid2 used to fall asleep on it.
     stat = Map.get(ram, 0xFF41, 0)
 
     if ly == Map.get(ram, 0xFF45, 0) do
@@ -234,8 +233,8 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  Charge une ROM : les petites sont complétées à 32 Ko ; les grandes gardent
-  leurs banques telles quelles, le MBC1 de CartLoop fait le reste.
+  Loads a ROM: small ones are padded to 32 KB; large ones keep their banks
+  as they are, and CartLoop's MBC1 does the rest.
   """
   @spec load(Path.t()) :: binary()
   def load(path) do
@@ -249,18 +248,18 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  La frame en texte pour le terminal : deux scanlines par rangée de
-  caractères, le demi-bloc `▀` portant la ligne du haut en avant-plan et
-  celle du bas en arrière-plan, quatre gris ANSI pour les quatre teintes.
+  The frame as text for the terminal: two scanlines per character row, the
+  half block `▀` carrying the top line as foreground and the bottom one as
+  background, four ANSI grays for the four shades.
 
-  La séquence de couleur n'est émise qu'au changement de paire — les aplats,
-  majoritaires sur une frame de jeu, coûtent un octet par cellule. C'est ce
-  qui laisse un terminal suivre 60 frames par seconde.
+  The color sequence is only emitted when the pair changes — flat areas,
+  which dominate a game frame, cost one byte per cell. That is what lets a
+  terminal keep up with 60 frames per second.
   """
-  @spec to_text(PPU.frame(), :gris | :dmg) :: String.t()
-  def to_text(frame, palette \\ :gris)
+  @spec to_text(PPU.frame(), :gray | :dmg) :: String.t()
+  def to_text(frame, palette \\ :gray)
 
-  # La frame couleur : demi-blocs en truecolor, via le RGB des palettes du jeu.
+  # The color frame: half blocks in truecolor, via the RGB of the game's palettes.
   def to_text(frame, palette) when byte_size(frame) == 2 * 160 * 144 do
     rgb = to_rgb(frame, palette)
     {width, height} = PPU.dimensions()
@@ -317,26 +316,25 @@ defmodule Atomboy.Screen do
     IO.iodata_to_binary(rows)
   end
 
-  # Les teintes précompilées en paramètres SGR : 256 couleurs pour les gris,
-  # truecolor pour le vert de la dalle DMG d'origine.
-  defp colors(:gris), do: {"5;255", "5;250", "5;243", "5;236"}
+  # The shades precompiled as SGR parameters: 256 colors for the grays,
+  # truecolor for the green of the original DMG panel.
+  defp colors(:gray), do: {"5;255", "5;250", "5;243", "5;236"}
 
   defp colors(:dmg) do
     {"2;155;188;15", "2;139;172;15", "2;48;98;48", "2;15;56;15"}
   end
 
   @doc """
-  La frame en protocole graphique kitty : une vraie image dans le terminal.
+  The frame in the kitty graphics protocol: a real image in the terminal.
 
-  Le pixel de la DMG devient un pixel RGB transmis en APC (`ESC _ G … ESC \\`),
-  zlib puis base64 — une frame à quatre teintes se compresse en ~2 Ko. Le
-  placement `r=` laisse le terminal choisir la largeur en gardant le rapport
-  d'aspect ; `C=1` cloue le curseur ; `q=2` fait taire les accusés de
-  réception. Deux identifiants alternent en double tampon : la nouvelle image
-  se pose par-dessus l'ancienne, qui n'est effacée qu'ensuite — pas de trou,
-  pas de scintillement.
+  The DMG pixel becomes an RGB pixel transmitted in APC (`ESC _ G … ESC \\`),
+  zlib then base64 — a four-shade frame compresses down to ~2 KB. The `r=`
+  placement lets the terminal pick the width while keeping the aspect ratio;
+  `C=1` nails the cursor down; `q=2` silences the acknowledgements. Two ids
+  alternate as a double buffer: the new image lands on top of the old one,
+  which is only erased afterwards — no gap, no flicker.
   """
-  @spec to_kitty(PPU.frame(), :gris | :dmg, pos_integer(), pos_integer()) :: iodata()
+  @spec to_kitty(PPU.frame(), :gray | :dmg, pos_integer(), pos_integer()) :: iodata()
   def to_kitty(frame, palette, id, rows) do
     payload = frame |> to_rgb(palette) |> :zlib.compress() |> Base.encode64()
 
@@ -359,11 +357,11 @@ defmodule Atomboy.Screen do
   end
 
   @doc """
-  La frame en RGB 24 bits — trois octets par pixel. Une frame DMG (un octet
-  par pixel) passe par la palette choisie ; une frame couleur (RGB555, deux
-  octets par pixel) s'étend en RGB888, la palette du jeu faisant foi.
+  The frame in 24-bit RGB — three bytes per pixel. A DMG frame (one byte per
+  pixel) goes through the chosen palette; a color frame (RGB555, two bytes
+  per pixel) expands to RGB888, the game's own palette being authoritative.
   """
-  @spec to_rgb(PPU.frame(), :gris | :dmg) :: binary()
+  @spec to_rgb(PPU.frame(), :gray | :dmg) :: binary()
   def to_rgb(frame, palette) when byte_size(frame) == 160 * 144 do
     rgb = rgb_palette(palette)
     for <<shade <- frame>>, into: <<>>, do: elem(rgb, shade)
@@ -375,22 +373,22 @@ defmodule Atomboy.Screen do
     end
   end
 
-  # 5 bits étendus à 8 : les bits hauts recopiés en bas, l'échelle exacte.
+  # 5 bits widened to 8: the high bits copied into the low ones, exact scale.
   defp x8(v), do: bsl(v, 3) ||| bsr(v, 2)
 
-  # Le protocole plafonne les tronçons de charge utile à 4096 octets.
+  # The protocol caps payload chunks at 4096 bytes.
   defp chunks(<<chunk::binary-size(4096), rest::binary>>), do: [chunk | chunks(rest)]
   defp chunks(last), do: [last]
 
-  # Les quatre teintes en RGB : le vert de la dalle d'origine, ou les gris.
+  # The four shades in RGB: the original panel's green, or the grays.
   defp rgb_palette(:dmg),
     do: {<<0x9B, 0xBC, 0x0F>>, <<0x8B, 0xAC, 0x0F>>, <<0x30, 0x62, 0x30>>, <<0x0F, 0x38, 0x0F>>}
 
-  defp rgb_palette(:gris),
+  defp rgb_palette(:gray),
     do: {<<0xFF, 0xFF, 0xFF>>, <<0xAA, 0xAA, 0xAA>>, <<0x55, 0x55, 0x55>>, <<0x00, 0x00, 0x00>>}
 
   @doc """
-  La frame en PGM binaire (P5) — lisible par tout visionneur d'images.
+  The frame as binary PGM (P5) — readable by any image viewer.
   """
   @spec to_pgm(PPU.frame()) :: binary()
   def to_pgm(frame) when byte_size(frame) == 160 * 144 do
@@ -400,7 +398,7 @@ defmodule Atomboy.Screen do
     "P5\n#{width} #{height}\n255\n" <> pixels
   end
 
-  # La frame couleur en PPM (P6) — la vraie couleur, lisible partout.
+  # The color frame as PPM (P6) — true color, readable everywhere.
   def to_pgm(frame) do
     {width, height} = PPU.dimensions()
     "P6\n#{width} #{height}\n255\n" <> to_rgb(frame, :dmg)

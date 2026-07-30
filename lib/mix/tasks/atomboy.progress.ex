@@ -1,25 +1,24 @@
 defmodule Mix.Tasks.Atomboy.Progress do
-  @shortdoc "Affiche la couverture du décodeur SM83"
+  @shortdoc "Shows SM83 decoder coverage"
 
   @moduledoc """
-  Où en est le décodeur, opcode par opcode.
+  Where the decoder stands, opcode by opcode.
 
       mix atomboy.progress
 
-  Une grille 16×16 par table. `#` implémenté, `·` restant, `×` encodage
-  invalide sur le SM83, `»` le préfixe de la table étendue.
+  A 16×16 grid per table. `#` implemented, `·` remaining, `×` invalid encoding
+  on the SM83, `»` the prefix of the extended table.
 
-  L'intérêt de la grille sur un simple pourcentage : la table SM83 est régulière
-  par blocs, donc les trous se lisent par familles. Une colonne entière vide,
-  c'est un `z` non traité — une famille à générer d'un coup, pas huit opcodes à
-  écrire.
+  What the grid gives over a plain percentage: the SM83 table is regular in
+  blocks, so the holes read as families. A whole empty column is an unhandled
+  `z` — one family to generate in a single pass, not eight opcodes to write.
   """
 
   use Mix.Task
 
   alias Mix.Tasks.Atomboy.Corpus
 
-  @tables [{nil, "Table de base"}, {:cb, "Table CB"}]
+  @tables [{nil, "Base table"}, {:cb, "CB table"}]
 
   @impl true
   def run(_args) do
@@ -32,7 +31,7 @@ defmodule Mix.Tasks.Atomboy.Progress do
 
     if is_nil(valid) do
       Mix.shell().info(
-        "\nCorpus absent — encodages invalides non distingués. `mix atomboy.corpus`"
+        "\nCorpus missing — invalid encodings not singled out. `mix atomboy.corpus`"
       )
     end
   end
@@ -40,8 +39,8 @@ defmodule Mix.Tasks.Atomboy.Progress do
   defp render({prefix, title}, implemented, valid) do
     done = Enum.count(implemented, fn {p, _op} -> p == prefix end)
 
-    # Le dénominateur, c'est ce qu'il y a à écrire — donc les vecteurs du corpus
-    # plus, pour la table de base, le dispatcher de préfixe qui n'en a pas.
+    # The denominator is what there is to write — so the corpus vectors plus,
+    # for the base table, the prefix dispatcher that has none.
     total =
       cond do
         is_nil(valid) -> 256

@@ -1,8 +1,8 @@
 #!/bin/sh
-# La Game Boy dans le terminal.
+# The Game Boy in the terminal.
 #
-# -noinput éteint le lecteur interne du BEAM (prim_tty), qui sinon lit le
-# terminal en permanence et vole un octet sur trois au clavier du jeu —
-# fatal aux séquences de flèches. Mesuré par scripts/probe_clavier2.exs :
-# 0/301 octets reçus sans -noinput, 301/301 avec.
+# -noinput switches off the BEAM's own tty reader (prim_tty), which otherwise
+# reads the terminal non-stop and steals one byte in three from the game's
+# keyboard — fatal to arrow sequences. Measured by scripts/probe_clavier2.exs:
+# 0/301 bytes received without -noinput, 301/301 with it.
 exec env ELIXIR_ERL_OPTIONS="-noinput $ELIXIR_ERL_OPTIONS" mix atomboy.play "$@"

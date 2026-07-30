@@ -39,6 +39,48 @@ MBCs, link cable) is plain immutable Elixir on top of it.
 - **Single-file binaries** — Burrito wraps the app and the BEAM into one
   executable per platform. No Erlang required to play.
 
+## Potion — writing Game Boy games in Elixir
+
+<p align="center"><img src="docs/potion.gif" width="320" alt="A Potion-compiled square walking around under d-pad control"></p>
+
+Atomboy now runs in both directions. **Potion** is a language in the
+lineage of Andy Gavin's GOOL (the Lisp that Crash Bandicoot was written
+in): the surface is Elixir, the semantics are the console's, and the
+output is a real 32 KB cartridge — header, Nintendo logo, checksums —
+that runs in atomboy or on hardware via flashcart:
+
+```elixir
+defmodule Hero do
+  use Potion
+
+  defactor :hero do
+    variables x: 80, y: 72
+
+    every_frame do
+      if pressed?(:right), do: x = x + 1
+      if pressed?(:left), do: x = x - 1
+      if pressed?(:up), do: y = y - 1
+      if pressed?(:down), do: y = y + 1
+      sprite(0, x: x, y: y, tile: 0)
+    end
+  end
+end
+```
+
+`mix run games/hero.exs` compiles that into `games/hero.gb` — the GIF
+above is that ROM, running in atomboy. Variables are WRAM cells,
+`x = x + 1` is three SM83 instructions that wrap at 255, and anything
+the console cannot do is refused at `mix compile` time with a message
+that explains what Potion knows. The assembler is derived from the same
+instruction table as the emulator's decoder, so the two can never
+disagree; the emulator is the compiler's test harness, down to
+pixel-exact assertions on the rendered frame.
+
+The machinery lives under `lib/potion/` — the reversed instruction
+table (`Potion.Assembleur`), the cartridge builder (`Potion.ROM`), a
+GOOL-style kernel with a vblank heartbeat, OAM DMA from HRAM and one
+actor slot (`Potion.Noyau`), and the macro compiler (`Potion.Compilo`).
+
 ## Installing
 
 On macOS, Homebrew has both the app and the CLI binary:
@@ -54,7 +96,7 @@ Or grab a binary from the
 
 ## Playing
 
-On macOS, the nicest way is the native app — `bin/build --vite --app`
+On macOS, the nicest way is the native app — `bin/build --fast --app`
 produces `burrito_out/Atomboy.app`: a SwiftUI shell (full-bleed pixels
 under the window's rounded corners, a Liquid Glass hover HUD, sound
 through AVAudioEngine — no ffplay needed) driving the BEAM engine over a
@@ -66,7 +108,7 @@ Everywhere else (and for the terminal aficionados), the standalone binary:
 
 ```sh
 atomboy game.gb                 # terminal renderer
-atomboy game.gbc --fenetre      # native window (wxWidgets)
+atomboy game.gbc --window      # native window (wxWidgets)
 ```
 
 | Key | | Key | |
@@ -87,11 +129,11 @@ Useful options:
 
 | Option | |
 |---|---|
-| `--fenetre` | native window instead of the terminal |
-| `--palette gris` | neutral grays instead of the DMG green |
+| `--window` | native window instead of the terminal |
+| `--palette gray` | neutral grays instead of the DMG green |
 | `--dmg` | force original Game Boy mode for CGB-flagged ROMs |
-| `--sauvegarde <name>` | save profile — own `.sav`/`.state` per player |
-| `--son` / `--no-son` | force sound on/off |
+| `--save <name>` | save profile — own `.sav`/`.state` per player |
+| `--sound` / `--no-sound | force sound on/off |
 | `--codes 01FF16D1,…` | GameShark codes, applied every frame |
 
 Sound needs `ffplay` (ships with ffmpeg) on the PATH; without it the game
@@ -102,11 +144,11 @@ plays silently.
 One side listens, the other calls:
 
 ```sh
-atomboy argent.gbc --fenetre --ecoute            # waits on port 7373
-atomboy argent.gbc --fenetre --lien host:7373    # connects
+atomboy argent.gbc --window --listen            # waits on port 7373
+atomboy argent.gbc --window --link host:7373    # connects
 ```
 
-Use `--sauvegarde` on both sides if they share the same ROM file. Turbo is
+Use `--save` on both sides if they share the same ROM file. Turbo is
 unavailable while the cable is plugged — the protocol is a paced duet.
 
 ## Building
@@ -125,7 +167,7 @@ Natively (needs Elixir 1.18/OTP 26, `xz`, and zig 0.16.0 — installed via
 
 ```sh
 bin/build                # tests, then binaries in burrito_out/
-bin/build --vite         # skip the tests
+bin/build --fast         # skip the tests
 bin/build --install      # also copy to ~/.local/bin/atomboy
 bin/build --app          # also assemble Atomboy.app (macOS, needs swiftc)
 ```

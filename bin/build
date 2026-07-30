@@ -1,85 +1,87 @@
 #!/bin/sh
-# Le build des exécutables atomboy, en une commande.
+# The atomboy executables, built in one command.
 #
-#     bin/build              tests puis binaires dans burrito_out/
-#     bin/build --vite       sans les tests
-#     bin/build --install    + copie vers ~/.local/bin/atomboy
-#     bin/build --app        + Atomboy.app (coquille SwiftUI native)
-#     bin/build --menage     purge les caches d'extraction (jeu fermé !)
+#     bin/build              tests, then binaries in burrito_out/
+#     bin/build --fast       skip the tests
+#     bin/build --install    + copy to ~/.local/bin/atomboy
+#     bin/build --app        + Atomboy.app (native SwiftUI shell)
+#     bin/build --clean      purge the extraction caches (close the game first!)
 #
-# Sous le capot : Burrito exige zig 0.16.0 (mise l'installe au besoin),
-# la release se construit en prod, et les vieux caches d'extraction
-# (~/Library/Application Support/.burrito/atomboy_*) sont purgés — la
-# version porte le SHA du commit, chaque build a sa clé, les anciennes
-# ne servent plus.
+# Under the hood: Burrito requires zig 0.16.0 (mise installs it if needed),
+# the release is built in prod, and the stale extraction caches
+# (~/Library/Application Support/.burrito/atomboy_*) are purged — the
+# version carries the commit SHA, every build has its own key, so the old
+# ones are of no further use.
 set -e
 cd "$(dirname "$0")/.."
 
 ZIG=zig@0.16.0
-vite=false
+fast=false
 install=false
-menage=false
+clean=false
 app=false
 for arg in "$@"; do
   case "$arg" in
-    --vite) vite=true ;;
+    --vite|--fast) fast=true ;;
     --install) install=true ;;
-    --menage) menage=true ;;
+    --menage|--clean) clean=true ;;
     --app) app=true ;;
-    *) echo "option inconnue : $arg" >&2; exit 2 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
-command -v xz > /dev/null || { echo "xz manquant (brew install xz)" >&2; exit 1; }
+command -v xz > /dev/null || { echo "xz missing (brew install xz)" >&2; exit 1; }
 mise which zig --tool-version "$ZIG" > /dev/null 2>&1 || mise install "$ZIG"
 
-if ! $vite; then
+if ! $fast; then
   echo "── tests ──"
   mix test
 fi
 
 echo "── release ──"
-# Burrito suffixe (« atomboy_macos_arm 2 ») au lieu d'écraser : table rase.
+# Burrito suffixes ("atomboy_macos_arm 2") instead of overwriting: clean slate.
 rm -rf burrito_out
 MIX_ENV=prod mise exec "$ZIG" -- mix release --overwrite
 
-if $menage; then
-  # Jamais par défaut : purger le cache d'une partie EN COURS arrache ses
-  # fichiers au BEAM — modules introuvables, crash illisible (vécu).
-  echo "── ménage ──"
+if $clean; then
+  # Never by default: purging the cache of a RUNNING game tears its files
+  # away from the BEAM — modules not found, unreadable crash (learned the
+  # hard way).
+  echo "── clean ──"
   rm -rf "$HOME/Library/Application Support/.burrito/atomboy_"*
-  echo "caches d'extraction purgés (ils renaissent au premier lancement)"
+  echo "extraction caches purged (they come back on the next launch)"
 fi
 
 if $app; then
-  # La .app macOS : la coquille SwiftUI (rel/macos/Atomboy.swift) devant,
-  # le binaire Burrito en moteur --serveur derrière. Signature ad hoc —
-  # obligatoire sur Apple Silicon, et suffisante en local.
+  # The macOS .app: the SwiftUI shell (rel/macos/Atomboy.swift) up front,
+  # the Burrito binary as the `--serveur` engine behind it. Ad hoc signature —
+  # mandatory on Apple Silicon, and enough locally.
   echo "── Atomboy.app ──"
   version=$(mix run --no-start -e 'IO.write(Atomboy.MixProject.project()[:version])' 2>/dev/null | tail -1)
-  # Assemblage et signature dans /tmp : sous un dossier synchronisé
-  # (iCloud Documents…), le file provider restampe des xattrs en continu
-  # et codesign refuse (« detritus ») — hors de sa portée, puis déplacé.
-  contenu=/tmp/Atomboy.app/Contents
+  # Assembled and signed in /tmp: under a synced folder (iCloud Documents…),
+  # the file provider keeps restamping xattrs and codesign refuses
+  # ("detritus") — so out of its reach, then moved.
+  content=/tmp/Atomboy.app/Contents
   rm -rf /tmp/Atomboy.app burrito_out/Atomboy.app
-  mkdir -p "$contenu/MacOS" "$contenu/Resources"
-  # « atomboy-moteur », pas « atomboy » : APFS est insensible à la casse —
-  # « atomboy » écraserait la coquille « Atomboy » (vécu).
-  cp burrito_out/atomboy_macos_arm "$contenu/MacOS/atomboy-moteur"
-  swiftc -O -parse-as-library -target arm64-apple-macos14.0 -o "$contenu/MacOS/Atomboy" rel/macos/Atomboy.swift 2> /dev/null
-  python3 rel/macos/icone.py "$contenu/Resources/Atomboy.icns"
-  sed "s/VERSION_ATOMBOY/$version/g" rel/macos/Info.plist > "$contenu/Info.plist"
+  mkdir -p "$content/MacOS" "$content/Resources"
+  # "atomboy-moteur", not "atomboy": APFS is case-insensitive — "atomboy"
+  # would clobber the "Atomboy" shell (learned the hard way). The name is
+  # baked into rel/macos/Atomboy.swift too.
+  cp burrito_out/atomboy_macos_arm "$content/MacOS/atomboy-moteur"
+  swiftc -O -parse-as-library -target arm64-apple-macos14.0 -o "$content/MacOS/Atomboy" rel/macos/Atomboy.swift 2> /dev/null
+  python3 rel/macos/icon.py "$content/Resources/Atomboy.icns"
+  sed "s/VERSION_ATOMBOY/$version/g" rel/macos/Info.plist > "$content/Info.plist"
   xattr -cr /tmp/Atomboy.app
   codesign --force --deep --sign - /tmp/Atomboy.app 2> /dev/null
   mv /tmp/Atomboy.app burrito_out/Atomboy.app
-  echo "  burrito_out/Atomboy.app (glisser dans /Applications)"
+  echo "  burrito_out/Atomboy.app (drag it into /Applications)"
 fi
 
-echo "── binaires ──"
+echo "── binaries ──"
 ls -lh burrito_out/ | awk 'NR > 1 {print "  " $NF " (" $5 ")"}'
 
 if $install; then
   mkdir -p "$HOME/.local/bin"
   cp burrito_out/atomboy_macos_arm "$HOME/.local/bin/atomboy"
-  echo "installé : ~/.local/bin/atomboy"
+  echo "installed: ~/.local/bin/atomboy"
 fi

@@ -1,44 +1,44 @@
 defmodule Atomboy.Play.Input do
   @moduledoc """
-  Le clavier du terminal, décodé en événements de touches Game Boy.
+  The terminal keyboard, decoded into Game Boy key events.
 
-  Le décodeur est un repli pur sur un tampon d'octets bruts : il consomme ce
-  qu'il reconnaît, rend des événements, et garde en reste tout préfixe de
-  séquence encore incomplet (une flèche peut arriver coupée en deux
-  lectures).
+  The decoder is a pure fold over a buffer of raw bytes: it consumes what
+  it recognises, returns events, and keeps as leftover any escape-sequence
+  prefix that is still incomplete (an arrow can arrive split across two
+  reads).
 
-  ## Deux mondes de terminaux
+  ## Two worlds of terminals
 
-  Un terminal classique n'envoie que des *frappes* — lettres telles quelles,
-  flèches en `ESC [ A` — jamais les relâchements ; et macOS ne répète que la
-  dernière touche enfoncée. Impossible d'y tenir une diagonale. Ces
-  encodages deviennent `{:key, touche}` : une frappe au relâchement inconnu,
-  que la boucle transforme en pression tenue quelques frames.
+  A classic terminal sends only *keystrokes* — letters as they are, arrows
+  as `ESC [ A` — never releases; and macOS only auto-repeats the last key
+  pressed. Holding a diagonal there is impossible. Those encodings become
+  `{:key, key}`: a keystroke whose release is unknown, which the loop turns
+  into a press held for a few frames.
 
-  Le protocole clavier kitty (Ghostty, kitty, WezTerm…) envoie lui les
-  événements complets — presse, répétition, relâchement, pour chaque touche :
+  The kitty keyboard protocol (Ghostty, kitty, WezTerm…) sends the full
+  events instead — press, repeat, release, for every key:
 
-      CSI code ; mods [: événement] u        lettres et touches nommées
-      CSI 1 ; mods [: événement] A…D         flèches (presse nue : ESC [ A)
+      CSI code ; mods [: event] u        letters and named keys
+      CSI 1 ; mods [: event] A…D         arrows (bare press: ESC [ A)
 
-  événement 1 = presse, 2 = répétition, 3 = relâchement. Ils deviennent
-  `{:press | :repeat | :release, touche}` : l'état réel du clavier, les
-  diagonales et les accords A+direction avec. La réponse `CSI ? … u` à la
-  requête d'activation devient `{:kitty, flags}` — le signe que le terminal
-  parle le protocole.
+  event 1 = press, 2 = repeat, 3 = release. Those become
+  `{:press | :repeat | :release, key}`: the real state of the keyboard,
+  diagonals and A+direction chords included. The `CSI ? … u` answer to the
+  activation request becomes `{:kitty, flags}` — the sign that the terminal
+  speaks the protocol.
 
-  ## La disposition
+  ## The layout
 
-      flèches          la croix
-      x                A            (x et c : voisines en QWERTY comme en AZERTY)
+      arrows           the d-pad
+      x                A            (x and c: neighbours on QWERTY and AZERTY alike)
       c                B
-      Entrée           Start
-      Espace           Select
-      s / r            sauver / reprendre l'état
-      Retour arrière   rembobiner (tenir)
-      Tab              turbo (avance rapide)
+      Enter            Start
+      Space            Select
+      s / r            save / load state
+      Backspace        rewind (hold)
+      Tab              turbo (fast forward)
       p                pause
-      q, Échap (kitty) ou Ctrl-C    quitter
+      q, Escape (kitty) or Ctrl-C    quit
   """
 
   import Bitwise
@@ -69,14 +69,14 @@ defmodule Atomboy.Play.Input do
 
   @arrows %{?A => :up, ?B => :down, ?C => :right, ?D => :left}
 
-  # Codes CSI-u : le point de code de la touche, minuscule.
+  # CSI-u codes: the key's code point, lowercase.
   @codes %{
     ?x => :a,
     ?c => :b,
     13 => :start,
     ?\s => :select,
     ?q => :quit,
-    # Échap ouvre le menu — quitter vit sur q et dans le menu.
+    # Escape opens the menu — quitting lives on q and in the menu.
     27 => :menu,
     ?m => :menu,
     ?s => :save_state,
@@ -97,13 +97,14 @@ defmodule Atomboy.Play.Input do
   }
 
   @doc """
-  Décode le tampon en événements. Renvoie `{événements, reste}` — le reste
-  est un début de séquence d'échappement à compléter à la prochaine lecture.
+  Decodes the buffer into events. Returns `{events, leftover}` — the
+  leftover is the start of an escape sequence, to be completed on the next
+  read.
   """
   @spec decode(binary()) :: {[event()], binary()}
   def decode(buffer), do: decode(buffer, [])
 
-  # CSI : ESC [ paramètres octet-final. Les paramètres restent dans 0x20-0x3F.
+  # CSI: ESC [ params final-byte. The parameters stay within 0x20-0x3F.
   defp decode(<<"\e[", rest::binary>> = all, events) do
     case csi(rest, "") do
       {params, final, rest} -> decode(rest, csi_events(params, final) ++ events)
@@ -111,8 +112,8 @@ defmodule Atomboy.Play.Input do
     end
   end
 
-  # APC : ESC _ … ESC \ — les réponses du protocole graphique kitty.
-  # « OK » après le point-virgule = le terminal sait afficher des images.
+  # APC: ESC _ … ESC \ — the answers of the kitty graphics protocol.
+  # "OK" after the semicolon = the terminal can display images.
   defp decode(<<"\e_", rest::binary>> = all, events) do
     case :binary.split(rest, "\e\\") do
       [payload, rest] ->
@@ -124,17 +125,17 @@ defmodule Atomboy.Play.Input do
     end
   end
 
-  # SS3 : ESC O lettre — les flèches du mode application.
+  # SS3: ESC O letter — the arrows of application mode.
   defp decode(<<?\e, ?O, final, rest::binary>>, events) when is_map_key(@arrows, final),
     do: decode(rest, [{:key, @arrows[final]} | events])
 
-  # Une séquence coupée en plein vol : attendre la suite.
+  # A sequence cut off mid-flight: wait for the rest.
   defp decode(<<?\e, o>>, events) when o in ~c"[O_", do: {Enum.reverse(events), <<?\e, o>>}
   defp decode(<<"\e">>, events), do: {Enum.reverse(events), "\e"}
-  # SS3 sans flèche au bout : le préfixe s'avale, la suite se décode.
+  # SS3 with no arrow at the end: swallow the prefix, decode the rest.
   defp decode(<<?\e, ?O, rest::binary>>, events), do: decode(rest, events)
-  # Échappement qui n'ouvre pas de séquence : c'est la touche Échap — le
-  # menu. L'octet suivant se décode normalement derrière elle.
+  # An escape that opens no sequence: that is the Escape key — the menu.
+  # The next byte decodes normally behind it.
   defp decode(<<"\e", rest::binary>>, events), do: decode(rest, [{:key, :menu} | events])
 
   defp decode(<<c, rest::binary>>, events) when c in [?x, ?X],
@@ -171,11 +172,11 @@ defmodule Atomboy.Play.Input do
   defp decode(<<c, rest::binary>>, events) when c in ?1..?9,
     do: decode(rest, [{:key, {:slot, c - ?0}} | events])
 
-  # Tout le reste du clavier : silence.
+  # Everything else on the keyboard: silence.
   defp decode(<<_, rest::binary>>, events), do: decode(rest, events)
   defp decode(<<>>, events), do: {Enum.reverse(events), ""}
 
-  # ── La séquence CSI, découpée ───────────────────────────────────────────────
+  # ── The CSI sequence, taken apart ───────────────────────────────────────────
 
   defp csi(<<c, rest::binary>>, params) when c in ?0..?9 or c in ~c";:?",
     do: csi(rest, <<params::binary, c>>)
@@ -186,17 +187,17 @@ defmodule Atomboy.Play.Input do
   defp csi(<<>>, _params), do: :partial
   defp csi(_other, _params), do: :partial
 
-  # ── Les événements d'une séquence ───────────────────────────────────────────
+  # ── The events of a sequence ────────────────────────────────────────────────
 
-  # Flèche nue : une frappe, régime inconnu — la boucle tranche.
+  # Bare arrow: a keystroke, regime unknown — the loop decides.
   defp csi_events("", final) when is_map_key(@arrows, final), do: [{:key, @arrows[final]}]
 
-  # Flèche paramétrée : « 1;mods:événement » — le protocole kitty.
+  # Parameterised arrow: "1;mods:event" — the kitty protocol.
   defp csi_events(params, final) when is_map_key(@arrows, final) do
     tag(parse_event(params), @arrows[final])
   end
 
-  # CSI-u : « code;mods:événement u » — chaque touche du protocole kitty.
+  # CSI-u: "code;mods:event u" — every key of the kitty protocol.
   defp csi_events(<<??, params::binary>>, ?u), do: [{:kitty, flags(params)}]
 
   defp csi_events(params, ?u) do
@@ -218,7 +219,7 @@ defmodule Atomboy.Play.Input do
   defp tag(3, key), do: [{:release, key}]
   defp tag(_, _key), do: []
 
-  # L'événement vit après le « : » du champ modificateurs ; absent = presse.
+  # The event lives after the ":" of the modifier field; absent = press.
   defp parse_event(params) do
     case String.split(params, ":") do
       [_, event | _] ->
@@ -232,7 +233,7 @@ defmodule Atomboy.Play.Input do
     end
   end
 
-  # Modificateurs = 1 + masque ; Ctrl = bit 4.
+  # Modifiers = 1 + mask; Ctrl = bit 4.
   defp ctrl?([mods | _]) do
     case Integer.parse(mods) do
       {n, _} -> (n - 1 &&& 4) != 0
@@ -250,8 +251,8 @@ defmodule Atomboy.Play.Input do
   end
 
   @doc """
-  Le quartet d'une nappe depuis l'ensemble des touches tenues — à 1 = relâché,
-  comme les lignes du registre.
+  The nibble of one line group from the set of held keys — 1 = released,
+  just like the register's lines.
   """
   @spec dpad_lines(Enumerable.t(key())) :: 0..15
   def dpad_lines(held) do

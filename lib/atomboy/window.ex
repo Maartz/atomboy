@@ -1,26 +1,25 @@
 defmodule Atomboy.Window do
   @moduledoc """
-  La Game Boy dans une vraie fenêtre — wxWidgets, livré avec OTP.
+  The Game Boy in a real window — wxWidgets, shipped with OTP.
 
-  La fenêtre efface d'un coup toutes les conquêtes durement gagnées du
-  terminal : pas de pty à retrouver par `ps`, pas de `-noinput`, pas de
-  protocole clavier à négocier — wx livre les **vrais** événements
-  presse/relâchement de chaque touche. L'état du clavier est exact par
-  construction, les diagonales aussi.
+  The window wipes out in one stroke every hard-won conquest of the
+  terminal: no pty to track down through `ps`, no `-noinput`, no keyboard
+  protocol to negotiate — wx delivers the **real** press/release events of
+  every key. The keyboard state is exact by construction, and so are the
+  diagonals.
 
-  ## L'architecture
+  ## The architecture
 
-  La boucle de jeu vit dans le processus qui a créé la fenêtre : les
-  événements wx arrivent dans sa boîte aux lettres, drainés à chaque frame
-  comme le clavier du terminal. Le rendu passe par une table ETS : la
-  boucle y dépose le RGB de la frame et demande un rafraîchissement ; le
-  *callback* de peinture — exécuté par le thread wx, jamais bloqué par la
-  boucle — le lit, le met à l'échelle de la fenêtre (au plus proche voisin :
-  du pixel net, pas du flou) et le dessine.
+  The game loop lives in the process that created the window: wx events
+  arrive in its mailbox, drained every frame just like the terminal's
+  keyboard. Rendering goes through an ETS table: the loop drops the frame's
+  RGB there and asks for a refresh; the paint *callback* — run by the wx
+  thread, never blocked by the loop — reads it, scales it to the window
+  (nearest neighbour: crisp pixels, not blur) and draws it.
 
-  Mêmes touches qu'au terminal : flèches, x/c, Entrée, Espace, s/r état,
-  Tab turbo, p pause, q ou Échap pour quitter — et la croix de la fenêtre.
-  Le son garde ffplay. La ligne de statut devient le titre de la fenêtre.
+  Same keys as in the terminal: arrows, x/c, Enter, Space, s/r state, Tab
+  turbo, p pause, q or Escape to quit — plus the window's close button.
+  Sound still goes through ffplay. The status line becomes the window title.
   """
 
   alias Atomboy.APU
@@ -41,10 +40,10 @@ defmodule Atomboy.Window do
 
   @frame_us 16_742
   @scale 3
-  # wxWANTS_CHARS : sans lui, les flèches servent à naviguer les widgets.
+  # wxWANTS_CHARS: without it, the arrows navigate between widgets.
   @wants_chars 0x00040000
 
-  # WXK_LEFT..WXK_DOWN, et les lettres en majuscules — les codes wx.
+  # WXK_LEFT..WXK_DOWN, and the letters in capitals — the wx codes.
   @keys %{
     314 => :left,
     315 => :up,
@@ -54,39 +53,39 @@ defmodule Atomboy.Window do
     ?C => :b,
     13 => :start,
     ?\s => :select,
-    # WXK_BACK : Retour arrière — le rembobinage, tenu.
+    # WXK_BACK: Backspace — rewinding, held down.
     8 => :rewind
   }
   @actions %{?S => :save_state, ?R => :load_state, 9 => :turbo, ?P => :pause}
-             |> Map.merge(for n <- 1..9, into: %{}, do: {?0 + n, {:slot, n}})
-             # Échap et M ouvrent le menu — quitter vit sur Q et dans le menu.
-             |> Map.merge(%{27 => :menu, ?M => :menu})
+           |> Map.merge(for n <- 1..9, into: %{}, do: {?0 + n, {:slot, n}})
+           # Escape and M open the menu — quitting lives on Q and in the menu.
+           |> Map.merge(%{27 => :menu, ?M => :menu})
   @quits [?Q]
 
-  @doc "Joue `rom_path` dans une fenêtre. Mêmes options que le terminal."
+  @doc "Plays `rom_path` in a window. Same options as the terminal."
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
+    sav = Save.path(rom_path, Keyword.get(opts, :save))
 
     link =
       cond do
-        port = Keyword.get(opts, :ecoute) ->
+        port = Keyword.get(opts, :listen) ->
           case Link.listen(port) do
             {:ok, l} -> l
-            {:error, m} -> throw({:lien, m})
+            {:error, m} -> throw({:link, m})
           end
 
-        lien = Keyword.get(opts, :lien) ->
+        target = Keyword.get(opts, :link) ->
           {host, port} =
-            case String.split(lien, ":") do
+            case String.split(target, ":") do
               [h, p] -> {h, String.to_integer(p)}
               [h] -> {h, Link.default_port()}
             end
 
           case Link.connect(host, port) do
             {:ok, l} -> l
-            {:error, m} -> throw({:lien, m})
+            {:error, m} -> throw({:link, m})
           end
 
         true ->
@@ -107,7 +106,7 @@ defmodule Atomboy.Window do
     :wxFrame.show(frame_w)
     :wxWindow.setFocus(panel)
 
-    audio = if Keyword.get(opts, :son, true), do: Audio.open()
+    audio = if Keyword.get(opts, :sound, true), do: Audio.open()
 
     ctx = %{
       state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
@@ -123,7 +122,7 @@ defmodule Atomboy.Window do
       palette: Keyword.get(opts, :palette, :dmg),
       down: MapSet.new(),
       audio: audio,
-      son?: audio != nil,
+      sound?: audio != nil,
       apu: %APU{},
       frame: 0,
       max_frames: Keyword.get(opts, :frames, :infinity),
@@ -152,10 +151,10 @@ defmodule Atomboy.Window do
 
     :ok
   catch
-    {:lien, message} -> {:error, message}
+    {:link, message} -> {:error, message}
   end
 
-  # ── La boucle ───────────────────────────────────────────────────────────────
+  # ── The loop ────────────────────────────────────────────────────────────────
 
   defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: finish(ctx)
 
@@ -168,12 +167,12 @@ defmodule Atomboy.Window do
     end
   end
 
-  # Menu ouvert : la machine dort, la dernière frame porte le menu en
-  # surimpression — même rendu que le jeu, le peintre n'en sait rien.
+  # Menu open: the machine sleeps, and the last frame carries the menu as an
+  # overlay — same rendering as the game, the painter knows nothing of it.
   defp menu_idle(ctx) do
     if ctx.last_frame do
-      composée = Menu.render(ctx.menu, ctx.last_frame)
-      :ets.insert(ctx.table, {:frame, Screen.to_rgb(composée, ctx.palette)})
+      composed = Menu.render(ctx.menu, ctx.last_frame)
+      :ets.insert(ctx.table, {:frame, Screen.to_rgb(composed, ctx.palette)})
       :wxWindow.refresh(ctx.panel, eraseBackground: false)
     end
 
@@ -181,8 +180,8 @@ defmodule Atomboy.Window do
     loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
   end
 
-  # Un pas en arrière : dépiler un instantané (dix frames de jeu), le
-  # dessiner tel quel — la machine ne tourne pas, le temps recule.
+  # One step backwards: pop a snapshot (ten frames of play) and draw it as
+  # it stands — the machine is not running, time is going back.
   defp rewind_step(ctx) do
     ctx =
       case ctx.history do
@@ -196,7 +195,7 @@ defmodule Atomboy.Window do
     pixels = PPU.render_frame(ctx.ram)
     :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette)})
     :wxWindow.refresh(ctx.panel, eraseBackground: false)
-    :wxFrame.setTitle(ctx.window, ~c"atomboy — ⏪ rembobinage")
+    :wxFrame.setTitle(ctx.window, ~c"atomboy — ⏪ rewind")
 
     now = System.monotonic_time(:microsecond)
     deadline = max(ctx.deadline, now - 100_000)
@@ -205,8 +204,8 @@ defmodule Atomboy.Window do
     loop(%{ctx | last_frame: pixels, deadline: deadline + @frame_us})
   end
 
-  # La mémoire du rembobinage : un instantané toutes les dix frames, un
-  # anneau de 240 — quarante secondes, structurellement partagées.
+  # The memory of rewinding: one snapshot every ten frames, a ring of 240 —
+  # forty seconds, structurally shared.
   defp remember(%{frame: n} = ctx) when rem(n, 10) == 0 do
     %{ctx | history: Enum.take([{ctx.state, ctx.ram, ctx.apu} | ctx.history], 240)}
   end
@@ -225,16 +224,17 @@ defmodule Atomboy.Window do
 
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
 
-    # Un déraillement tue la partie, pas la progression : la pile de la
-    # cartouche est écrite avant de laisser filer le rapport de crash.
+    # A derailment kills the game, not the progress: the cartridge's battery
+    # is written before letting the crash report fly.
     {pixels, state, ram} =
       try do
         Screen.frame(ctx.state, ctx.rom, ram, render?)
       rescue
-        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
+        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Derailed] ->
           Save.flush(ram, ctx.sav)
           reraise e, __STACKTRACE__
       end
+
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     if render? do
@@ -270,7 +270,7 @@ defmodule Atomboy.Window do
     loop(ctx |> remember() |> measure_fps())
   end
 
-  # ── Les événements wx ───────────────────────────────────────────────────────
+  # ── The wx events ───────────────────────────────────────────────────────────
 
   defp drain(ctx) do
     receive do
@@ -295,16 +295,16 @@ defmodule Atomboy.Window do
 
   defp on_key(_ctx, code) when code in @quits, do: :quit
 
-  # Menu ouvert : les touches Game Boy le pilotent, le reste attend.
+  # Menu open: the Game Boy keys drive it, everything else waits.
   defp on_key(%{menu: menu} = ctx, code) when menu != nil do
-    touche =
+    key =
       case Map.get(@keys, code) do
         nil -> if Map.get(@actions, code) == :menu, do: :menu
         key -> key
       end
 
-    if touche do
-      {menu, actions} = Menu.touche(ctx.menu, touche)
+    if key do
+      {menu, actions} = Menu.press(ctx.menu, key)
 
       case Enum.reduce(actions, %{ctx | menu: menu}, &menu_action/2) do
         :quit -> :quit
@@ -330,7 +330,7 @@ defmodule Atomboy.Window do
 
   defp act(ctx, :save_state) do
     Save.write_state(state_path(ctx), {ctx.state, ctx.ram, ctx.apu})
-    %{ctx | note: {"état sauvé (case #{ctx.state_slot})", 120}}
+    %{ctx | note: {"state saved (slot #{ctx.state_slot})", 120}}
   end
 
   defp act(ctx, :load_state) do
@@ -342,31 +342,46 @@ defmodule Atomboy.Window do
             link -> Map.put(ram, :link, link)
           end
 
-        %{ctx | state: state, ram: ram, apu: apu, note: {"état repris (case #{ctx.state_slot})", 120}}
+        %{
+          ctx
+          | state: state,
+            ram: ram,
+            apu: apu,
+            note: {"state loaded (slot #{ctx.state_slot})", 120}
+        }
 
       :error ->
-        %{ctx | note: {"case #{ctx.state_slot} vide", 120}}
+        %{ctx | note: {"slot #{ctx.state_slot} empty", 120}}
     end
   end
 
-  defp act(ctx, {:slot, n}), do: %{ctx | state_slot: n, note: {"case d'état #{n}", 120}}
+  defp act(ctx, {:slot, n}), do: %{ctx | state_slot: n, note: {"state slot #{n}", 120}}
 
   defp act(ctx, :menu),
-    do: %{ctx | menu: Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false), Map.get(ctx.ram, :mixer)), down: MapSet.new()}
+    do: %{
+      ctx
+      | menu:
+          Menu.open(
+            ctx.state_slot,
+            ctx.palette,
+            Map.get(ctx.ram, :cgb, false),
+            Map.get(ctx.ram, :mixer)
+          ),
+        down: MapSet.new()
+    }
 
   defp act(ctx, :turbo) do
     if Map.has_key?(ctx.ram, :link) do
-      %{ctx | note: {"turbo indisponible : câble branché", 120}}
+      %{ctx | note: {"turbo unavailable: link cable plugged in", 120}}
     else
       turbo_toggle(ctx)
     end
   end
 
-
   defp act(ctx, :pause), do: %{ctx | paused: not ctx.paused}
 
-  # Les actions choisies au menu passent par les mêmes chemins que les
-  # raccourcis directs — le menu n'est qu'une autre façon d'appuyer.
+  # The actions chosen in the menu take the same paths as the direct
+  # shortcuts — the menu is only another way of pressing a key.
   defp menu_action(_action, :quit), do: :quit
   defp menu_action(:save_state, ctx), do: act(ctx, :save_state)
   defp menu_action(:load_state, ctx), do: act(ctx, :load_state)
@@ -383,12 +398,14 @@ defmodule Atomboy.Window do
         Audio.close(ctx.audio)
         nil
       else
-        if ctx.son?, do: Audio.open()
+        if ctx.sound?, do: Audio.open()
       end
 
     %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
   end
 
+  # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
+  # on-disk convention `Atomboy.Save` also spells out.
   defp state_path(ctx) do
     if ctx.state_slot == 1 do
       ctx.state_base <> ".state"
@@ -397,11 +414,10 @@ defmodule Atomboy.Window do
     end
   end
 
+  # ── Rendering ───────────────────────────────────────────────────────────────
 
-  # ── Le rendu ────────────────────────────────────────────────────────────────
-
-  # Exécuté par le thread wx : lire la dernière frame, l'étirer au plus
-  # proche voisin (wxIMAGE_QUALITY_NEAREST = 0), la dessiner.
+  # Run by the wx thread: read the last frame, stretch it with nearest
+  # neighbour (wxIMAGE_QUALITY_NEAREST = 0), draw it.
   defp paint(panel, table) do
     dc = :wxPaintDC.new(panel)
 
@@ -443,12 +459,12 @@ defmodule Atomboy.Window do
       |> Enum.map_join("", &(" · " <> &1))
 
     fps = :io_lib.format(~c"~.1f", [ctx.fps])
-    :wxFrame.setTitle(ctx.window, ~c"atomboy — #{fps} fps · banque #{bank}#{extras}")
+    :wxFrame.setTitle(ctx.window, ~c"atomboy — #{fps} fps · bank #{bank}#{extras}")
   end
 
   defp title(_ctx, _ram), do: :ok
 
-  # ── Le reste, comme au terminal ─────────────────────────────────────────────
+  # ── The rest, as in the terminal ────────────────────────────────────────────
 
   defp sound(ram, apu, audio), do: Audio.stream(audio, ram, apu)
 

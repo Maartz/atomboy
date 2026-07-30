@@ -1,58 +1,59 @@
 defmodule Atomboy.AtomVM.Probe do
   @moduledoc """
-  Sonde de mesure : la boucle CPU **sans aucune map sur le chemin chaud**.
+  A measurement probe: the CPU loop **with no map at all on the hot path**.
 
-  Ce module ne préfigure pas l'architecture — c'est un instrument, à jeter. Il
-  existe pour répondre à une seule question, chiffrée sur AtomVM natif :
-  combien vaut la boucle quand on enlève ce que le JIT ne sait pas accélérer ?
+  This module does not prefigure the architecture — it is an instrument, meant
+  to be thrown away. It exists to answer a single question, in figures on
+  native AtomVM: what is the loop worth once you remove what the JIT cannot
+  accelerate?
 
-  La mesure de référence a montré le problème : l'AOT natif ne gagne que ×1,21
-  sur l'interprété, parce que chaque pas passe par des BIFs de map — fetch dans
-  `Atomboy.Memory.Flat`, mise à jour du struct `State` — que la compilation
-  native ne touche pas. Loi d'Amdahl : tant que 85 % du temps est dans les
-  maps, aucun backend ne peut faire mieux que ×1,2.
+  The reference measurement showed the problem: native AOT gains only ×1.21
+  over interpreted, because every step goes through map BIFs — the fetch in
+  `Atomboy.Memory.Flat`, the update of the `State` struct — which native
+  compilation does not touch. Amdahl's law: as long as 85 % of the time is in
+  the maps, no backend can do better than ×1.2.
 
-  Ici, les deux sources de BIFs disparaissent :
+  Here, both sources of BIFs disappear:
 
-    * **Les registres voyagent en arguments de fonction.** Dans du code natif,
-      les registres x de la BEAM deviennent des registres machine. C'est le
-      design `exec/13` d'origine, ressuscité là où il compte — la boucle
-      interne — et invisible de l'extérieur.
-    * **La ROM est une binary de 64 Ko**, fetch par `:binary.at/2`. Pas de
-      hachage, pas d'allocation, et c'est déjà le modèle cible : la vraie ROM
-      Game Boy est immuable par définition.
+    * **The registers travel as function arguments.** In native code, the
+      BEAM's x registers become machine registers. This is the original
+      `exec/13` design, resurrected where it counts — the inner loop — and
+      invisible from the outside.
+    * **The ROM is a 64 KB binary**, fetched with `:binary.at/2`. No hashing,
+      no allocation, and it is already the target model: a real Game Boy ROM is
+      immutable by definition.
 
-  Les écritures mémoire restent dans une map threadée en argument : le
-  programme mesuré n'écrit qu'une fois par tour d'espace d'adressage, le coût
-  est invisible. Le jour venu, ce sera la resource NIF du brief.
+  Memory writes stay in a map threaded through as an argument: the measured
+  program only writes once per pass over the address space, so the cost is
+  invisible. When the day comes, this will be the brief's resource NIF.
 
-  Le programme est le même que celui de `Atomboy.AtomVM.Main` — LD B,C ;
-  LD (HL),B ; LD A,(HL) ; NOP, puis des NOP jusqu'au bouclage de PC — pour que
-  les deux chiffres soient comparables terme à terme.
+  The program is the same as `Atomboy.AtomVM.Main`'s — LD B,C ; LD (HL),B ;
+  LD A,(HL) ; NOP, then NOPs until PC wraps — so that the two figures are
+  comparable term by term.
   """
 
   import Bitwise
 
   @slice 50_000
 
-  @doc "Construit la ROM : le programme de Main, puis des NOP jusqu'à 64 Ko."
+  @doc "Builds the ROM: Main's program, then NOPs up to 64 KB."
   @spec rom() :: binary()
   def rom do
     <<0x41, 0x70, 0x7E, 0x00>> <> :binary.copy(<<0x00>>, 0x10000 - 4)
   end
 
   @doc """
-  Mesure bornée en temps, comme le bench de Main.
+  Time-bounded measurement, like Main's bench.
 
-  Découpée en tranches de #{@slice} pas via `Atomboy.AtomVM.Main.measure/2`,
-  pour les mêmes raisons de watchdog — chaque tranche repart de l'état
-  initial, ce qui est sans effet sur un programme aussi périodique.
+  Cut into slices of #{@slice} steps via `Atomboy.AtomVM.Main.measure/2`, for
+  the same watchdog reasons — each slice starts over from the initial state,
+  which makes no difference on a program this periodic.
   """
   @spec bench() :: :ok
   def bench do
     rom = rom()
 
-    # Chauffe courte, comme le bench de référence.
+    # Short warm-up, like the reference bench.
     loop(rom, %{}, 1_000, 0, 0, 0, 0, 0x42, 0, 0, 0xC0, 0x00, 0xFFFE, 0x0000)
 
     {steps, elapsed} =
@@ -69,8 +70,8 @@ defmodule Atomboy.AtomVM.Probe do
     :ok
   end
 
-  # La boucle : fetch binaire, dispatch, appel terminal — registres en
-  # arguments d'un bout à l'autre, aucune structure construite.
+  # The loop: binary fetch, dispatch, tail call — registers in arguments from
+  # end to end, not a single structure built.
   defp loop(_rom, _ram, 0, cycles, _a, _f, _b, _c, _d, _e, _h, _l, _sp, _pc), do: cycles
 
   defp loop(rom, ram, steps, cycles, a, f, b, c, d, e, h, l, sp, pc) do

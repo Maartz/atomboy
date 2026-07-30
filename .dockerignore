@@ -1,4 +1,4 @@
-# Le contexte de build reste minimal : le code et la config de release.
+# The build context stays minimal: the code and the release config.
 _build/
 deps/
 burrito_out/

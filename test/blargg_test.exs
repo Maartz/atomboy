@@ -1,18 +1,17 @@
 defmodule Atomboy.BlarggTest do
   @moduledoc """
-  Les ROMs individuelles de blargg `cpu_instrs` — le test d'intégration de la
-  phase 1.
+  The individual blargg `cpu_instrs` ROMs — phase 1's integration test.
 
-  Les vecteurs SM83 valident chaque instruction isolément ; blargg valide
-  l'ensemble en situation : enchaînements, pile, DAA après de vraies
-  séquences BCD, sauts calculés. C'est le critère de fin de phase 1 du brief.
+  The SM83 vectors validate each instruction in isolation; blargg validates
+  the whole thing in situ: chained instructions, the stack, DAA after real BCD
+  sequences, computed jumps. It is the brief's end-of-phase-1 criterion.
 
-  Exclus du `mix test` ordinaire (~30 s de plus) :
+  Left out of the ordinary `mix test` (~30 s more):
 
       mix test --include blargg
 
-  `02-interrupts` est ignoré tant que le contrôleur d'interruptions n'existe
-  pas — c'est le premier chantier de la phase suivante, pas un oubli.
+  `02-interrupts` is skipped for as long as the interrupt controller does not
+  exist — that is the next phase's first job, not an oversight.
   """
 
   use ExUnit.Case, async: true
@@ -23,7 +22,7 @@ defmodule Atomboy.BlarggTest do
   alias Mix.Tasks.Atomboy.Corpus
 
   if Corpus.cpu_instrs_roms() == [] do
-    IO.warn("ROMs blargg absentes — `mix atomboy.corpus` pour les récupérer.", [])
+    IO.warn("blargg ROMs missing — `mix atomboy.corpus` to fetch them.", [])
   end
 
   for rom <- Corpus.cpu_instrs_roms() do
@@ -35,10 +34,10 @@ defmodule Atomboy.BlarggTest do
           :ok
 
         {:failed, report} ->
-          flunk("échec :\n#{report}")
+          flunk("failed:\n#{report}")
 
         {:timeout, report} ->
-          flunk("pas de verdict avant la limite de cycles :\n#{report}")
+          flunk("no verdict before the cycle limit:\n#{report}")
       end
     end
   end

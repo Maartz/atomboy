@@ -1,38 +1,38 @@
 defmodule Atomboy.Codes do
   @moduledoc """
-  Les codes GameShark : des pokes mémoire appliqués à chaque frame.
+  The GameShark codes: memory pokes applied on every frame.
 
-  Le format classique tient en huit chiffres hexadécimaux — `01VVLLHH` :
-  type `01` (écriture huit bits), la valeur `VV`, puis l'adresse en
-  petit-boutiste (`LLHH` → `0xHHLL`). `01FF16D1` écrit `0xFF` à `0xD116`
-  à chaque frame — c'est tout le secret des vies infinies.
+  The classic format fits in eight hexadecimal digits — `01VVLLHH`: type `01`
+  (eight-bit write), the value `VV`, then the address little-endian (`LLHH` →
+  `0xHHLL`). `01FF16D1` writes `0xFF` to `0xD116` on every frame — that is the
+  whole secret of infinite lives.
 
-  Les codes actifs vivent dans la map mémoire (`ram[:codes]`, liste
-  d'écritures analysées) : ils voyagent avec les états sauvés, et les
-  trois boucles de jeu appellent `applique/1` avant chaque frame — le
-  GameShark réel écrivait au vblank, même cadence. Les pokes passent par
-  `CartLoop.poke/3` : banques et écho servis, SRAM verrouillée respectée.
+  The active codes live in the memory map (`ram[:codes]`, a list of parsed
+  writes): they travel along with saved states, and the three game loops call
+  `applique/1` before each frame — the real GameShark wrote at vblank, the
+  same rate. The pokes go through `CartLoop.poke/3`: banks and echo served,
+  locked SRAM respected.
 
-  Seul le type `01` est accepté — les types bancaires (`9x`) attendront
-  un jeu qui les exige. Un code invalide est simplement ignoré, signalé
-  sur stderr : un GameShark aux contacts sales, pas une panne.
+  Only type `01` is accepted — the banking types (`9x`) will wait for a game
+  that demands them. An invalid code is simply ignored and reported on
+  stderr: a GameShark with dirty contacts, not a breakdown.
   """
 
   import Bitwise
 
   alias Atomboy.CPU.CartLoop
 
-  @type écriture :: {addr :: 0x8000..0xFFFF, valeur :: 0..0xFF}
+  @type poke :: {addr :: 0x8000..0xFFFF, value :: 0..0xFF}
 
   @doc """
-  Analyse un code `01VVLLHH`. `{:ok, {adresse, valeur}}`, ou `:error`.
+  Parses an `01VVLLHH` code. `{:ok, {address, value}}`, or `:error`.
   """
-  @spec parse(String.t()) :: {:ok, écriture()} | :error
+  @spec parse(String.t()) :: {:ok, poke()} | :error
   def parse(<<code::binary-size(8)>>) do
-    with {:ok, <<0x01, valeur, bas, haut>>} <- Base.decode16(String.upcase(code)),
-         addr = bsl(haut, 8) ||| bas,
+    with {:ok, <<0x01, value, low, high>>} <- Base.decode16(String.upcase(code)),
+         addr = bsl(high, 8) ||| low,
          true <- addr >= 0x8000 do
-      {:ok, {addr, valeur}}
+      {:ok, {addr, value}}
     else
       _ -> :error
     end
@@ -41,43 +41,43 @@ defmodule Atomboy.Codes do
   def parse(_), do: :error
 
   @doc """
-  Analyse une liste séparée par des virgules — les codes invalides sont
-  ignorés et signalés. Rend la liste d'écritures.
+  Parses a comma-separated list — invalid codes are ignored and reported.
+  Returns the list of pokes.
   """
-  @spec analyse(String.t()) :: [écriture()]
-  def analyse(chaîne) do
-    chaîne
+  @spec analyse(String.t()) :: [poke()]
+  def analyse(string) do
+    string
     |> String.split([",", " ", "\n"], trim: true)
     |> Enum.flat_map(fn code ->
       case parse(code) do
-        {:ok, écriture} ->
-          [écriture]
+        {:ok, poke} ->
+          [poke]
 
         :error ->
-          IO.puts(:stderr, "code GameShark ignoré : #{code}")
+          IO.puts(:stderr, "GameShark code ignored: #{code}")
           []
       end
     end)
   end
 
   @doc """
-  Pose les codes dans la map — `ram[:codes]`, remplacement complet. Une
-  liste vide efface la clé : zéro coût par frame sans codes.
+  Lays the codes into the map — `ram[:codes]`, a full replacement. An empty
+  list erases the key: zero cost per frame when there are no codes.
   """
-  @spec installe(map(), [écriture()]) :: map()
+  @spec installe(map(), [poke()]) :: map()
   def installe(ram, []), do: Map.delete(ram, :codes)
-  def installe(ram, écritures), do: Map.put(ram, :codes, écritures)
+  def installe(ram, pokes), do: Map.put(ram, :codes, pokes)
 
-  @doc "Applique les codes actifs — un poke par code, chaque frame."
+  @doc "Applies the active codes — one poke per code, every frame."
   @spec applique(map()) :: map()
   def applique(ram) do
     case Map.get(ram, :codes) do
       nil ->
         ram
 
-      écritures ->
-        Enum.reduce(écritures, ram, fn {addr, valeur}, ram ->
-          CartLoop.poke(ram, addr, valeur)
+      pokes ->
+        Enum.reduce(pokes, ram, fn {addr, value}, ram ->
+          CartLoop.poke(ram, addr, value)
         end)
     end
   end

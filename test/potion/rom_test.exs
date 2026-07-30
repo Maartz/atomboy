@@ -1,12 +1,12 @@
 defmodule Potion.ROMTest do
   @moduledoc """
-  La cartouche vérifiée champ par champ — puis bootée.
+  The cartridge checked field by field — then booted.
 
-  Les sommes de contrôle sont recalculées ici par une seconde implémentation,
-  indépendante de celle du module : un test qui rappellerait la même fonction
-  validerait une tautologie. Le dernier test est celui qui compte : la ROM
-  émise tourne dans l'émulateur, frames entières, sans lever — le premier
-  maillon de la chaîne « Potion écrit, atomboy exécute ».
+  The checksums are recomputed here by a second implementation, independent of
+  the module's own: a test that called the same function back would validate a
+  tautology. The last test is the one that counts: the emitted ROM runs in the
+  emulator, whole frames, without raising — the first link in the chain "Potion
+  writes, atomboy runs".
   """
 
   use ExUnit.Case, async: true
@@ -16,38 +16,38 @@ defmodule Potion.ROMTest do
   alias Atomboy.Screen
   alias Potion.ROM
 
-  @boucle [{:etiquette, :ici}, {:jr, {:etiquette, :ici}}]
+  @loop [{:label, :here}, {:jr, {:label, :here}}]
 
-  describe "l'en-tête" do
-    test "32 Ko exactement, entrée NOP + JP 0x150" do
-      rom = ROM.construit(@boucle)
+  describe "the header" do
+    test "exactly 32 KB, entry NOP + JP 0x150" do
+      rom = ROM.build(@loop)
 
       assert byte_size(rom) == 0x8000
       assert binary_part(rom, 0x100, 4) == <<0x00, 0xC3, 0x50, 0x01>>
-      # Le code est bien à l'adresse promise.
+      # The code really is at the promised address.
       assert binary_part(rom, 0x150, 2) == <<0x18, 0xFE>>
     end
 
-    test "le logo Nintendo est celui que la ROM de boot exige" do
-      rom = ROM.construit(@boucle)
+    test "the Nintendo logo is the one the boot ROM demands" do
+      rom = ROM.build(@loop)
 
-      # Les quatre premiers octets suffisent à reconnaître l'original — et le
-      # test complet est la somme d'en-tête, qui couvre d'autres champs.
+      # The first four bytes are enough to recognise the original — and the full
+      # test is the header checksum, which covers other fields.
       assert binary_part(rom, 0x104, 4) == <<0xCE, 0xED, 0x66, 0x66>>
       assert binary_part(rom, 0x104, 48) |> :binary.bin_to_list() |> Enum.sum() == 5446
     end
 
-    test "le titre est passé en majuscules et rembourré de zéros" do
-      rom = ROM.construit(@boucle, titre: "pong")
+    test "the title is upcased and padded with zeros" do
+      rom = ROM.build(@loop, title: "pong")
 
       assert binary_part(rom, 0x134, 16) == "PONG" <> :binary.copy(<<0>>, 12)
     end
 
-    test "cartouche DMG, ROM seule : les drapeaux à zéro" do
-      rom = ROM.construit(@boucle)
+    test "DMG cartridge, ROM only: the flags at zero" do
+      rom = ROM.build(@loop)
 
-      # 0x143 : pas de couleur. 0x147 : pas de MBC. 0x148-0x149 : 32 Ko, pas
-      # de RAM. C'est ce que Screen.boot_ram lira.
+      # 0x143: no colour. 0x147: no MBC. 0x148-0x149: 32 KB, no RAM. This is
+      # what Screen.boot_ram will read.
       assert :binary.at(rom, 0x143) == 0x00
       assert :binary.at(rom, 0x147) == 0x00
       assert :binary.at(rom, 0x148) == 0x00
@@ -55,81 +55,81 @@ defmodule Potion.ROMTest do
       assert Screen.boot_ram(rom) == %{rom_banks: 2, mbc: :mbc1}
     end
 
-    test "la somme d'en-tête est celle que le boot vérifie" do
-      rom = ROM.construit(@boucle, titre: "VERIF")
+    test "the header checksum is the one the boot verifies" do
+      rom = ROM.build(@loop, title: "VERIF")
 
-      attendu =
+      expected =
         rom
         |> binary_part(0x134, 0x14D - 0x134)
         |> :binary.bin_to_list()
-        |> Enum.reduce(0, fn octet, somme -> somme - octet - 1 &&& 0xFF end)
+        |> Enum.reduce(0, fn byte, checksum -> checksum - byte - 1 &&& 0xFF end)
 
-      assert :binary.at(rom, 0x14D) == attendu
-      # Elle dépend du titre : deux ROMs de titres différents diffèrent ici.
-      autre = ROM.construit(@boucle, titre: "AUTRE")
-      refute :binary.at(autre, 0x14D) == :binary.at(rom, 0x14D)
+      assert :binary.at(rom, 0x14D) == expected
+      # It depends on the title: two ROMs with different titles differ here.
+      other = ROM.build(@loop, title: "OTHER")
+      refute :binary.at(other, 0x14D) == :binary.at(rom, 0x14D)
     end
 
-    test "la somme globale couvre tout sauf ses deux cases" do
-      rom = ROM.construit(@boucle)
+    test "the global checksum covers everything but its own two slots" do
+      rom = ROM.build(@loop)
 
-      sans_cases =
+      without_slots =
         binary_part(rom, 0, 0x14E) <> <<0, 0>> <> binary_part(rom, 0x150, 0x8000 - 0x150)
 
-      attendu = sans_cases |> :binary.bin_to_list() |> Enum.sum() |> band(0xFFFF)
-      <<lue::16-big>> = binary_part(rom, 0x14E, 2)
+      expected = without_slots |> :binary.bin_to_list() |> Enum.sum() |> band(0xFFFF)
+      <<read::16-big>> = binary_part(rom, 0x14E, 2)
 
-      assert lue == attendu
+      assert read == expected
     end
   end
 
-  describe "le vecteur vblank" do
-    test "l'étiquette devient un JP en 0x40" do
-      programme = [
-        {:etiquette, :ici},
-        {:jr, {:etiquette, :ici}},
-        {:etiquette, :vbl},
+  describe "the vblank vector" do
+    test "the label becomes a JP at 0x40" do
+      program = [
+        {:label, :here},
+        {:jr, {:label, :here}},
+        {:label, :vbl},
         {:reti}
       ]
 
-      rom = ROM.construit(programme, vblank: :vbl)
+      rom = ROM.build(program, vblank: :vbl)
 
-      # :vbl est à 0x150 + 2 (le JR).
+      # :vbl is at 0x150 + 2 (the JR).
       assert binary_part(rom, 0x40, 3) == <<0xC3, 0x52, 0x01>>
     end
 
-    test "une étiquette absente est refusée nommément" do
-      erreur =
-        assert_raise ArgumentError, fn -> ROM.construit(@boucle, vblank: :fantome) end
+    test "a missing label is refused by name" do
+      error =
+        assert_raise ArgumentError, fn -> ROM.build(@loop, vblank: :ghost) end
 
-      assert erreur.message =~ ":fantome"
+      assert error.message =~ ":ghost"
     end
 
-    test "sans option, le vecteur reste des zéros" do
-      rom = ROM.construit(@boucle)
+    test "without the option, the vector stays zeros" do
+      rom = ROM.build(@loop)
 
       assert binary_part(rom, 0x40, 3) == <<0, 0, 0>>
     end
   end
 
-  describe "les refus" do
-    test "un titre trop long ou accentué" do
-      assert_raise ArgumentError, fn -> ROM.construit(@boucle, titre: "SEIZECARACTERES!") end
-      assert_raise ArgumentError, fn -> ROM.construit(@boucle, titre: "POTITRÉ") end
+  describe "the refusals" do
+    test "a title too long or accented" do
+      assert_raise ArgumentError, fn -> ROM.build(@loop, title: "SIXTEENCHARACTS!") end
+      assert_raise ArgumentError, fn -> ROM.build(@loop, title: "CAFÉ") end
     end
 
-    test "un programme plus grand que la place" do
-      trop = [{:octets, :binary.copy(<<0>>, 0x8000 - 0x150 + 1)}]
+    test "a program larger than the room available" do
+      too_big = [{:bytes, :binary.copy(<<0>>, 0x8000 - 0x150 + 1)}]
 
-      erreur = assert_raise ArgumentError, fn -> ROM.construit(trop) end
+      error = assert_raise ArgumentError, fn -> ROM.build(too_big) end
 
-      assert erreur.message =~ "programme trop grand"
+      assert error.message =~ "program too large"
     end
   end
 
-  describe "dans l'émulateur" do
-    test "la ROM nue boote et tourne des frames entières sans lever" do
-      rom = ROM.construit(@boucle)
+  describe "in the emulator" do
+    test "the bare ROM boots and runs whole frames without raising" do
+      rom = ROM.build(@loop)
       state = Screen.boot_state(rom)
       ram = Screen.boot_ram(rom)
 
@@ -138,21 +138,21 @@ defmodule Potion.ROMTest do
           Screen.frame(state, rom, ram, true)
         end)
 
-      # Le processeur est resté dans la boucle : sur le JR (0x151) ou juste
-      # après son fetch — pas parti exécuter du remplissage.
+      # The processor stayed inside the loop: on the JR (0x151) or just after
+      # fetching it — it did not wander off executing padding.
       assert state.pc in 0x150..0x152
     end
 
-    test "un programme qui calcule : la WRAM porte le résultat" do
-      programme = [
+    test "a program that computes: the WRAM carries the result" do
+      program = [
         {:ld, :a, 21},
         {:add, :a, :a},
         {:ld, {:mem, 0xC000}, :a},
-        {:etiquette, :fin},
-        {:jr, {:etiquette, :fin}}
+        {:label, :done},
+        {:jr, {:label, :done}}
       ]
 
-      rom = ROM.construit(programme, titre: "CALCUL")
+      rom = ROM.build(program, title: "COMPUTE")
       state = Screen.boot_state(rom)
       ram = Screen.boot_ram(rom)
 

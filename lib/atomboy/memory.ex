@@ -1,38 +1,37 @@
 defmodule Atomboy.Memory do
   @moduledoc """
-  La frontière mémoire — la décision structurante du projet.
+  The memory boundary — the project's structuring decision.
 
-  Ce comportement est volontairement minimal et **stable dans le temps** : c'est
-  la même API qui sera implémentée par des backends très différents au fil des
-  phases.
+  This behaviour is deliberately minimal and **stable over time**: it is the
+  same API that very different backends will implement as the phases go by.
 
-    * Phase 1 (Mac, tests SM83) — `Atomboy.Memory.Flat`, une map creuse. Suffit
-      pour les vecteurs SingleStepTests, qui ne touchent qu'une poignée
-      d'adresses.
-    * Phase 1bis (ROMs blargg) — un backend segmenté : la ROM est une binary
-      BEAM (immuable, donc lue par pattern matching sans copie), seules les
-      régions réellement mutables sont dans une structure à part.
-    * Phase 3 (ESP32) — VRAM/OAM deviennent une resource C, `read8/2` et
-      `write8/3` deviennent des NIF. Le PPU y accède directement en C.
+    * Phase 1 (Mac, SM83 tests) — `Atomboy.Memory.Flat`, a sparse map. Enough
+      for the SingleStepTests vectors, which only touch a handful of
+      addresses.
+    * Phase 1bis (blargg ROMs) — a segmented backend: the ROM is a BEAM binary
+      (immutable, hence read by pattern matching without copying), and only
+      the genuinely mutable regions live in a separate structure.
+    * Phase 3 (ESP32) — VRAM/OAM become a C resource, `read8/2` and `write8/3`
+      become NIFs. The PPU reaches them directly from C.
 
-  ## Pourquoi `write8/3` renvoie la mémoire
+  ## Why `write8/3` returns the memory
 
-  Un backend pur (map, binary) doit renvoyer une nouvelle valeur ; un backend
-  NIF renvoie la même référence de resource. Le CPU thread la valeur de retour
-  dans les deux cas, donc le même code marche sur les deux backends. Le coût sur
-  le backend NIF est nul (on renvoie le terme reçu).
+  A pure backend (map, binary) has to return a new value; a NIF backend
+  returns the same resource reference. The CPU threads the return value in
+  both cases, so the same code works on both backends. The cost on the NIF
+  backend is nil (we hand back the term we were given).
 
-  ## Pourquoi `read16/2` et `write16/3` sont dans le comportement
+  ## Why `read16/2` and `write16/3` are part of the behaviour
 
-  Ce ne sont pas des sucres syntaxiques : ce sont les **accesseurs en bloc**
-  identifiés dans le brief. Sur le backend NIF, chaque accès mémoire du CPU est
-  un appel de NIF, et le fetch d'opcode est lui-même un accès. Un `push`/`pop`
-  qui fait deux accès en un seul appel divise par deux le trafic sur la
-  frontière — ça se voit sur le profil. Les implémenter comme deux `read8`
-  serait passer à côté du but ; un backend sérieux les implémente nativement.
+  These are not syntactic sugar: they are the **block accessors** identified in
+  the brief. On the NIF backend, every memory access the CPU makes is a NIF
+  call, and the opcode fetch is itself an access. A `push`/`pop` that does two
+  accesses in a single call halves the traffic across the boundary — it shows
+  up in the profile. Implementing them as two `read8` calls would be missing
+  the point; a serious backend implements them natively.
   """
 
-  @typedoc "Le terme opaque qui porte l'état mémoire. Sa forme dépend du backend."
+  @typedoc "The opaque term carrying the memory state. Its shape is the backend's."
   @type t :: term()
 
   @type addr :: 0..0xFFFF
@@ -42,12 +41,12 @@ defmodule Atomboy.Memory do
   @callback write8(t, addr, value) :: t
 
   @doc """
-  Lecture 16 bits little-endian. `addr + 1` boucle à 0x0000.
+  Little-endian 16-bit read. `addr + 1` wraps to 0x0000.
   """
   @callback read16(t, addr) :: 0..0xFFFF
 
   @doc """
-  Écriture 16 bits little-endian. `addr + 1` boucle à 0x0000.
+  Little-endian 16-bit write. `addr + 1` wraps to 0x0000.
   """
   @callback write16(t, addr, 0..0xFFFF) :: t
 end

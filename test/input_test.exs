@@ -3,7 +3,7 @@ defmodule Atomboy.Play.InputTest do
 
   alias Atomboy.Play.Input
 
-  test "les lettres se décodent en frappes au relâchement inconnu" do
+  test "letters decode into keystrokes whose release is unknown" do
     assert Input.decode("x") == {[{:key, :a}], ""}
     assert Input.decode("c") == {[{:key, :b}], ""}
     assert Input.decode("\r") == {[{:key, :start}], ""}
@@ -12,7 +12,7 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode(<<0x03>>) == {[{:key, :quit}], ""}
   end
 
-  test "les flèches classiques, CSI comme SS3" do
+  test "the classic arrows, CSI as well as SS3" do
     assert Input.decode("\e[A") == {[{:key, :up}], ""}
     assert Input.decode("\e[B") == {[{:key, :down}], ""}
     assert Input.decode("\e[C") == {[{:key, :right}], ""}
@@ -20,18 +20,18 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("\eOA") == {[{:key, :up}], ""}
   end
 
-  test "plusieurs événements dans une même lecture, dans l'ordre" do
+  test "several events in one read, in order" do
     assert Input.decode("\e[Ax\r") == {[{:key, :up}, {:key, :a}, {:key, :start}], ""}
   end
 
-  test "une séquence coupée attend la suite" do
+  test "a truncated sequence waits for the rest" do
     assert Input.decode("\e") == {[], "\e"}
     assert Input.decode("x\e[") == {[{:key, :a}], "\e["}
     assert Input.decode("\e[1;1:") == {[], "\e[1;1:"}
     assert Input.decode("\e[" <> "A") == {[{:key, :up}], ""}
   end
 
-  test "le protocole kitty : presse, répétition, relâchement" do
+  test "the kitty protocol: press, repeat, release" do
     assert Input.decode("\e[120;1u") == {[{:press, :a}], ""}
     assert Input.decode("\e[120;1:2u") == {[{:repeat, :a}], ""}
     assert Input.decode("\e[120;1:3u") == {[{:release, :a}], ""}
@@ -40,24 +40,24 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("\e[32;1:3u") == {[{:release, :select}], ""}
   end
 
-  test "le protocole kitty : les flèches paramétrées" do
+  test "the kitty protocol: the parameterised arrows" do
     assert Input.decode("\e[1;1:1A") == {[{:press, :up}], ""}
     assert Input.decode("\e[1;1:2C") == {[{:repeat, :right}], ""}
     assert Input.decode("\e[1;1:3B") == {[{:release, :down}], ""}
   end
 
-  test "le protocole kitty : quitter par q ou Ctrl-C, le menu par Échap" do
+  test "the kitty protocol: quit on q or Ctrl-C, the menu on Escape" do
     assert Input.decode("\e[113;1u") == {[{:press, :quit}], ""}
     assert Input.decode("\e[27;1u") == {[{:press, :menu}], ""}
     assert Input.decode("\e[99;5u") == {[{:press, :quit}], ""}
   end
 
-  test "la réponse à la requête kitty se reconnaît" do
+  test "the answer to the kitty request is recognised" do
     assert Input.decode("\e[?11u") == {[{:kitty, 11}], ""}
     assert Input.decode("\e[?1u") == {[{:kitty, 1}], ""}
   end
 
-  test "les touches d'action se décodent" do
+  test "the action keys decode" do
     assert Input.decode("s") == {[{:key, :save_state}], ""}
     assert Input.decode("r") == {[{:key, :load_state}], ""}
     assert Input.decode("\t") == {[{:key, :turbo}], ""}
@@ -66,18 +66,18 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("\e[9;1u") == {[{:press, :turbo}], ""}
   end
 
-  test "les chiffres choisissent la case d'état" do
+  test "the digits pick the state slot" do
     assert Input.decode("3") == {[{:key, {:slot, 3}}], ""}
     assert Input.decode("\e[57;1u") == {[{:press, {:slot, 9}}], ""}
   end
 
-  test "les séquences inconnues s'ignorent" do
+  test "unknown sequences are ignored" do
     assert Input.decode("\e[5~zk") == {[], ""}
     assert Input.decode("\e[121;1u") == {[], ""}
     assert Input.decode("\eOx") == {[{:key, :a}], ""}
   end
 
-  test "les touches tenues deviennent des lignes, actives à zéro" do
+  test "held keys become register lines, active at zero" do
     assert Input.dpad_lines([]) == 0x0F
     assert Input.dpad_lines([:right]) == 0x0E
     assert Input.dpad_lines([:left, :down]) == 0x05

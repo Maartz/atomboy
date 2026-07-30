@@ -1,283 +1,291 @@
-// La coquille macOS d'atomboy : SwiftUI devant, le BEAM derrière.
+// atomboy's macOS shell: SwiftUI up front, the BEAM behind.
 //
-// Le moteur est le binaire Burrito embarqué dans le bundle, lancé en
-// `--serveur` : il pousse des frames RGB24 (<<'F', 69120 octets>>) et du
-// PCM s16le stéréo 32 768 Hz (<<'A', longueur sur 2 octets, données>>)
-// sur stdout ; la coquille lui renvoie les touches en enregistrements de
-// deux octets (op '+'/'-', touche) sur stdin. Toute l'émulation — menu,
-// états, mixer, câble link — vit côté BEAM ; ici on ne fait que dessiner
-// (CALayer au plus proche voisin : du pixel net), jouer (AVAudioEngine —
-// plus besoin de ffplay) et relayer le clavier.
+// The engine is the Burrito binary embedded in the bundle, launched with
+// `--serveur`: it pushes RGB24 frames (<<'F', 69120 bytes>>) and stereo
+// s16le PCM at 32,768 Hz (<<'A', 2-byte length, data>>) on stdout; the
+// shell writes keys back as two-byte records (op '+'/'-', key) on stdin.
+// All of the emulation — menu, save states, mixer, link cable — lives on
+// the BEAM side; here we only draw (a CALayer with nearest-neighbour
+// filtering: crisp pixels), play sound (AVAudioEngine — no more ffplay)
+// and relay the keyboard.
 //
-// Compilé par swiftc directement (voir bin/build --app) : pas de projet
-// Xcode, un seul fichier.
+// Compiled by swiftc directly (see bin/build --app): no Xcode project,
+// a single file.
 
 import SwiftUI
 import AVFoundation
 import GameController
 
-let LARGEUR = 160
-let HAUTEUR = 144
-let FRAME_OCTETS = LARGEUR * HAUTEUR * 3
+let WIDTH = 160
+let HEIGHT = 144
+let FRAME_BYTES = WIDTH * HEIGHT * 3
 
-// ── Le moteur ─────────────────────────────────────────────────────────────────
+// ── The engine ────────────────────────────────────────────────────────────────
 
-// Un code GameShark tel que la fenêtre de réglages le garde : le texte
-// hexadécimal, et son interrupteur — persisté par jeu dans UserDefaults.
-struct CodeGS: Codable, Identifiable, Equatable {
-    var id: String { texte }
-    var texte: String
-    var actif: Bool
+// A GameShark code as the settings window keeps it: the hex text, and its
+// switch — persisted per game in UserDefaults.
+struct GSCode: Codable, Identifiable, Equatable {
+    var id: String { text }
+    var text: String
+    var enabled: Bool
 }
 
-final class Moteur: ObservableObject {
-    let couche = CALayer()
-    @Published var panneau = false
-    @Published var jeu: String?
-    @Published var récentes: [URL] = Moteur.chargeRécentes()
-    var processusEnCours: Process? { processus }
-    private var processus: Process?
-    private var entrée: FileHandle?
-    private var tampon = Data()
+final class Engine: ObservableObject {
+    let layer = CALayer()
+    @Published var settingsRequested = false
+    @Published var game: String?
+    @Published var recentROMs: [URL] = Engine.loadRecents()
+    var runningProcess: Process? { process }
+    private var process: Process?
+    private var input: FileHandle?
+    private var buffer = Data()
 
     private let audio = AVAudioEngine()
-    private let lecteur = AVAudioPlayerNode()
+    private let player = AVAudioPlayerNode()
     private let format = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: 32768, channels: 2, interleaved: false)!
-    private var audioLancé = false
+    private var audioStarted = false
 
     init() {
-        couche.magnificationFilter = .nearest
-        couche.contentsGravity = .resizeAspect
-        couche.backgroundColor = NSColor.black.cgColor
-        brancheManettes()
+        layer.magnificationFilter = .nearest
+        layer.contentsGravity = .resizeAspect
+        layer.backgroundColor = NSColor.black.cgColor
+        attachGamepads()
     }
 
-    // Un bouton tenu ou relâché — la manette et le clavier parlent le même
-    // protocole, presse et relâchement séparés.
-    func bouton(_ clé: Character, pressée: Bool) {
-        let op: UInt8 = pressée ? UInt8(ascii: "+") : UInt8(ascii: "-")
-        try? entrée?.write(contentsOf: Data([op, UInt8(clé.asciiValue ?? 0)]))
+    // A button held or released — the gamepad and the keyboard speak the
+    // same protocol, press and release kept separate.
+    func button(_ key: Character, pressed: Bool) {
+        let op: UInt8 = pressed ? UInt8(ascii: "+") : UInt8(ascii: "-")
+        try? input?.write(contentsOf: Data([op, UInt8(key.asciiValue ?? 0)]))
     }
 
-    // ── La manette : GameController, fronts seulement ────────────────────────
+    // ── The gamepad: GameController, edges only ──────────────────────────────
 
-    // L'état tenu par manette : n'émettre que les CHANGEMENTS — les
-    // handlers de GameController tirent à chaque frémissement de stick, et
-    // le tuyau n'a pas besoin de dix mille presses identiques.
-    private var manetteTenu: [ObjectIdentifier: Set<Character>] = [:]
+    // The held state, per gamepad: only emit CHANGES — GameController's
+    // handlers fire on every twitch of a stick, and the pipe has no need for
+    // ten thousand identical presses.
+    private var heldButtons: [ObjectIdentifier: Set<Character>] = [:]
 
-    private func brancheManettes() {
+    private func attachGamepads() {
         NotificationCenter.default.addObserver(
             forName: .GCControllerDidConnect, object: nil, queue: .main
         ) { [weak self] note in
-            if let manette = note.object as? GCController { self?.équipe(manette) }
+            if let gamepad = note.object as? GCController { self?.configure(gamepad) }
         }
 
         NotificationCenter.default.addObserver(
             forName: .GCControllerDidDisconnect, object: nil, queue: .main
         ) { [weak self] note in
-            guard let self, let manette = note.object as? GCController else { return }
-            // Relâcher tout ce qu'elle tenait — pas de bouton fantôme.
-            for clé in manetteTenu[ObjectIdentifier(manette)] ?? [] {
-                bouton(clé, pressée: false)
+            guard let self, let gamepad = note.object as? GCController else { return }
+            // Release everything it was holding — no phantom buttons.
+            for key in heldButtons[ObjectIdentifier(gamepad)] ?? [] {
+                button(key, pressed: false)
             }
-            manetteTenu[ObjectIdentifier(manette)] = nil
+            heldButtons[ObjectIdentifier(gamepad)] = nil
         }
 
-        GCController.controllers().forEach(équipe)
+        GCController.controllers().forEach(configure)
     }
 
-    private func équipe(_ manette: GCController) {
-        guard let pad = manette.extendedGamepad else { return }
-        let id = ObjectIdentifier(manette)
-        manetteTenu[id] = []
+    private func configure(_ gamepad: GCController) {
+        guard let pad = gamepad.extendedGamepad else { return }
+        let id = ObjectIdentifier(gamepad)
+        heldButtons[id] = []
 
         pad.valueChangedHandler = { [weak self] pad, _ in
-            DispatchQueue.main.async { self?.litPad(pad, id: id) }
+            DispatchQueue.main.async { self?.readPad(pad, id: id) }
         }
     }
 
-    // L'état voulu se recalcule entier à chaque événement (dpad OU stick
-    // par direction, seuil ±0,5), puis se diffe contre le tenu : seuls les
-    // fronts partent sur le tuyau.
-    private func litPad(_ pad: GCExtendedGamepad, id: ObjectIdentifier) {
-        var voulu: Set<Character> = []
+    // The wanted state is recomputed whole on every event (dpad OR stick per
+    // direction, threshold ±0.5), then diffed against the held one: only the
+    // edges go down the pipe.
+    private func readPad(_ pad: GCExtendedGamepad, id: ObjectIdentifier) {
+        var wanted: Set<Character> = []
 
-        if pad.dpad.up.isPressed || pad.leftThumbstick.yAxis.value > 0.5 { voulu.insert("U") }
-        if pad.dpad.down.isPressed || pad.leftThumbstick.yAxis.value < -0.5 { voulu.insert("D") }
-        if pad.dpad.left.isPressed || pad.leftThumbstick.xAxis.value < -0.5 { voulu.insert("L") }
-        if pad.dpad.right.isPressed || pad.leftThumbstick.xAxis.value > 0.5 { voulu.insert("R") }
-        if pad.buttonA.isPressed { voulu.insert("A") }
-        if pad.buttonB.isPressed { voulu.insert("B") }
-        if pad.buttonMenu.isPressed { voulu.insert("S") }
-        if pad.buttonOptions?.isPressed == true { voulu.insert("E") }
-        if pad.leftShoulder.isPressed { voulu.insert("W") }
+        if pad.dpad.up.isPressed || pad.leftThumbstick.yAxis.value > 0.5 { wanted.insert("U") }
+        if pad.dpad.down.isPressed || pad.leftThumbstick.yAxis.value < -0.5 { wanted.insert("D") }
+        if pad.dpad.left.isPressed || pad.leftThumbstick.xAxis.value < -0.5 { wanted.insert("L") }
+        if pad.dpad.right.isPressed || pad.leftThumbstick.xAxis.value > 0.5 { wanted.insert("R") }
+        if pad.buttonA.isPressed { wanted.insert("A") }
+        if pad.buttonB.isPressed { wanted.insert("B") }
+        if pad.buttonMenu.isPressed { wanted.insert("S") }
+        if pad.buttonOptions?.isPressed == true { wanted.insert("E") }
+        if pad.leftShoulder.isPressed { wanted.insert("W") }
 
-        let tenu = manetteTenu[id] ?? []
-        for clé in voulu.subtracting(tenu) { bouton(clé, pressée: true) }
-        for clé in tenu.subtracting(voulu) { bouton(clé, pressée: false) }
-        manetteTenu[id] = voulu
+        let held = heldButtons[id] ?? []
+        for key in wanted.subtracting(held) { button(key, pressed: true) }
+        for key in held.subtracting(wanted) { button(key, pressed: false) }
+        heldButtons[id] = wanted
 
-        // Le turbo est une bascule côté moteur : front montant seulement.
+        // Turbo is a toggle on the engine side: rising edge only.
         let turbo = pad.rightShoulder.isPressed || pad.rightTrigger.isPressed
-        if turbo && !turboTenu { tape("T") }
-        turboTenu = turbo
+        if turbo && !turboHeld { press("T") }
+        turboHeld = turbo
 
-        // X sauve, Y recharge — le réflexe console, au front montant.
-        if pad.buttonX.isPressed && !sauveTenu { tape("s") }
-        sauveTenu = pad.buttonX.isPressed
-        if pad.buttonY.isPressed && !chargeTenu { tape("r") }
-        chargeTenu = pad.buttonY.isPressed
+        // X saves, Y reloads — the console reflex, on the rising edge.
+        if pad.buttonX.isPressed && !saveHeld { press("s") }
+        saveHeld = pad.buttonX.isPressed
+        if pad.buttonY.isPressed && !loadHeld { press("r") }
+        loadHeld = pad.buttonY.isPressed
     }
 
-    private var turboTenu = false
-    private var sauveTenu = false
-    private var chargeTenu = false
+    private var turboHeld = false
+    private var saveHeld = false
+    private var loadHeld = false
 
-    // Un appui bref « depuis la barre de menus » : presse puis relâche.
-    func tape(_ clé: Character) {
-        let octet = UInt8(clé.asciiValue ?? 0)
-        try? entrée?.write(contentsOf: Data([UInt8(ascii: "+"), octet]))
-        try? entrée?.write(contentsOf: Data([UInt8(ascii: "-"), octet]))
+    // A short tap "from the menu bar": press, then release.
+    func press(_ key: Character) {
+        let byte = UInt8(key.asciiValue ?? 0)
+        try? input?.write(contentsOf: Data([UInt8(ascii: "+"), byte]))
+        try? input?.write(contentsOf: Data([UInt8(ascii: "-"), byte]))
     }
 
-    // Le mixer natif : volume 0-100 (?V) et masque des quatre voix (?X).
+    // The native mixer: volume 0-100 ('V') and the four-voice mask ('X').
     func volume(_ v: Int) {
-        try? entrée?.write(contentsOf: Data([UInt8(ascii: "V"), UInt8(max(0, min(100, v)))]))
+        try? input?.write(contentsOf: Data([UInt8(ascii: "V"), UInt8(max(0, min(100, v)))]))
     }
 
-    func voix(_ actives: [Bool]) {
-        var masque: UInt8 = 0
-        for (i, on) in actives.enumerated() where on { masque |= 1 << UInt8(i) }
-        try? entrée?.write(contentsOf: Data([UInt8(ascii: "X"), masque]))
+    func voices(_ enabled: [Bool]) {
+        var mask: UInt8 = 0
+        for (i, on) in enabled.enumerated() where on { mask |= 1 << UInt8(i) }
+        try? input?.write(contentsOf: Data([UInt8(ascii: "X"), mask]))
     }
 
-    func lance(rom: URL) {
-        arrête()
+    func launch(rom: URL) {
+        stop()
 
-        // « atomboy-moteur », pas « atomboy » : APFS est insensible à la
-        // casse, et « atomboy » écraserait la coquille « Atomboy » (vécu).
+        // "atomboy-moteur", not "atomboy": APFS is case-insensitive, and
+        // "atomboy" would clobber the "Atomboy" shell (learned the hard way).
+        // The name is also baked into bin/build and into shipped bundles —
+        // renaming it takes a coordinated change on both sides.
         let p = Process()
         p.executableURL = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/atomboy-moteur")
+        // `--serveur` is the engine's own CLI flag: it stays as it is.
         p.arguments = [rom.path, "--serveur"]
         p.currentDirectoryURL = rom.deletingLastPathComponent()
 
-        let versNous = Pipe()
-        let versMoteur = Pipe()
-        p.standardOutput = versNous
-        p.standardInput = versMoteur
+        let fromEngine = Pipe()
+        let toEngine = Pipe()
+        p.standardOutput = fromEngine
+        p.standardInput = toEngine
         p.standardError = FileHandle.standardError
 
-        versNous.fileHandleForReading.readabilityHandler = { [weak self] fh in
+        fromEngine.fileHandleForReading.readabilityHandler = { [weak self] fh in
             let data = fh.availableData
             if data.isEmpty { return }
-            DispatchQueue.main.async { self?.reçoit(data) }
+            DispatchQueue.main.async { self?.receive(data) }
         }
 
         p.terminationHandler = { _ in
             DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
         }
 
-        entrée = versMoteur.fileHandleForWriting
-        processus = p
-        jeu = rom.deletingPathExtension().lastPathComponent
-        noteRécente(rom)
+        input = toEngine.fileHandleForWriting
+        process = p
+        game = rom.deletingPathExtension().lastPathComponent
+        noteRecent(rom)
         try? p.run()
 
-        // Les réglages persistés rattrapent le moteur fraîchement né.
+        // The persisted settings catch up with the freshly born engine.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
-            let défauts = UserDefaults.standard
-            volume(défauts.object(forKey: "reglages.volume") as? Int ?? 100)
-            let masque = défauts.object(forKey: "reglages.voixMasque") as? Int ?? 15
-            voix((0..<4).map { masque & (1 << $0) != 0 })
-            envoieCodesActifs()
+            let defaults = UserDefaults.standard
+            volume(defaults.object(forKey: "reglages.volume") as? Int ?? 100)
+            let mask = defaults.object(forKey: "reglages.voixMasque") as? Int ?? 15
+            voices((0..<4).map { mask & (1 << $0) != 0 })
+            sendActiveCodes()
         }
     }
 
-    // ── Les ROMs récentes, persistées ────────────────────────────────────────
+    // ── The recent ROMs, persisted ───────────────────────────────────────────
 
-    static func chargeRécentes() -> [URL] {
+    // NOTE: "recentes" — like every "reglages.*" and "codes.*" key in this
+    // file — is a legacy French key name kept as-is: these strings address
+    // data already written to users' UserDefaults, so renaming them would
+    // silently drop everybody's settings, recent list and cheat codes.
+
+    static func loadRecents() -> [URL] {
         (UserDefaults.standard.stringArray(forKey: "recentes") ?? [])
             .map(URL.init(fileURLWithPath:))
     }
 
-    private func noteRécente(_ rom: URL) {
-        récentes.removeAll { $0.path == rom.path }
-        récentes.insert(rom, at: 0)
-        récentes = Array(récentes.prefix(8))
-        UserDefaults.standard.set(récentes.map(\.path), forKey: "recentes")
+    private func noteRecent(_ rom: URL) {
+        recentROMs.removeAll { $0.path == rom.path }
+        recentROMs.insert(rom, at: 0)
+        recentROMs = Array(recentROMs.prefix(8))
+        UserDefaults.standard.set(recentROMs.map(\.path), forKey: "recentes")
     }
 
-    func effaceRécentes() {
-        récentes = []
+    func clearRecents() {
+        recentROMs = []
         UserDefaults.standard.removeObject(forKey: "recentes")
     }
 
-    // ── Les codes GameShark, persistés par jeu ───────────────────────────────
+    // ── The GameShark codes, persisted per game ──────────────────────────────
 
-    static func chargeCodes(_ jeu: String) -> [CodeGS] {
-        guard let data = UserDefaults.standard.data(forKey: "codes." + jeu),
-              let codes = try? JSONDecoder().decode([CodeGS].self, from: data)
+    static func loadCodes(_ game: String) -> [GSCode] {
+        guard let data = UserDefaults.standard.data(forKey: "codes." + game),
+              let codes = try? JSONDecoder().decode([GSCode].self, from: data)
         else { return [] }
         return codes
     }
 
-    static func sauveCodes(_ codes: [CodeGS], jeu: String) {
+    static func saveCodes(_ codes: [GSCode], game: String) {
         if let data = try? JSONEncoder().encode(codes) {
-            UserDefaults.standard.set(data, forKey: "codes." + jeu)
+            UserDefaults.standard.set(data, forKey: "codes." + game)
         }
     }
 
-    // L'ensemble actif, envoyé en remplacement complet (?C + longueur).
-    func envoieCodesActifs() {
-        guard let jeu else { return }
-        let payload = Moteur.chargeCodes(jeu).filter(\.actif).map(\.texte).joined(separator: ",")
-        let octets = Array(payload.utf8.prefix(255))
-        var data = Data([UInt8(ascii: "C"), UInt8(octets.count)])
-        data.append(contentsOf: octets)
-        try? entrée?.write(contentsOf: data)
+    // The active set, sent as a full replacement ('C' + length).
+    func sendActiveCodes() {
+        guard let game else { return }
+        let payload = Engine.loadCodes(game).filter(\.enabled).map(\.text).joined(separator: ",")
+        let bytes = Array(payload.utf8.prefix(255))
+        var data = Data([UInt8(ascii: "C"), UInt8(bytes.count)])
+        data.append(contentsOf: bytes)
+        try? input?.write(contentsOf: data)
     }
 
-    func arrête() {
-        processus?.terminationHandler = nil
-        try? entrée?.close()
-        processus?.terminate()
-        processus = nil
+    func stop() {
+        process?.terminationHandler = nil
+        try? input?.close()
+        process?.terminate()
+        process = nil
     }
 
-    // ── Le flux entrant : frames et PCM, découpés au fil de l'eau ────────────
+    // ── The incoming stream: frames and PCM, sliced as they arrive ───────────
 
-    private func reçoit(_ data: Data) {
-        tampon.append(data)
+    private func receive(_ data: Data) {
+        buffer.append(data)
 
         while true {
-            guard let tag = tampon.first else { return }
+            guard let tag = buffer.first else { return }
 
             if tag == UInt8(ascii: "F") {
-                guard tampon.count >= 1 + FRAME_OCTETS else { return }
-                dessine(tampon.subdata(in: 1..<(1 + FRAME_OCTETS)))
-                tampon.removeSubrange(0..<(1 + FRAME_OCTETS))
+                guard buffer.count >= 1 + FRAME_BYTES else { return }
+                draw(buffer.subdata(in: 1..<(1 + FRAME_BYTES)))
+                buffer.removeSubrange(0..<(1 + FRAME_BYTES))
             } else if tag == UInt8(ascii: "A") {
-                guard tampon.count >= 3 else { return }
-                let n = Int(tampon[1]) << 8 | Int(tampon[2])
-                guard tampon.count >= 3 + n else { return }
-                joue(tampon.subdata(in: 3..<(3 + n)))
-                tampon.removeSubrange(0..<(3 + n))
+                guard buffer.count >= 3 else { return }
+                let n = Int(buffer[1]) << 8 | Int(buffer[2])
+                guard buffer.count >= 3 + n else { return }
+                play(buffer.subdata(in: 3..<(3 + n)))
+                buffer.removeSubrange(0..<(3 + n))
             } else {
-                // Flux désynchronisé : jeter l'octet et se rattraper.
-                tampon.removeFirst()
+                // Stream out of sync: drop the byte and catch up.
+                buffer.removeFirst()
             }
         }
     }
 
-    private func dessine(_ rgb: Data) {
+    private func draw(_ rgb: Data) {
         guard let provider = CGDataProvider(data: rgb as CFData),
               let image = CGImage(
-                  width: LARGEUR, height: HAUTEUR, bitsPerComponent: 8, bitsPerPixel: 24,
-                  bytesPerRow: LARGEUR * 3, space: CGColorSpaceCreateDeviceRGB(),
+                  width: WIDTH, height: HEIGHT, bitsPerComponent: 8, bitsPerPixel: 24,
+                  bytesPerRow: WIDTH * 3, space: CGColorSpaceCreateDeviceRGB(),
                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
                   provider: provider, decode: nil, shouldInterpolate: false,
                   intent: .defaultIntent)
@@ -285,57 +293,57 @@ final class Moteur: ObservableObject {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        couche.contents = image
+        layer.contents = image
         CATransaction.commit()
     }
 
-    private func joue(_ pcm: Data) {
-        if !audioLancé {
-            audio.attach(lecteur)
-            audio.connect(lecteur, to: audio.mainMixerNode, format: format)
+    private func play(_ pcm: Data) {
+        if !audioStarted {
+            audio.attach(player)
+            audio.connect(player, to: audio.mainMixerNode, format: format)
             try? audio.start()
-            lecteur.play()
-            audioLancé = true
+            player.play()
+            audioStarted = true
         }
 
-        let trames = pcm.count / 4
-        guard trames > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(trames))
+        let frames = pcm.count / 4
+        guard frames > 0,
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))
         else { return }
-        buffer.frameLength = AVAudioFrameCount(trames)
+        pcmBuffer.frameLength = AVAudioFrameCount(frames)
 
-        pcm.withUnsafeBytes { (brut: UnsafeRawBufferPointer) in
-            let s16 = brut.bindMemory(to: Int16.self)
-            let gauche = buffer.floatChannelData![0]
-            let droite = buffer.floatChannelData![1]
-            for i in 0..<trames {
-                gauche[i] = Float(Int16(littleEndian: s16[2 * i])) / 32768.0
-                droite[i] = Float(Int16(littleEndian: s16[2 * i + 1])) / 32768.0
+        pcm.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let s16 = raw.bindMemory(to: Int16.self)
+            let left = pcmBuffer.floatChannelData![0]
+            let right = pcmBuffer.floatChannelData![1]
+            for i in 0..<frames {
+                left[i] = Float(Int16(littleEndian: s16[2 * i])) / 32768.0
+                right[i] = Float(Int16(littleEndian: s16[2 * i + 1])) / 32768.0
             }
         }
 
-        lecteur.scheduleBuffer(buffer, completionHandler: nil)
+        player.scheduleBuffer(pcmBuffer, completionHandler: nil)
     }
 
-    // ── Le clavier, relayé ───────────────────────────────────────────────────
+    // ── The keyboard, relayed ────────────────────────────────────────────────
 
-    func touche(_ event: NSEvent, pressée: Bool) -> Bool {
-        guard let clé = Moteur.clé(event) else { return false }
-        let op: UInt8 = pressée ? UInt8(ascii: "+") : UInt8(ascii: "-")
-        try? entrée?.write(contentsOf: Data([op, clé]))
+    func handleKey(_ event: NSEvent, pressed: Bool) -> Bool {
+        guard let key = Engine.key(event) else { return false }
+        let op: UInt8 = pressed ? UInt8(ascii: "+") : UInt8(ascii: "-")
+        try? input?.write(contentsOf: Data([op, key]))
         return true
     }
 
-    private static func clé(_ event: NSEvent) -> UInt8? {
+    private static func key(_ event: NSEvent) -> UInt8? {
         switch event.keyCode {
         case 123: return UInt8(ascii: "L")
         case 124: return UInt8(ascii: "R")
         case 125: return UInt8(ascii: "D")
         case 126: return UInt8(ascii: "U")
-        case 36: return UInt8(ascii: "S")  // Entrée = Start
-        case 49: return UInt8(ascii: "E")  // Espace = Select
-        case 53: return UInt8(ascii: "M")  // Échap = menu
-        case 51: return UInt8(ascii: "W")  // Retour arrière = rembobinage
+        case 36: return UInt8(ascii: "S")  // Return = Start
+        case 49: return UInt8(ascii: "E")  // Space = Select
+        case 53: return UInt8(ascii: "M")  // Esc = menu
+        case 51: return UInt8(ascii: "W")  // Delete = rewind
         case 48: return UInt8(ascii: "T")  // Tab = turbo
         default: break
         }
@@ -350,109 +358,111 @@ final class Moteur: ObservableObject {
     }
 }
 
-// ── La vue : une couche à l'échelle, le clavier en prise directe ─────────────
+// ── The view: one scaled layer, the keyboard tapped directly ─────────────────
 
-final class VueÉcran: NSView {
-    var moteur: Moteur?
+final class ScreenView: NSView {
+    var engine: Engine?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func makeBackingLayer() -> CALayer {
-        moteur?.couche ?? CALayer()
+        engine?.layer ?? CALayer()
     }
 
-    // La fenêtre garde le ratio de la dalle : pas de bandes noires — et le
-    // clavier nous revient dès qu'elle existe, sans clic préalable. Sans
-    // barre de titre, c'est la frame qu'on attrape pour déplacer la fenêtre.
+    // The window keeps the panel's aspect ratio: no black bars — and the
+    // keyboard comes back to us as soon as the window exists, with no click
+    // first. Without a title bar, the frame itself is what you grab to move
+    // the window.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.contentAspectRatio = NSSize(width: LARGEUR, height: HAUTEUR)
+        window?.contentAspectRatio = NSSize(width: WIDTH, height: HEIGHT)
         window?.isMovableByWindowBackground = true
         window?.makeFirstResponder(self)
 
-        // Les feux tricolores naissent effacés — ils n'apparaissent qu'au
-        // survol, comme la HUD.
-        for bouton in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window?.standardWindowButton(bouton)?.alphaValue = 0
+        // The traffic lights are born invisible — they only show up on
+        // hover, like the HUD.
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window?.standardWindowButton(button)?.alphaValue = 0
         }
     }
 
     override func keyDown(with event: NSEvent) {
         if event.isARepeat { return }
 
-        // Échap (ou m) : le panneau NATIF, pas le menu pixel du moteur —
-        // dans une app macOS, les réglages parlent SwiftUI.
+        // Esc (or m): the NATIVE panel, not the engine's pixel menu — in a
+        // macOS app, settings speak SwiftUI.
         if event.keyCode == 53 || event.charactersIgnoringModifiers?.lowercased() == "m" {
-            moteur?.panneau.toggle()
+            engine?.settingsRequested.toggle()
             return
         }
 
-        if moteur?.touche(event, pressée: true) != true { super.keyDown(with: event) }
+        if engine?.handleKey(event, pressed: true) != true { super.keyDown(with: event) }
     }
 
     override func keyUp(with event: NSEvent) {
-        if moteur?.touche(event, pressée: false) != true { super.keyUp(with: event) }
+        if engine?.handleKey(event, pressed: false) != true { super.keyUp(with: event) }
     }
 }
 
-struct Écran: NSViewRepresentable {
-    let moteur: Moteur
+struct Screen: NSViewRepresentable {
+    let engine: Engine
 
-    func makeNSView(context: Context) -> VueÉcran {
-        let vue = VueÉcran()
-        vue.moteur = moteur
-        vue.wantsLayer = true
-        DispatchQueue.main.async { vue.window?.makeFirstResponder(vue) }
-        return vue
+    func makeNSView(context: Context) -> ScreenView {
+        let view = ScreenView()
+        view.engine = engine
+        view.wantsLayer = true
+        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        return view
     }
 
-    func updateNSView(_ vue: VueÉcran, context: Context) {}
+    func updateNSView(_ view: ScreenView, context: Context) {}
 }
 
-// ── La HUD de verre : les commandes au survol, l'écran sinon ─────────────────
+// ── The glass HUD: the controls on hover, the screen otherwise ───────────────
 
-struct BoutonHUD: View {
-    let symbole: String
-    let aide: String
+struct HUDButton: View {
+    let symbol: String
+    let tooltip: String
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbole)
+            Image(systemName: symbol)
                 .font(.system(size: 15, weight: .medium))
                 .frame(width: 34, height: 30)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(aide)
+        .help(tooltip)
     }
 }
 
 struct HUD: View {
-    @ObservedObject var moteur: Moteur
+    @ObservedObject var engine: Engine
 
     var body: some View {
         HStack(spacing: 2) {
-            BoutonHUD(symbole: "forward.fill", aide: "Turbo (Tab)") { moteur.tape("T") }
-            BoutonHUD(symbole: "square.and.arrow.down", aide: "Sauver l'état (⌘S)") { moteur.tape("s") }
-            BoutonHUD(symbole: "arrow.counterclockwise", aide: "Charger l'état (⌘R)") { moteur.tape("r") }
-            BoutonHUD(symbole: "slider.horizontal.3", aide: "Réglages (Échap)") { moteur.panneau.toggle() }
+            HUDButton(symbol: "forward.fill", tooltip: "Turbo (Tab)") { engine.press("T") }
+            HUDButton(symbol: "square.and.arrow.down", tooltip: "Save State (⌘S)") { engine.press("s") }
+            HUDButton(symbol: "arrow.counterclockwise", tooltip: "Load State (⌘R)") { engine.press("r") }
+            HUDButton(symbol: "slider.horizontal.3", tooltip: "Settings (Esc)") { engine.settingsRequested.toggle() }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .modifier(Verre())
+        .modifier(Glass())
     }
 }
 
-// ── Les Réglages (⌘,) : la convention macOS, persistée ───────────────────────
+// ── Settings (⌘,): the macOS convention, persisted ───────────────────────────
 
-struct RéglagesGénéral: View {
-    @AppStorage("reglages.reprise") private var reprise = true
+struct GeneralSettings: View {
+    // Legacy French UserDefaults key — kept for data compatibility.
+    @AppStorage("reglages.reprise") private var resume = true
 
     var body: some View {
         Form {
-            Toggle("Reprendre le dernier jeu au lancement", isOn: $reprise)
-            Text("Sinon, l'app propose de choisir une ROM.")
+            Toggle("Resume the last game on launch", isOn: $resume)
+            Text("Otherwise, the app asks you to pick a ROM.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -460,19 +470,20 @@ struct RéglagesGénéral: View {
     }
 }
 
-struct RéglagesAudio: View {
-    let moteur: Moteur
+struct AudioSettings: View {
+    let engine: Engine
+    // Legacy French UserDefaults keys — kept for data compatibility.
     @AppStorage("reglages.volume") private var volume = 100
-    @AppStorage("reglages.voixMasque") private var masque = 15
+    @AppStorage("reglages.voixMasque") private var mask = 15
 
-    init(moteur: Moteur) { self.moteur = moteur }
+    init(engine: Engine) { self.engine = engine }
 
-    private func voixLiée(_ i: Int) -> Binding<Bool> {
+    private func voiceBinding(_ i: Int) -> Binding<Bool> {
         Binding(
-            get: { masque & (1 << i) != 0 },
+            get: { mask & (1 << i) != 0 },
             set: { on in
-                masque = on ? masque | (1 << i) : masque & ~(1 << i)
-                moteur.voix((0..<4).map { masque & (1 << $0) != 0 })
+                mask = on ? mask | (1 << i) : mask & ~(1 << i)
+                engine.voices((0..<4).map { mask & (1 << $0) != 0 })
             }
         )
     }
@@ -484,56 +495,56 @@ struct RéglagesAudio: View {
                 Slider(
                     value: Binding(
                         get: { Double(volume) },
-                        set: { volume = Int($0); moteur.volume(volume) }
+                        set: { volume = Int($0); engine.volume(volume) }
                     ), in: 0...100, step: 10)
                 Text("\(volume)").monospacedDigit().frame(width: 32, alignment: .trailing)
             }
 
-            Section("Voix") {
-                Toggle("Pulse 1", isOn: voixLiée(0))
-                Toggle("Pulse 2", isOn: voixLiée(1))
-                Toggle("Wave", isOn: voixLiée(2))
-                Toggle("Bruit", isOn: voixLiée(3))
+            Section("Voices") {
+                Toggle("Pulse 1", isOn: voiceBinding(0))
+                Toggle("Pulse 2", isOn: voiceBinding(1))
+                Toggle("Wave", isOn: voiceBinding(2))
+                Toggle("Noise", isOn: voiceBinding(3))
             }
         }
         .padding(20)
     }
 }
 
-struct RéglagesCodes: View {
-    @ObservedObject var moteur: Moteur
-    @State private var codes: [CodeGS] = []
-    @State private var saisie = ""
+struct CodesSettings: View {
+    @ObservedObject var engine: Engine
+    @State private var codes: [GSCode] = []
+    @State private var entry = ""
 
-    init(moteur: Moteur) { self.moteur = moteur }
+    init(engine: Engine) { self.engine = engine }
 
-    private var saisieValide: Bool {
-        saisie.count == 8 && saisie.lowercased().hasPrefix("01")
-            && saisie.allSatisfy(\.isHexDigit)
+    private var entryIsValid: Bool {
+        entry.count == 8 && entry.lowercased().hasPrefix("01")
+            && entry.allSatisfy(\.isHexDigit)
     }
 
-    private func enregistre() {
-        guard let jeu = moteur.jeu else { return }
-        Moteur.sauveCodes(codes, jeu: jeu)
-        moteur.envoieCodesActifs()
+    private func commit() {
+        guard let game = engine.game else { return }
+        Engine.saveCodes(codes, game: game)
+        engine.sendActiveCodes()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let jeu = moteur.jeu {
-                Text(jeu).font(.headline)
+            if let game = engine.game {
+                Text(game).font(.headline)
 
                 List {
                     ForEach($codes) { $code in
                         HStack {
-                            Toggle("", isOn: $code.actif)
+                            Toggle("", isOn: $code.enabled)
                                 .labelsHidden()
-                                .onChange(of: code.actif) { enregistre() }
-                            Text(code.texte.uppercased()).monospaced()
+                                .onChange(of: code.enabled) { commit() }
+                            Text(code.text.uppercased()).monospaced()
                             Spacer()
                             Button {
                                 codes.removeAll { $0.id == code.id }
-                                enregistre()
+                                commit()
                             } label: {
                                 Image(systemName: "trash")
                             }
@@ -544,43 +555,43 @@ struct RéglagesCodes: View {
                 .frame(minHeight: 140)
 
                 HStack {
-                    TextField("01FF16D1", text: $saisie)
+                    TextField("01FF16D1", text: $entry)
                         .textFieldStyle(.roundedBorder)
                         .monospaced()
-                        .onSubmit { ajoute() }
-                    Button("Ajouter") { ajoute() }
-                        .disabled(!saisieValide)
+                        .onSubmit { add() }
+                    Button("Add") { add() }
+                        .disabled(!entryIsValid)
                 }
 
-                Text("Format GameShark : 01 + valeur + adresse (petit-boutiste).")
+                Text("GameShark format: 01 + value + address (little-endian).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Lance un jeu pour lui attacher des codes.")
+                Text("Start a game to attach codes to it.")
                     .foregroundStyle(.secondary)
             }
         }
         .padding(20)
-        .onAppear { charge() }
-        .onChange(of: moteur.jeu) { charge() }
+        .onAppear { load() }
+        .onChange(of: engine.game) { load() }
     }
 
-    private func charge() {
-        codes = moteur.jeu.map(Moteur.chargeCodes) ?? []
+    private func load() {
+        codes = engine.game.map(Engine.loadCodes) ?? []
     }
 
-    private func ajoute() {
-        guard saisieValide, let _ = moteur.jeu else { return }
-        let texte = saisie.uppercased()
-        guard !codes.contains(where: { $0.texte == texte }) else { return }
-        codes.append(CodeGS(texte: texte, actif: true))
-        saisie = ""
-        enregistre()
+    private func add() {
+        guard entryIsValid, let _ = engine.game else { return }
+        let text = entry.uppercased()
+        guard !codes.contains(where: { $0.text == text }) else { return }
+        codes.append(GSCode(text: text, enabled: true))
+        entry = ""
+        commit()
     }
 }
 
-// Liquid Glass quand le système le parle, verre dépoli sinon.
-struct Verre: ViewModifier {
+// Liquid Glass when the system speaks it, frosted glass otherwise.
+struct Glass: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
             content.glassEffect(.regular, in: Capsule())
@@ -590,124 +601,127 @@ struct Verre: ViewModifier {
     }
 }
 
-struct Scène: View {
-    @ObservedObject var moteur: Moteur
-    @State private var survol = false
-    @Environment(\.openSettings) private var ouvreRéglages
+// Named MainScene, not Scene: a type called Scene in this module would
+// shadow SwiftUI's Scene protocol that AtomboyApp.body returns.
+struct MainScene: View {
+    @ObservedObject var engine: Engine
+    @State private var hovering = false
+    @Environment(\.openSettings) private var openSettings
 
-    init(moteur: Moteur) { self.moteur = moteur }
+    init(engine: Engine) { self.engine = engine }
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Écran(moteur: moteur)
+            Screen(engine: engine)
                 .ignoresSafeArea()
 
-            HUD(moteur: moteur)
+            HUD(engine: engine)
                 .padding(.bottom, 14)
-                .opacity(survol ? 1 : 0)
-                .animation(.easeOut(duration: 0.18), value: survol)
+                .opacity(hovering ? 1 : 0)
+                .animation(.easeOut(duration: 0.18), value: hovering)
         }
-        // Échap et le bouton réglages de la HUD mènent à LA fenêtre de
-        // Réglages (⌘,) — la convention macOS, pas un panneau maison.
-        .onChange(of: moteur.panneau) {
-            if moteur.panneau {
-                ouvreRéglages()
-                moteur.panneau = false
+        // Esc and the HUD's settings button both lead to THE Settings window
+        // (⌘,) — the macOS convention, not a home-made panel.
+        .onChange(of: engine.settingsRequested) {
+            if engine.settingsRequested {
+                openSettings()
+                engine.settingsRequested = false
             }
         }
-        .onHover { dedans in
-            survol = dedans
-            feux(visibles: dedans)
+        .onHover { inside in
+            hovering = inside
+            trafficLights(visible: inside)
         }
     }
 
-    // Les feux tricolores suivent la règle de la HUD : visibles au survol,
-    // effacés pendant le jeu — ils mordaient l'UI des combats.
-    private func feux(visibles: Bool) {
-        for fenêtre in NSApp.windows {
-            for bouton in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                fenêtre.standardWindowButton(bouton)?.animator().alphaValue = visibles ? 1 : 0
+    // The traffic lights follow the HUD's rule: visible on hover, wiped
+    // during play — they used to bite into the battle UI.
+    private func trafficLights(visible: Bool) {
+        for window in NSApp.windows {
+            for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                window.standardWindowButton(button)?.animator().alphaValue = visible ? 1 : 0
             }
         }
     }
 }
 
-// ── L'application ────────────────────────────────────────────────────────────
+// ── The application ──────────────────────────────────────────────────────────
 
-final class Délégué: NSObject, NSApplicationDelegate {
-    let moteur = Moteur()
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let engine = Engine()
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let rom = urls.first { moteur.lance(rom: rom) }
+        if let rom = urls.first { engine.launch(rom: rom) }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Lancé sans document : reprendre le dernier jeu (débrayable dans
-        // les Réglages) — sinon, proposer une ROM.
+        // Launched without a document: resume the last game (can be turned
+        // off in Settings) — otherwise, offer to pick a ROM.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
-            guard moteur.estInactif else { return }
+            guard engine.isIdle else { return }
 
-            let reprise = UserDefaults.standard.object(forKey: "reglages.reprise") == nil
+            // Legacy French UserDefaults key — kept for data compatibility.
+            let resume = UserDefaults.standard.object(forKey: "reglages.reprise") == nil
                 || UserDefaults.standard.bool(forKey: "reglages.reprise")
 
-            if reprise, let dernière = moteur.récentes.first(where: {
+            if resume, let latest = engine.recentROMs.first(where: {
                 FileManager.default.fileExists(atPath: $0.path)
             }) {
-                moteur.lance(rom: dernière)
+                engine.launch(rom: latest)
             } else {
-                choisisROM()
+                chooseROM()
             }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        moteur.arrête()
+        engine.stop()
     }
 
-    func choisisROM() {
-        let panneau = NSOpenPanel()
-        panneau.title = "Choisir une ROM Game Boy"
-        panneau.allowedFileTypes = ["gb", "gbc"]
-        if panneau.runModal() == .OK, let url = panneau.url {
-            moteur.lance(rom: url)
+    func chooseROM() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Game Boy ROM"
+        panel.allowedFileTypes = ["gb", "gbc"]
+        if panel.runModal() == .OK, let url = panel.url {
+            engine.launch(rom: url)
         }
     }
 }
 
-extension Moteur {
-    // « Inactif » = aucun moteur lancé — pas « aucune frame reçue » : un
-    // double-clic sur une ROM lance le moteur avant la première frame.
-    var estInactif: Bool { processusEnCours == nil }
+extension Engine {
+    // "Idle" = no engine running — not "no frame received yet": a
+    // double-click on a ROM starts the engine before the first frame.
+    var isIdle: Bool { runningProcess == nil }
 }
 
-// Le menu Fichier : ouvrir, et les ROMs récentes — observées, le menu se
-// met à jour quand la liste bouge.
-struct CommandesFichier: Commands {
-    let délégué: Délégué
-    @ObservedObject var moteur: Moteur
+// The File menu: open, and the recent ROMs — observed, so the menu updates
+// itself when the list moves.
+struct FileCommands: Commands {
+    let delegate: AppDelegate
+    @ObservedObject var engine: Engine
 
-    init(délégué: Délégué) {
-        self.délégué = délégué
-        self.moteur = délégué.moteur
+    init(delegate: AppDelegate) {
+        self.delegate = delegate
+        self.engine = delegate.engine
     }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Ouvrir une ROM…") { délégué.choisisROM() }
+            Button("Open ROM…") { delegate.chooseROM() }
                 .keyboardShortcut("o")
 
-            Menu("ROMs récentes") {
-                ForEach(moteur.récentes, id: \.path) { rom in
+            Menu("Recent ROMs") {
+                ForEach(engine.recentROMs, id: \.path) { rom in
                     Button(rom.deletingPathExtension().lastPathComponent) {
-                        moteur.lance(rom: rom)
+                        engine.launch(rom: rom)
                     }
                 }
 
-                if moteur.récentes.isEmpty {
-                    Button("(vide)") {}.disabled(true)
+                if engine.recentROMs.isEmpty {
+                    Button("(empty)") {}.disabled(true)
                 } else {
                     Divider()
-                    Button("Effacer la liste") { moteur.effaceRécentes() }
+                    Button("Clear List") { engine.clearRecents() }
                 }
             }
         }
@@ -716,54 +730,54 @@ struct CommandesFichier: Commands {
 
 @main
 struct AtomboyApp: App {
-    @NSApplicationDelegateAdaptor(Délégué.self) var délégué
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
     var body: some Scene {
         WindowGroup("atomboy") {
-            // Plein cadre : la frame va jusqu'aux coins arrondis de la
-            // fenêtre, les feux tricolores flottent par-dessus — le ratio
-            // est verrouillé par la fenêtre elle-même (contentAspectRatio).
-            Scène(moteur: délégué.moteur)
-                .frame(minWidth: CGFloat(LARGEUR * 2), minHeight: CGFloat(HAUTEUR * 2))
+            // Full frame: the picture runs all the way to the window's
+            // rounded corners, the traffic lights float on top — the aspect
+            // ratio is locked by the window itself (contentAspectRatio).
+            MainScene(engine: delegate.engine)
+                .frame(minWidth: CGFloat(WIDTH * 2), minHeight: CGFloat(HEIGHT * 2))
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: CGFloat(LARGEUR * 3), height: CGFloat(HAUTEUR * 3))
+        .defaultSize(width: CGFloat(WIDTH * 3), height: CGFloat(HEIGHT * 3))
         .commands {
-            CommandesFichier(délégué: délégué)
+            FileCommands(delegate: delegate)
 
-            // L'idiome natif : les actions du jeu vivent aussi dans la
-            // barre de menus — le menu en jeu (Échap) reste pour le style.
-            CommandMenu("Partie") {
-                Button("Sauver l'état") { délégué.moteur.tape("s") }
+            // The native idiom: the game's actions live in the menu bar too
+            // — the in-game menu (Esc) stays around for the style.
+            CommandMenu("Game") {
+                Button("Save State") { delegate.engine.press("s") }
                     .keyboardShortcut("s")
-                Button("Charger l'état") { délégué.moteur.tape("r") }
+                Button("Load State") { delegate.engine.press("r") }
                     .keyboardShortcut("r")
 
-                Menu("Case d'état") {
+                Menu("State Slot") {
                     ForEach(1...9, id: \.self) { n in
-                        Button("Case \(n)") { délégué.moteur.tape(Character("\(n)")) }
+                        Button("Slot \(n)") { delegate.engine.press(Character("\(n)")) }
                             .keyboardShortcut(KeyEquivalent(Character("\(n)")))
                     }
                 }
 
                 Divider()
 
-                Button("Turbo") { délégué.moteur.tape("T") }
+                Button("Turbo") { delegate.engine.press("T") }
                     .keyboardShortcut("t")
-                Button("Menu rétro (dans le jeu)") { délégué.moteur.tape("M") }
+                Button("Retro Menu (in game)") { delegate.engine.press("M") }
             }
         }
 
-        // ⌘, et « Réglages… » dans le menu de l'app — la convention, servie
-        // par SwiftUI : audio (mixer) et codes GameShark, persistés.
+        // ⌘, and "Settings…" in the app menu — the convention, served by
+        // SwiftUI: audio (mixer) and GameShark codes, both persisted.
         Settings {
             TabView {
-                RéglagesGénéral()
-                    .tabItem { Label("Général", systemImage: "gearshape") }
-                RéglagesAudio(moteur: délégué.moteur)
+                GeneralSettings()
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                AudioSettings(engine: delegate.engine)
                     .tabItem { Label("Audio", systemImage: "speaker.wave.2") }
-                RéglagesCodes(moteur: délégué.moteur)
-                    .tabItem { Label("Codes GameShark", systemImage: "wand.and.stars") }
+                CodesSettings(engine: delegate.engine)
+                    .tabItem { Label("GameShark Codes", systemImage: "wand.and.stars") }
             }
             .frame(width: 440)
         }

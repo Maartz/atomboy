@@ -1,37 +1,36 @@
 defmodule Atomboy.CPU do
   @moduledoc """
-  Le CPU SM83 (Sharp LR35902) de la Game Boy DMG.
+  The Game Boy DMG's SM83 CPU (Sharp LR35902).
 
-  Ce n'est **pas** un Z80 : pas d'IX/IY, pas de registres fantômes, pas de
-  préfixes DD/ED/FD, drapeaux différents, et des opcodes qui n'existent nulle
-  part ailleurs (`LDH`, `LD (HL+)`, `SWAP`, `STOP`). Toute table Z80 récupérée
-  telle quelle sera fausse.
+  This is **not** a Z80: no IX/IY, no shadow registers, no DD/ED/FD prefixes,
+  different flags, and opcodes that exist nowhere else (`LDH`, `LD (HL+)`,
+  `SWAP`, `STOP`). Any Z80 table lifted as-is will be wrong.
 
-  ## État
+  ## State
 
-  Tout l'état du processeur tient dans un `Atomboy.CPU.State` — registres,
-  drapeaux et état d'interruption. La mémoire est threadée à part, en second
-  terme : sa forme dépend du backend (voir `Atomboy.Memory`).
+  The whole processor state fits in one `Atomboy.CPU.State` — registers, flags
+  and interrupt state. Memory is threaded alongside, as a second term: its shape
+  depends on the backend (see `Atomboy.Memory`).
 
-  ## Coût connu, et où il part
+  ## The known cost, and where it goes
 
-  `exec/3` renvoie `{state, mem, t_cycles}`, soit une allocation de tuple par
-  instruction, plus la copie de la structure quand un registre change. C'est
-  assumé pour la phase 1, où le critère est la justesse et où le harnais
-  SingleStepTests a besoin d'observer l'état après chaque instruction.
+  `exec/3` returns `{state, mem, t_cycles}` — one tuple allocation per
+  instruction, plus a copy of the struct whenever a register changes. That is
+  accepted for phase 1, where correctness is the only criterion and where the
+  SingleStepTests harness needs to observe the state after every instruction.
 
-  La suppression de ce coût est déjà cadrée : au lieu de renvoyer, `exec/3` fera
-  un appel terminal vers le fetch suivant et ne matérialisera le résultat qu'en
-  fin de budget de cycles — une fois par scanline au lieu d'une fois par
-  instruction. Le passage se fait dans le générateur, pas dans 500 clauses :
-  c'est tout l'intérêt de `Atomboy.CPU.Gen`.
+  Removing that cost is already mapped out: instead of returning, `exec/3` will
+  tail-call the next fetch and materialise the result only when the cycle budget
+  runs out — once per scanline instead of once per instruction. The switch
+  happens inside the generator, not across 500 clauses: that is the whole point
+  of `Atomboy.CPU.Gen`.
 
   ## Cycles
 
-  Comptés en **T-cycles** (4 194 304 par seconde), pas en M-cycles. Le PPU
-  raisonne en T-cycles — 456 par scanline — et c'est la granularité à laquelle
-  la boucle de frame synchronisera. Les vecteurs SingleStepTests, eux, listent
-  un accès bus par M-cycle : la conversion est `length(cycles) * 4`.
+  Counted in **T-cycles** (4,194,304 per second), not M-cycles. The PPU thinks
+  in T-cycles — 456 per scanline — and that is the granularity the frame loop
+  will synchronise on. The SingleStepTests vectors, for their part, list one bus
+  access per M-cycle: the conversion is `length(cycles) * 4`.
   """
 
   import Bitwise
@@ -43,61 +42,59 @@ defmodule Atomboy.CPU do
 
   require Gen
 
-  @typedoc "Préfixe d'opcode : `nil` pour la table de base, `:cb` pour la table étendue."
+  @typedoc "Opcode prefix: `nil` for the base table, `:cb` for the extended one."
   @type prefix :: nil | :cb
 
-  # Résolu à la compilation : aucun dispatch dynamique sur le chemin chaud.
-  # La phase 3 bascule vers le backend NIF par configuration, sans toucher au CPU.
+  # Resolved at compile time: no dynamic dispatch on the hot path. Phase 3
+  # switches to the NIF backend through configuration, without touching the CPU.
   @mem Application.compile_env(:atomboy, :memory, Atomboy.Memory.Flat)
 
-  @doc "Le module `Atomboy.Memory` compilé dans ce CPU."
+  @doc "The `Atomboy.Memory` module compiled into this CPU."
   @spec memory_backend() :: module()
   def memory_backend, do: @mem
 
   Module.register_attribute(__MODULE__, :implemented, accumulate: true)
 
   @doc """
-  Exécute une instruction : fetch à `pc`, décodage, exécution.
+  Runs one instruction: fetch at `pc`, decode, execute.
 
-  Renvoie `{state, mem, t_cycles}`. **Aucun matériel** : ni service
-  d'interruption, ni réveil de HALT — c'est le contrat des vecteurs
-  SingleStepTests, qui ne modélisent que l'instruction. Le pas complet, avec
-  le contrôleur d'interruptions, est `tick/2`.
+  Returns `{state, mem, t_cycles}`. **No hardware**: no interrupt servicing, no
+  wake from HALT — that is the contract of the SingleStepTests vectors, which
+  model the instruction and nothing else. The complete step, interrupt
+  controller included, is `tick/2`.
   """
   @spec step(State.t(), Atomboy.Memory.t()) ::
           {State.t(), Atomboy.Memory.t(), pos_integer()}
   def step(%State{pc: pc} = st, mem) do
-    # L'armement d'un EI antérieur se promeut à l'entrée du pas suivant — même
-    # point que le fetch de la boucle rapide, pour que les deux backends
-    # restent indiscernables.
+    # An EI armed earlier is promoted on entering the next step — the same point
+    # as the fast loop's fetch, so that the two backends stay indistinguishable.
     st = if st.ime_pending == 1, do: %{st | ime: 1, ime_pending: 0}, else: st
 
     opcode = @mem.read8(mem, pc)
-    # PC est avancé avant l'exécution : les clauses générées n'ont donc à s'en
-    # occuper que si elles sautent, ce qui est le cas minoritaire.
+    # PC is advanced before execution, so the generated clauses only have to
+    # deal with it when they jump — the minority case.
     exec(opcode, %{st | pc: pc + 1 &&& 0xFFFF}, mem)
   end
 
-  # Les cinq sources, dans l'ordre de priorité du matériel : vblank, STAT,
-  # timer, série, joypad. Vecteurs 0x40, 0x48, 0x50, 0x58, 0x60.
+  # The five sources, in the hardware's priority order: vblank, STAT, timer,
+  # serial, joypad. Vectors 0x40, 0x48, 0x50, 0x58, 0x60.
   @irq_if 0xFF0F
   @irq_ie 0xFFFF
 
   @doc """
-  Un pas complet de machine : promotion d'EI, sommeil de HALT, service
-  d'interruption, puis instruction.
+  One complete machine step: EI promotion, HALT sleep, interrupt servicing, then
+  the instruction.
 
-  C'est le miroir exact du fetch des boucles rapides — même ordre, mêmes
-  cycles — et c'est lui que le test d'équivalence croisée pilote. Un pas rend
-  l'un de :
+  This is the exact mirror of the fast loops' fetch — same order, same cycles —
+  and it is what the cross-equivalence test drives. A step yields one of:
 
-    * un cycle de sommeil (4 T) — HALT sans interruption en attente ;
-    * un service (20 T) — IME actif et une source en attente : IME retombe,
-      le bit d'IF s'efface, PC part sur la pile, le vecteur prend la main ;
-    * une instruction, via `step/2`.
+    * a sleep cycle (4 T) — HALT with no interrupt pending;
+    * a service (20 T) — IME set and a source pending: IME drops, the IF bit
+      clears, PC goes onto the stack, the vector takes over;
+    * an instruction, through `step/2`.
 
-  IF et IE sont lus **en mémoire** (0xFF0F / 0xFFFF), pas dans le champ `ie`
-  du struct — c'est là que les programmes les écrivent.
+  IF and IE are read **from memory** (0xFF0F / 0xFFFF), not from the struct's
+  `ie` field — memory is where programs write them.
   """
   @spec tick(State.t(), Atomboy.Memory.t()) ::
           {State.t(), Atomboy.Memory.t(), pos_integer()}
@@ -110,8 +107,8 @@ defmodule Atomboy.CPU do
         {st, mem, 4}
 
       st.halted ->
-        # Le réveil est gratuit ; le service éventuel se joue au pas suivant,
-        # comme dans les boucles.
+        # Waking up is free; any servicing happens on the next step, exactly as
+        # in the loops.
         tick(%{st | halted: false}, mem)
 
       st.ime == 1 and irq != 0 ->
@@ -123,7 +120,7 @@ defmodule Atomboy.CPU do
   end
 
   defp service(%State{sp: sp, pc: pc} = st, mem, irq) do
-    # Le bit de poids faible en attente gagne.
+    # The lowest pending bit wins.
     bit = irq &&& -irq
     index = index_of(bit)
     new_sp = sp - 2 &&& 0xFFFF
@@ -138,13 +135,13 @@ defmodule Atomboy.CPU do
   defp index_of(0x08), do: 3
   defp index_of(0x10), do: 4
 
-  # ── Le dispatch ─────────────────────────────────────────────────────────────
+  # ── The dispatch ────────────────────────────────────────────────────────────
   #
-  # Rien à lire ici : la description des instructions est dans
-  # `Atomboy.CPU.Table`, leur traduction en code dans `Atomboy.CPU.Gen`. Le
-  # dispatch est un arbre à deux étages, pas des clauses plates — voir le
-  # commentaire de Gen sur le select_val linéaire du JIT d'AtomVM. 0xCB y est
-  # une entrée comme une autre, qui fetch le second octet et redispatche.
+  # Nothing to read here: the instructions are described in `Atomboy.CPU.Table`
+  # and translated into code by `Atomboy.CPU.Gen`. The dispatch is a two-level
+  # tree, not flat clauses — see Gen's comment on the AtomVM JIT's linear
+  # select_val. 0xCB is just another entry there, one that fetches the second
+  # byte and dispatches again.
 
   for %Insn{prefix: nil} = insn <- Table.base(), do: @implemented({nil, insn.opcode})
   @implemented {nil, 0xCB}
@@ -166,12 +163,11 @@ defmodule Atomboy.CPU do
   end
 
   @doc """
-  Les opcodes implémentés, sous forme `{prefixe, opcode}`.
+  The implemented opcodes, as `{prefix, opcode}`.
 
-  Accumulé à la compilation par les clauses elles-mêmes : impossible que cette
-  liste et le décodeur divergent. C'est ce que le harnais SM83 énumère pour
-  savoir quels fichiers du corpus rejouer, et c'est la mesure d'avancement de la
-  phase 1.
+  Accumulated at compile time by the clauses themselves: this list and the
+  decoder cannot possibly drift apart. It is what the SM83 harness enumerates to
+  know which corpus files to replay, and it is phase 1's measure of progress.
   """
   @spec implemented() :: [{prefix(), 0..0xFF}]
   def implemented, do: Enum.sort(@implemented)
@@ -198,18 +194,19 @@ defmodule Atomboy.CPU do
 
   defp mem_read(mem, %State{h: h, l: l}), do: @mem.read8(mem, bsl(h, 8) ||| l)
 
-  # Accès à adresse calculée — les indirects (BC), (DE), (HL±), (a16), la pile.
+  # Access at a computed address — the indirects (BC), (DE), (HL±), (a16), the
+  # stack.
   defp mem_read_at(mem, addr), do: @mem.read8(mem, addr)
   defp mem_read16_at(mem, addr), do: @mem.read16(mem, addr)
   defp mem_write_at(mem, addr, value), do: @mem.write8(mem, addr, value)
   defp mem_write16_at(mem, addr, value), do: @mem.write16(mem, addr, value)
 
-  # L'octet à PC — les opérandes immédiats. `step/2` a déjà avancé PC au-delà
-  # de l'opcode, donc PC pointe précisément sur l'immédiat.
+  # The byte at PC — the immediate operands. `step/2` has already advanced PC
+  # past the opcode, so PC points exactly at the immediate.
   defp mem_read_pc(mem, %State{pc: pc}), do: @mem.read8(mem, pc)
 
-  # Le mot à PC, little-endian — l'accesseur en bloc du comportement mémoire,
-  # précisément le genre d'accès que le brief demandait de grouper.
+  # The word at PC, little-endian — the memory behaviour's bulk accessor,
+  # precisely the kind of access the brief asked to group.
   defp mem_read_pc16(mem, %State{pc: pc}), do: @mem.read16(mem, pc)
 
   defp mem_write(mem, %State{h: h, l: l}, value), do: @mem.write8(mem, bsl(h, 8) ||| l, value)
@@ -217,11 +214,11 @@ end
 
 defmodule Atomboy.CPU.Unimplemented do
   @moduledoc """
-  Opcode non encore couvert par le décodeur.
+  An opcode the decoder does not cover yet.
 
-  Distinguée d'un `FunctionClauseError` : sur un corpus de 500 opcodes construit
-  par incréments, « pas encore écrit » et « écrit mais faux » sont deux
-  situations différentes et le harnais de test doit pouvoir les séparer.
+  Kept distinct from a `FunctionClauseError`: on a corpus of 500 opcodes built up
+  in increments, "not written yet" and "written but wrong" are two different
+  situations, and the test harness has to be able to tell them apart.
   """
 
   defexception [:opcode, :prefix, :pc, :bank]
@@ -233,26 +230,26 @@ defmodule Atomboy.CPU.Unimplemented do
     where =
       case {e.pc, e.bank} do
         {nil, _} -> ""
-        {pc, nil} -> " à PC 0x#{hex4(pc)}"
-        {pc, bank} -> " à PC 0x#{hex4(pc)}, banque ROM #{bank}"
+        {pc, nil} -> " at PC 0x#{hex4(pc)}"
+        {pc, bank} -> " at PC 0x#{hex4(pc)}, ROM bank #{bank}"
       end
 
-    "opcode #{label} non implémenté#{where}"
+    "opcode #{label} not implemented#{where}"
   end
 
   defp hex(opcode), do: opcode |> Integer.to_string(16) |> String.pad_leading(2, "0")
   defp hex4(v), do: v |> Integer.to_string(16) |> String.pad_leading(4, "0")
 end
 
-defmodule Atomboy.CPU.Deraille do
+defmodule Atomboy.CPU.Derailed do
   @moduledoc """
-  Le PC est entré en VRAM — aucun jeu ne fait ça volontairement.
+  The PC has wandered into VRAM — no game does that on purpose.
 
-  Le contrôle a déraillé en amont : table de sauts indexée hors bornes,
-  pile écrasée, `jp hl` sur un pointeur de tuiles… L'opcode invalide qui
-  finirait par surgir des décombres arrive trop tard pour comprendre ;
-  ici le rapport photographie l'instant de l'entrée : registres, banque,
-  et le haut de la pile — les adresses de retour y désignent le coupable.
+  Control derailed further upstream: a jump table indexed out of bounds, a
+  smashed stack, `jp hl` on a tile pointer… The invalid opcode that would
+  eventually surface from the wreckage comes too late to explain anything; the
+  report here photographs the moment of entry instead: registers, bank, and the
+  top of the stack — the return addresses in it name the culprit.
   """
 
   defexception [:pc, :sp, :bank, :regs, :stack]
@@ -261,15 +258,15 @@ defmodule Atomboy.CPU.Deraille do
   def message(%{pc: pc, sp: sp, bank: bank, regs: regs, stack: stack}) do
     {a, f, b, c, d, e, h, l} = regs
 
-    pile =
+    frames =
       stack
       |> Enum.map(&("0x" <> hex4(&1)))
       |> Enum.join(" ")
 
-    "le processeur a déraillé en VRAM : PC 0x#{hex4(pc)}, banque ROM #{bank}\n" <>
+    "the processor derailed into VRAM: PC 0x#{hex4(pc)}, ROM bank #{bank}\n" <>
       "    AF=#{hex(a)}#{hex(f)} BC=#{hex(b)}#{hex(c)} DE=#{hex(d)}#{hex(e)} " <>
       "HL=#{hex(h)}#{hex(l)} SP=0x#{hex4(sp)}\n" <>
-      "    pile : #{pile}"
+      "    stack: #{frames}"
   end
 
   defp hex(v), do: v |> Integer.to_string(16) |> String.pad_leading(2, "0")

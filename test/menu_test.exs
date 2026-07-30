@@ -3,127 +3,127 @@ defmodule Atomboy.MenuTest do
 
   alias Atomboy.Menu
 
-  test "navigation : le curseur descend, monte, et boucle" do
+  test "navigation: the cursor goes down, up, and wraps around" do
     menu = Menu.open(1, :dmg)
-    assert menu.curseur == 0
+    assert menu.cursor == 0
 
-    {menu, []} = Menu.touche(menu, :down)
-    assert menu.curseur == 1
+    {menu, []} = Menu.press(menu, :down)
+    assert menu.cursor == 1
 
-    {menu, []} = Menu.touche(menu, :up)
-    {menu, []} = Menu.touche(menu, :up)
-    assert menu.curseur == 6
+    {menu, []} = Menu.press(menu, :up)
+    {menu, []} = Menu.press(menu, :up)
+    assert menu.cursor == 6
 
-    {menu, []} = Menu.touche(menu, :down)
-    assert menu.curseur == 0
+    {menu, []} = Menu.press(menu, :down)
+    assert menu.cursor == 0
   end
 
-  test "REPRENDRE ferme sans action ; B et Échap aussi" do
-    assert {nil, []} = Menu.touche(Menu.open(1, :dmg), :a)
-    assert {nil, []} = Menu.touche(Menu.open(1, :dmg), :b)
-    assert {nil, []} = Menu.touche(Menu.open(1, :dmg), :menu)
+  test "RESUME closes with no action; so do B and Escape" do
+    assert {nil, []} = Menu.press(Menu.open(1, :dmg), :a)
+    assert {nil, []} = Menu.press(Menu.open(1, :dmg), :b)
+    assert {nil, []} = Menu.press(Menu.open(1, :dmg), :menu)
   end
 
-  test "SAUVER et CHARGER ferment avec leur action" do
+  test "SAVE STATE and LOAD STATE close with their action" do
     menu = Menu.open(1, :dmg)
-    {menu, []} = Menu.touche(menu, :down)
-    assert {nil, [:save_state]} = Menu.touche(menu, :a)
+    {menu, []} = Menu.press(menu, :down)
+    assert {nil, [:save_state]} = Menu.press(menu, :a)
 
     menu = Menu.open(1, :dmg)
-    {menu, []} = Menu.touche(menu, :down)
-    {menu, []} = Menu.touche(menu, :down)
-    assert {nil, [:load_state]} = Menu.touche(menu, :a)
+    {menu, []} = Menu.press(menu, :down)
+    {menu, []} = Menu.press(menu, :down)
+    assert {nil, [:load_state]} = Menu.press(menu, :a)
   end
 
-  test "la case d'état se règle aux flèches et boucle 9 → 1" do
-    menu = %{Menu.open(9, :dmg) | curseur: 3}
+  test "the state slot is set with the arrows and wraps 9 → 1" do
+    menu = %{Menu.open(9, :dmg) | cursor: 3}
 
-    {menu, [{:slot, 1}]} = Menu.touche(menu, :right)
+    {menu, [{:slot, 1}]} = Menu.press(menu, :right)
     assert menu.slot == 1
 
-    {menu, [{:slot, 9}]} = Menu.touche(menu, :left)
+    {menu, [{:slot, 9}]} = Menu.press(menu, :left)
     assert menu.slot == 9
   end
 
-  test "la palette bascule verte/grise" do
-    menu = %{Menu.open(1, :dmg) | curseur: 4}
+  test "the palette toggles green/gray" do
+    menu = %{Menu.open(1, :dmg) | cursor: 4}
 
-    {menu, [{:palette, :gris}]} = Menu.touche(menu, :right)
-    {_menu, [{:palette, :dmg}]} = Menu.touche(menu, :right)
+    {menu, [{:palette, :gray}]} = Menu.press(menu, :right)
+    {_menu, [{:palette, :dmg}]} = Menu.press(menu, :right)
   end
 
-  test "QUITTER rend l'action quit" do
-    menu = %{Menu.open(1, :dmg) | curseur: 6}
-    assert {nil, [:quit]} = Menu.touche(menu, :a)
+  test "QUIT returns the quit action" do
+    menu = %{Menu.open(1, :dmg) | cursor: 6}
+    assert {nil, [:quit]} = Menu.press(menu, :a)
   end
 
-  test "en couleur, pas de ligne PALETTE — QUITTER remonte d'un cran" do
+  test "in color, no PALETTE row — QUIT moves up one notch" do
     menu = Menu.open(1, :dmg, true)
 
-    {menu, []} = Menu.touche(menu, :up)
-    assert menu.curseur == 5
+    {menu, []} = Menu.press(menu, :up)
+    assert menu.cursor == 5
 
-    assert {nil, [:quit]} = Menu.touche(menu, :a)
+    assert {nil, [:quit]} = Menu.press(menu, :a)
   end
 
-  test "la page MIXER : volume par pas de dix, borné, voix commutables" do
-    menu = %{Menu.open(1, :dmg) | curseur: 5}
-    {menu, []} = Menu.touche(menu, :a)
+  test "the MIXER page: volume in steps of ten, clamped, voices switchable" do
+    menu = %{Menu.open(1, :dmg) | cursor: 5}
+    {menu, []} = Menu.press(menu, :a)
     assert menu.page == :mixer
 
-    # VOLUME : gauche baisse, borné à zéro.
-    {menu, [{:mixer, %{volume: 90}}]} = Menu.touche(menu, :left)
-    menu = Enum.reduce(1..12, menu, fn _, m -> elem(Menu.touche(m, :left), 0) end)
+    # VOLUME: left lowers it, clamped at zero.
+    {menu, [{:mixer, %{volume: 90}}]} = Menu.press(menu, :left)
+    menu = Enum.reduce(1..12, menu, fn _, m -> elem(Menu.press(m, :left), 0) end)
     assert menu.mixer.volume == 0
-    {menu, [{:mixer, %{volume: 10}}]} = Menu.touche(menu, :right)
+    {menu, [{:mixer, %{volume: 10}}]} = Menu.press(menu, :right)
 
-    # PULSE 1 se coupe et se rouvre.
-    {menu, []} = Menu.touche(menu, :down)
-    {menu, [{:mixer, %{voix: {false, true, true, true}}}]} = Menu.touche(menu, :a)
-    {menu, [{:mixer, %{voix: {true, true, true, true}}}]} = Menu.touche(menu, :a)
+    # PULSE 1 switches off and back on.
+    {menu, []} = Menu.press(menu, :down)
+    {menu, [{:mixer, %{voices: {false, true, true, true}}}]} = Menu.press(menu, :a)
+    {menu, [{:mixer, %{voices: {true, true, true, true}}}]} = Menu.press(menu, :a)
 
-    # B remonte à la racine ; RETOUR aussi.
-    {menu, []} = Menu.touche(menu, :b)
-    assert menu.page == :principal
+    # B goes back to the root; so does BACK.
+    {menu, []} = Menu.press(menu, :b)
+    assert menu.page == :main
   end
 
-  # La géométrie de la boîte : 7 lignes de 11 px + 2×8 de marge = 93 de
-  # haut, centrée — coin haut-gauche en (24, 25). Le point « papier » vit à
-  # droite du texte de la première ligne, loin du curseur.
-  test "rendu DMG : bordure encrée, papier clair, dehors intact" do
+  # The geometry of the box: 7 rows of 11 px + 2×8 of margin = 93 high,
+  # centred — top-left corner at (24, 25). The "paper" point sits to the
+  # right of the first row's text, far from the cursor.
+  test "DMG rendering: inked border, light paper, outside untouched" do
     frame = :binary.copy(<<1>>, 160 * 144)
-    composée = Menu.render(Menu.open(1, :dmg), frame)
+    composed = Menu.render(Menu.open(1, :dmg), frame)
 
-    assert byte_size(composée) == 160 * 144
-    # Dehors : la teinte d'origine.
-    assert :binary.at(composée, 0) == 1
-    assert :binary.at(composée, 143 * 160 + 159) == 1
-    # La bordure est encrée, l'intérieur est du papier.
-    assert :binary.at(composée, 25 * 160 + 24) == 3
-    assert :binary.at(composée, 34 * 160 + 105) == 0
+    assert byte_size(composed) == 160 * 144
+    # Outside: the original shade.
+    assert :binary.at(composed, 0) == 1
+    assert :binary.at(composed, 143 * 160 + 159) == 1
+    # The border is inked, the inside is paper.
+    assert :binary.at(composed, 25 * 160 + 24) == 3
+    assert :binary.at(composed, 34 * 160 + 105) == 0
   end
 
-  test "rendu CGB : mêmes points en RGB555" do
+  test "CGB rendering: same points in RGB555" do
     frame = :binary.copy(<<0x33, 0x33>>, 160 * 144)
-    composée = Menu.render(Menu.open(1, :dmg), frame)
+    composed = Menu.render(Menu.open(1, :dmg), frame)
 
-    assert byte_size(composée) == 2 * 160 * 144
-    assert binary_part(composée, 0, 2) == <<0x33, 0x33>>
-    assert binary_part(composée, (25 * 160 + 24) * 2, 2) == <<0x00, 0x00>>
-    assert binary_part(composée, (34 * 160 + 105) * 2, 2) == <<0xFF, 0x7F>>
+    assert byte_size(composed) == 2 * 160 * 144
+    assert binary_part(composed, 0, 2) == <<0x33, 0x33>>
+    assert binary_part(composed, (25 * 160 + 24) * 2, 2) == <<0x00, 0x00>>
+    assert binary_part(composed, (34 * 160 + 105) * 2, 2) == <<0xFF, 0x7F>>
   end
 
-  test "le curseur s'affiche devant la ligne choisie" do
+  test "the cursor shows in front of the selected row" do
     frame = :binary.copy(<<0>>, 160 * 144)
-    haut = Menu.render(Menu.open(1, :dmg), frame)
-    bas = Menu.render(%{Menu.open(1, :dmg) | curseur: 5}, frame)
+    top = Menu.render(Menu.open(1, :dmg), frame)
+    bottom = Menu.render(%{Menu.open(1, :dmg) | cursor: 5}, frame)
 
-    # Le triangle du curseur encre la colonne du premier caractère de la
-    # première ligne quand elle est choisie — et plus quand il descend.
-    ligne1 = for x <- 30..35, y <- 39..45, do: :binary.at(haut, y * 160 + x)
-    assert 3 in ligne1
+    # The cursor triangle inks the column of the first character of the
+    # first row when that row is selected — and no longer once it moves on.
+    row1 = for x <- 30..35, y <- 39..45, do: :binary.at(top, y * 160 + x)
+    assert 3 in row1
 
-    ligne1_bas = for x <- 30..35, y <- 39..45, do: :binary.at(bas, y * 160 + x)
-    refute 3 in ligne1_bas
+    row1_moved = for x <- 30..35, y <- 39..45, do: :binary.at(bottom, y * 160 + x)
+    refute 3 in row1_moved
   end
 end

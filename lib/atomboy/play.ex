@@ -1,57 +1,58 @@
 defmodule Atomboy.Play do
   @moduledoc """
-  La Game Boy jouable dans le terminal.
+  The Game Boy, playable in the terminal.
 
-  La boucle : lire le clavier, poser les touches sur les lignes du joypad,
-  faire tourner une frame de machine (154 scanlines), l'afficher, tenir la
-  cadence — 59,7 Hz, celle de la dalle.
+  The loop: read the keyboard, lay the keys onto the joypad's lines, run
+  one machine frame (154 scanlines), display it, hold the pace — 59.7 Hz,
+  the panel's own.
 
-  ## Le terminal comme console — la voie du pty nommé
+  ## The terminal as a console — the way of the named pty
 
-  Le clavier ne passe **pas** par l'étage d'E/S d'Erlang, pour deux raisons
-  mesurées à la sonde (`scripts/probe_clavier*.exs`) :
+  The keyboard does **not** go through Erlang's I/O stack, for two reasons
+  measured with a probe (`scripts/probe_clavier*.exs`):
 
-    * `:shell.start_interactive({:noshell, :raw})`, l'API d'OTP 26, ne
-      réveille jamais une lecture en attente quand la frappe arrive après
-      elle — l'entrée déjà tamponnée passe, la frappe humaine jamais.
-    * Le BEAM détache ses processus fils du terminal de contrôle (`setsid`
-      avant exec) : `/dev/tty` est mort pour eux, tout `stty < /dev/tty`
-      est un no-op silencieux.
+    * `:shell.start_interactive({:noshell, :raw})`, OTP 26's API, never
+      wakes a pending read when the keystroke arrives after it — input that
+      was already buffered gets through, a human keystroke never does.
+    * The BEAM detaches its child processes from the controlling terminal
+      (`setsid` before exec): `/dev/tty` is dead to them, and any
+      `stty < /dev/tty` is a silent no-op.
 
-  Mais le pty a un *nom* (`/dev/ttysNNN`), que `ps -o tty=` sait donner, et
-  un device se manipule sans lien de contrôle : `stty -f` pose les modes
-  (`-icanon -echo -isig` : frappes une à une, sans écho, Ctrl-C en octet
-  0x03 décodé en « quitter »), et `:file.read` octet par octet livre les
-  frappes en temps réel — vérifié écritures simultanées comprises.
+  But the pty has a *name* (`/dev/ttysNNN`), which `ps -o tty=` will give,
+  and a device can be driven with no controlling link at all: `stty -f`
+  sets the modes (`-icanon -echo -isig`: keystrokes one by one, no echo,
+  Ctrl-C as byte 0x03 decoded as "quit"), and `:file.read` byte by byte
+  delivers keystrokes in real time — verified with simultaneous writes
+  included.
 
-  Dernier voleur : même sans aucune demande de lecture, `prim_tty` lit le
-  terminal en permanence et rafle un octet sur trois — les flèches, trois
-  octets, n'arrivent presque jamais entières. Le drapeau `-noinput` l'éteint
-  (mesuré : 0/301 octets reçus sans, 301/301 avec), d'où le lanceur
-  `bin/play` ; sur un tty sans ce drapeau, `run/2` refuse de démarrer avec
-  le mode d'emploi.
+  One last thief: even with no read outstanding, `prim_tty` reads the
+  terminal permanently and snatches one byte in three — arrows, three bytes
+  long, almost never arrive whole. The `-noinput` flag turns it off
+  (measured: 0/301 bytes received without it, 301/301 with), hence the
+  `bin/play` launcher; on a tty without that flag, `run/2` refuses to start
+  and prints the instructions instead.
 
-    * L'écran alternatif (`\\e[?1049h`) : le jeu occupe tout, et le shell
-      retrouve son historique intact à la sortie ; les réglages `stty`
-      d'origine sont sauvés (`-g`) et restaurés.
-    * Chaque frame se redessine par-dessus la précédente (`\\e[H`), sans
-      effacement — pas de scintillement.
-    * Sans pty visible (`--frames` en test, entrée redirigée), la lecture
-      se replie sur `/dev/fd/0` et aucune taille n'est exigée.
+    * The alternate screen (`\\e[?1049h`): the game takes the whole
+      terminal, and the shell finds its scrollback intact on exit; the
+      original `stty` settings are saved (`-g`) and restored.
+    * Each frame redraws on top of the previous one (`\\e[H`), with no
+      clearing — no flicker.
+    * With no visible pty (`--frames` in tests, redirected input), reading
+      falls back to `/dev/fd/0` and no size is demanded.
 
-  ## Le relâchement, selon le terminal
+  ## Release, according to the terminal
 
-  Sur un terminal parlant le protocole clavier kitty (Ghostty, kitty,
-  WezTerm…), chaque touche envoie presse *et* relâchement : l'état du
-  clavier est réel, les diagonales et les accords A+direction marchent. Le
-  protocole se demande au démarrage (`CSI > 11 u` puis requête) — la réponse
-  confirme, un terminal muet ignore tout.
+  On a terminal that speaks the kitty keyboard protocol (Ghostty, kitty,
+  WezTerm…), every key sends press *and* release: the keyboard state is
+  real, and diagonals and A+direction chords work. The protocol is asked
+  for at startup (`CSI > 11 u`, then a query) — the answer confirms it, and
+  a mute terminal ignores the whole thing.
 
-  Sans lui, un terminal ne signale que les frappes, et macOS ne répète que
-  la dernière touche enfoncée : chaque frappe devient une pression tenue
-  `hold` frames (~170 ms), rafraîchie par la répétition automatique —
-  un maintien réel reste tenu, une frappe brève reste brève, mais les
-  accords ne durent que leur fenêtre de maintien. Réglable par `hold:`.
+  Without it, a terminal reports keystrokes only, and macOS repeats just
+  the last key pressed: each keystroke becomes a press held for `hold`
+  frames (~170 ms), refreshed by auto-repeat — a real hold stays held, a
+  brief tap stays brief, but chords last no longer than their hold window.
+  Tunable with `hold:`.
   """
 
   alias Atomboy.APU
@@ -65,20 +66,20 @@ defmodule Atomboy.Play do
   alias Atomboy.Save
   alias Atomboy.Screen
 
-  # La période d'une frame DMG : 70 224 T-cycles à 4,194 MHz.
+  # The period of a DMG frame: 70,224 T-cycles at 4.194 MHz.
   @frame_us 16_742
   @default_hold 10
 
   @doc """
-  Joue `rom_path` jusqu'à `q`/Ctrl-C — ou `frames:` frames, pour les essais
-  sans clavier. `dump:` écrit la dernière frame en PGM à la sortie.
+  Plays `rom_path` until `q`/Ctrl-C — or for `frames:` frames, for trials
+  without a keyboard. `dump:` writes the last frame as PGM on the way out.
 
-  Renvoie `:ok`, ou `{:error, message}` si le terminal est trop petit.
+  Returns `:ok`, or `{:error, message}` if the terminal is too small.
   """
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
+    sav = Save.path(rom_path, Keyword.get(opts, :save))
     tty = pty_path()
 
     with :ok <- ensure_sole_reader(tty),
@@ -94,34 +95,34 @@ defmodule Atomboy.Play do
     end
   end
 
-  # Le câble s'établit avant l'écran alternatif : le message d'attente doit
-  # se voir. Sans option, pas de câble.
+  # The cable is established before the alternate screen: the waiting
+  # message has to be visible. With no option, no cable.
   defp link_up(opts) do
     cond do
-      port = Keyword.get(opts, :ecoute) -> Link.listen(port)
-      lien = Keyword.get(opts, :lien) -> connect(lien)
+      port = Keyword.get(opts, :listen) -> Link.listen(port)
+      target = Keyword.get(opts, :link) -> connect(target)
       true -> {:ok, nil}
     end
   end
 
-  defp connect(lien) do
-    case String.split(lien, ":") do
+  defp connect(target) do
+    case String.split(target, ":") do
       [host, port] -> Link.connect(host, String.to_integer(port))
       [host] -> Link.connect(host, Link.default_port())
     end
   end
 
-  # Sans -noinput, prim_tty lit le terminal en permanence et vole un octet
-  # sur trois au jeu — les flèches (3 octets) n'arrivent jamais entières.
-  # Mesuré : 0/301 octets reçus sans -noinput, 301/301 avec. Pas de tty,
-  # pas de voleur : les essais --frames redirigés passent sans le drapeau.
+  # Without -noinput, prim_tty reads the terminal permanently and steals one
+  # byte in three from the game — the arrows (3 bytes) never arrive whole.
+  # Measured: 0/301 bytes received without -noinput, 301/301 with it. No
+  # tty, no thief: redirected --frames trials pass without the flag.
   defp ensure_sole_reader(tty) do
     if tty != nil and :init.get_argument(:noinput) == :error do
       {:error,
-       "Le BEAM lit le terminal en même temps que le jeu (il vole un octet\n" <>
-         "sur trois — les flèches n'arrivent jamais entières). Relancer avec :\n\n" <>
+       "The BEAM is reading the terminal at the same time as the game (it steals\n" <>
+         "one byte in three — the arrows never arrive whole). Restart with:\n\n" <>
          "    bin/play <rom.gb>\n\n" <>
-         "ou  ELIXIR_ERL_OPTIONS=\"-noinput\" mix atomboy.play <rom.gb>"}
+         "or  ELIXIR_ERL_OPTIONS=\"-noinput\" mix atomboy.play <rom.gb>"}
     else
       :ok
     end
@@ -129,63 +130,63 @@ defmodule Atomboy.Play do
 
   defp play(rom, sav, tty, link, opts) do
     (fn ->
-      parent = self()
-      input = tty || "/dev/fd/0"
-      reader = spawn_link(fn -> read_keys(parent, input) end)
+       parent = self()
+       input = tty || "/dev/fd/0"
+       reader = spawn_link(fn -> read_keys(parent, input) end)
 
-      # Le son suit le clavier : présent en interactif, coupé dans les
-      # essais redirigés — sauf demande explicite (son: true/false).
-      audio = if Keyword.get(opts, :son, tty != nil), do: Audio.open()
+       # Sound follows the keyboard: present when interactive, cut off in
+       # redirected trials — unless asked for explicitly (sound: true/false).
+       audio = if Keyword.get(opts, :sound, tty != nil), do: Audio.open()
 
-      try do
-        loop(%{
-          state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
-          rom: rom,
-          ram:
-            Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
-            |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
-            |> Save.load(sav)
-            |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, ""))),
-          sav: sav,
-          hold: %{},
-          down: MapSet.new(),
-          menu: nil,
-          kitty: false,
-          audio: audio,
-          son?: audio != nil,
-          apu: %APU{},
-          pending: "",
-          frame: 0,
-          max_frames: Keyword.get(opts, :frames, :infinity),
-          hold_frames: Keyword.get(opts, :hold, @default_hold),
-          dump: Keyword.get(opts, :dump),
-          dump_toutes: Keyword.get(opts, :dump_toutes),
-          state_base: Path.rootname(sav),
-          state_slot: 1,
-          palette: Keyword.get(opts, :palette, :dmg),
-          gfx: false,
-          gfx_id: 1,
-          dims: terminal_dims(tty),
-          size_ok: Keyword.has_key?(opts, :frames),
-          turbo: false,
-          paused: false,
-          history: [],
-          note: nil,
-          last_frame: nil,
-          fps: 0.0,
-          fps_mark: System.monotonic_time(:microsecond),
-          deadline: System.monotonic_time(:microsecond) + @frame_us
-        })
-      after
-        Process.unlink(reader)
-        Process.exit(reader, :kill)
-        Audio.close(audio)
-      end
-    end).()
+       try do
+         loop(%{
+           state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
+           rom: rom,
+           ram:
+             Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
+             |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
+             |> Save.load(sav)
+             |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, ""))),
+           sav: sav,
+           hold: %{},
+           down: MapSet.new(),
+           menu: nil,
+           kitty: false,
+           audio: audio,
+           sound?: audio != nil,
+           apu: %APU{},
+           pending: "",
+           frame: 0,
+           max_frames: Keyword.get(opts, :frames, :infinity),
+           hold_frames: Keyword.get(opts, :hold, @default_hold),
+           dump: Keyword.get(opts, :dump),
+           dump_every: Keyword.get(opts, :dump_every),
+           state_base: Path.rootname(sav),
+           state_slot: 1,
+           palette: Keyword.get(opts, :palette, :dmg),
+           gfx: false,
+           gfx_id: 1,
+           dims: terminal_dims(tty),
+           size_ok: Keyword.has_key?(opts, :frames),
+           turbo: false,
+           paused: false,
+           history: [],
+           note: nil,
+           last_frame: nil,
+           fps: 0.0,
+           fps_mark: System.monotonic_time(:microsecond),
+           deadline: System.monotonic_time(:microsecond) + @frame_us
+         })
+       after
+         Process.unlink(reader)
+         Process.exit(reader, :kill)
+         Audio.close(audio)
+       end
+     end).()
   end
 
-  # La taille du terminal, sur le pty nommé (`stty -f … -a` — « 66 rows;
-  # 269 columns; » sur mac, « rows 66; columns 269 » ailleurs).
+  # The size of the terminal, on the named pty (`stty -f … -a` — "66 rows;
+  # 269 columns;" on mac, "rows 66; columns 269" elsewhere).
   defp terminal_dims(tty) do
     with out when is_binary(out) <- tty && to_string(:os.cmd(stty(tty, "-a 2> /dev/null"))),
          [_, rows] <- Regex.run(~r/(\d+) rows|rows (?:= )?(\d+)/, out) |> compact(),
@@ -196,27 +197,27 @@ defmodule Atomboy.Play do
     end
   end
 
-  # Les demi-blocs exigent 160×73 ; les vraies images non. Le verdict attend
-  # donc la demi-seconde où le terminal a pu répondre à la requête graphique.
+  # Half blocks demand 160×73; real images do not. So the verdict waits for
+  # the half-second in which the terminal could answer the graphics query.
   defp ensure_size(%{size_ok: true}), do: :ok
   defp ensure_size(%{gfx: true}), do: :ok
   defp ensure_size(%{frame: n}) when n < 30, do: :wait
 
   defp ensure_size(%{dims: {rows, cols}}) when rows < 73 or cols < 160 do
     {:error,
-     "Le terminal fait #{cols}×#{rows} ; il faut 160×73 pour l'écran DMG en\n" <>
-       "demi-blocs. Réduire la police (Cmd -), agrandir la fenêtre — ou un\n" <>
-       "terminal parlant le protocole graphique kitty (Ghostty, kitty, WezTerm)\n" <>
-       "affiche de vraies images sans contrainte de taille."}
+     "The terminal is #{cols}×#{rows}; the DMG screen needs 160×73 in half\n" <>
+       "blocks. Shrink the font (Cmd -), enlarge the window — or a terminal\n" <>
+       "speaking the kitty graphics protocol (Ghostty, kitty, WezTerm) shows\n" <>
+       "real images with no size constraint at all."}
   end
 
   defp ensure_size(_ctx), do: :ok
 
-  # Regex.run à deux alternatives : ne garder que les groupes capturés.
+  # Regex.run with two alternatives: keep only the captured groups.
   defp compact(nil), do: nil
   defp compact(matches), do: Enum.reject(matches, &(&1 in [nil, ""]))
 
-  # ── La boucle de frame ──────────────────────────────────────────────────────
+  # ── The frame loop ──────────────────────────────────────────────────────────
 
   defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: finish(ctx)
 
@@ -249,8 +250,8 @@ defmodule Atomboy.Play do
 
     cond do
       ctx.menu != nil ->
-        # Menu ouvert : la machine dort, la dernière frame porte le menu
-        # en surimpression — le rendu habituel affiche sans rien savoir.
+        # Menu open: the machine sleeps, and the last frame carries the menu
+        # as an overlay — the usual rendering displays it knowing nothing.
         ctx =
           if ctx.last_frame,
             do: draw(ctx, Menu.render(ctx.menu, ctx.last_frame), ctx.ram, []),
@@ -260,7 +261,7 @@ defmodule Atomboy.Play do
         loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
 
       ctx.paused ->
-        # En pause, la machine dort — l'écran reste, le clavier veille.
+        # Paused, the machine sleeps — the screen stays, the keyboard watches.
         ctx = if ctx.last_frame, do: draw(ctx, ctx.last_frame, ctx.ram, []), else: ctx
         Process.sleep(50)
         loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
@@ -273,15 +274,16 @@ defmodule Atomboy.Play do
     end
   end
 
-  # Retour arrière tenu — au clavier kitty par l'état réel, au clavier
-  # classique par la répétition automatique qui entretient le maintien.
+  # Rewind held down — on a kitty keyboard through the real state, on a
+  # classic one through the auto-repeat that keeps the hold alive.
   defp rewinding?(ctx) do
     MapSet.member?(ctx.down, :rewind) or Map.has_key?(ctx.hold, :rewind)
   end
 
-  # Un pas en arrière : dépiler un instantané (dix frames de jeu), le
-  # dessiner tel quel — la machine ne tourne pas, le temps recule. Le son se
-  # tait ; à la reprise, le flux asservi à l'horloge murale se recale seul.
+  # One step backwards: pop a snapshot (ten frames of play) and draw it as
+  # it stands — the machine is not running, time is going back. The sound
+  # falls silent; on resuming, the stream slaved to the wall clock realigns
+  # itself.
   defp rewind_step(ctx) do
     ctx =
       case ctx.history do
@@ -303,9 +305,9 @@ defmodule Atomboy.Play do
     loop(%{ctx | hold: hold, last_frame: pixels, deadline: deadline + @frame_us})
   end
 
-  # La mémoire du rembobinage : un instantané toutes les dix frames, un
-  # anneau de 240 — quarante secondes d'histoire, structurellement partagées
-  # (la map d'une frame à l'autre ne diffère que de ses écritures).
+  # The memory of rewinding: one snapshot every ten frames, a ring of 240 —
+  # forty seconds of history, structurally shared (the map differs from one
+  # frame to the next only by its writes).
   defp remember(%{frame: n} = ctx) when rem(n, 10) == 0 do
     %{ctx | history: Enum.take([{ctx.state, ctx.ram, ctx.apu} | ctx.history], 240)}
   end
@@ -317,33 +319,33 @@ defmodule Atomboy.Play do
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
     ram = Codes.applique(ram)
 
-    # En turbo, une frame sur quatre s'affiche — le rendu est le coût.
+    # In turbo, one frame in four is displayed — rendering is the cost.
     render? = not ctx.turbo or rem(ctx.frame, 4) == 0
 
-    # Un opcode inconnu tue la partie, pas la progression : la pile de la
-    # cartouche est écrite avant de laisser filer le rapport de crash.
+    # An unknown opcode kills the game, not the progress: the cartridge's
+    # battery is written before letting the crash report fly.
     {pixels, state, ram} =
       try do
         Screen.frame(ctx.state, ctx.rom, ram, render?)
       rescue
-        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
+        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Derailed] ->
           Save.flush(ram, ctx.sav)
           reraise e, __STACKTRACE__
       end
 
-    # Pendant le turbo le port audio est fermé : sound/3 jette les
-    # déclenchements sans rien pousser.
+    # During turbo the audio port is closed: sound/3 discards the triggers
+    # without pushing anything.
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     ctx = if render?, do: draw(ctx, pixels, ram, held), else: ctx
 
-    # La cadence par échéancier absolu : chaque excès de sommeil se reprend
-    # à la frame suivante, le débit long terme est exactement 59,7275 Hz —
-    # la condition pour que la production d'échantillons suive ffplay, qui
-    # consomme au vrai 32 768 Hz. Une cadence relative dérive de ~0,7 % et
-    # affame le tampon audio en une demi-minute. Après un blocage franc
-    # (> 100 ms), l'échéancier se recale : pas de sprint de rattrapage.
-    # Le turbo suspend l'échéancier — l'émulation file aussi vite que le BEAM.
+    # Pacing by absolute deadline: every excess of sleep is recovered on the
+    # next frame, so the long-term rate is exactly 59.7275 Hz — the
+    # condition for sample production to keep up with ffplay, which consumes
+    # at a true 32,768 Hz. Relative pacing drifts by ~0.7% and starves the
+    # audio buffer within half a minute. After an outright stall (> 100 ms),
+    # the deadline realigns: no catch-up sprint.
+    # Turbo suspends the deadline — emulation runs as fast as the BEAM can.
     deadline =
       if ctx.turbo do
         ctx.deadline
@@ -356,12 +358,12 @@ defmodule Atomboy.Play do
 
     hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
 
-    # L'autosauvegarde : la pile de la cartouche n'attend pas la sortie.
+    # Autosave: the cartridge's battery does not wait for the exit.
     ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
 
-    # Le dump périodique : l'œil du harnais — l'écran courant, écrasé
-    # toutes les N frames, pour piloter une session depuis l'extérieur.
-    if ctx.dump_toutes && ctx.dump && rem(ctx.frame, ctx.dump_toutes) == 0 do
+    # The periodic dump: the harness's eye — the current screen, overwritten
+    # every N frames, to drive a session from the outside.
+    if ctx.dump_every && ctx.dump && rem(ctx.frame, ctx.dump_every) == 0 do
       dump(%{ctx | last_frame: if(render?, do: pixels, else: ctx.last_frame)})
     end
 
@@ -381,11 +383,11 @@ defmodule Atomboy.Play do
     loop(ctx |> remember() |> measure_fps())
   end
 
-  # Deux chemins d'affichage. Demi-blocs : le texte, curseur en haut.
-  # Protocole graphique : l'image se transmet sous un identifiant alterné —
-  # la nouvelle se pose par-dessus l'ancienne, qui n'est effacée qu'ensuite
-  # (pas de trou entre deux frames) — et le statut s'ancre à la dernière
-  # ligne du terminal.
+  # Two display paths. Half blocks: text, cursor at the top.
+  # Graphics protocol: the image is transmitted under an alternating id —
+  # the new one lands on top of the old, which is only erased afterwards
+  # (no gap between two frames) — and the status line is anchored to the
+  # terminal's last row.
   defp draw(%{gfx: true} = ctx, pixels, ram, held) do
     id = ctx.gfx_id
     old = 3 - id
@@ -407,24 +409,24 @@ defmodule Atomboy.Play do
     ctx
   end
 
-  # Le message éphémère de la ligne de statut s'éteint de lui-même.
+  # The status line's ephemeral message goes out on its own.
   defp fade({_text, 0}), do: nil
   defp fade({text, left}), do: {text, left - 1}
   defp fade(nil), do: nil
 
-  # La frame de son suit la frame d'image ; un lecteur disparu coupe le son
-  # sans arrêter la partie. Sans lecteur, les déclenchements capturés se
-  # jettent — la liste ne doit pas enfler pour rien.
+  # The sound frame follows the picture frame; a player that has vanished
+  # silences the sound without stopping the game. With no player, captured
+  # triggers are discarded — the list must not swell for nothing.
   defp sound(ram, apu, audio), do: Audio.stream(audio, ram, apu)
 
-  # ── L'état des touches ──────────────────────────────────────────────────────
+  # ── The state of the keys ───────────────────────────────────────────────────
 
-  # La réponse à la requête kitty : le terminal parle le protocole. L'état
-  # réel n'est fiable qu'avec les relâchements (bit 2 des flags).
+  # The answer to the kitty query: the terminal speaks the protocol. The
+  # real state is only trustworthy with releases (bit 2 of the flags).
   defp apply_event({:kitty, flags}, ctx), do: %{ctx | kitty: Bitwise.band(flags, 2) != 0}
 
-  # Le terminal sait afficher des images : on nettoie les demi-blocs et on
-  # bascule — la contrainte de taille tombe avec eux.
+  # The terminal can display images: clear the half blocks and switch over —
+  # the size constraint goes away with them.
   defp apply_event({:graphics, true}, ctx) do
     IO.write("\e[2J")
     %{ctx | gfx: true}
@@ -432,68 +434,84 @@ defmodule Atomboy.Play do
 
   defp apply_event({:graphics, false}, ctx), do: ctx
 
-  # ── Le menu ─────────────────────────────────────────────────────────────────
+  # ── The menu ────────────────────────────────────────────────────────────────
 
-  # Échap ou m l'ouvre — les touches en cours se relâchent, la machine
-  # dormira tant qu'il est là.
+  # Escape or m opens it — the keys in flight are released, and the machine
+  # will sleep for as long as it is there.
   defp apply_event({tag, :menu}, %{menu: nil} = ctx) when tag in [:key, :press],
-    do: %{ctx | menu: Menu.open(ctx.state_slot, ctx.palette, Map.get(ctx.ram, :cgb, false), Map.get(ctx.ram, :mixer)), down: MapSet.new(), hold: %{}}
+    do: %{
+      ctx
+      | menu:
+          Menu.open(
+            ctx.state_slot,
+            ctx.palette,
+            Map.get(ctx.ram, :cgb, false),
+            Map.get(ctx.ram, :mixer)
+          ),
+        down: MapSet.new(),
+        hold: %{}
+    }
 
-  # Ouvert, les touches Game Boy le pilotent (répétition comprise — tenir
-  # une flèche fait défiler les cases).
+  # Once open, the Game Boy keys drive it (repeats included — holding an
+  # arrow scrolls through the slots).
   defp apply_event({tag, key}, %{menu: menu} = ctx)
        when menu != nil and tag in [:key, :press, :repeat] and
               key in [:up, :down, :left, :right, :a, :b, :menu] do
-    {menu, actions} = Menu.touche(ctx.menu, key)
+    {menu, actions} = Menu.press(ctx.menu, key)
     Enum.reduce(actions, %{ctx | menu: menu}, &menu_action/2)
   end
 
   defp apply_event({_tag, :menu}, ctx), do: ctx
 
-  # Les actions — au front montant seulement : presse ou frappe, jamais la
-  # répétition (un p tenu ne doit pas faire clignoter la pause).
+  # The actions — on the rising edge only: press or keystroke, never the
+  # repeat (holding p must not make the pause flicker).
   defp apply_event({tag, :save_state}, ctx) when tag in [:key, :press] do
     Save.write_state(state_path(ctx), {ctx.state, ctx.ram, ctx.apu})
-    %{ctx | note: {"état sauvé (case #{ctx.state_slot})", 120}}
+    %{ctx | note: {"state saved (slot #{ctx.state_slot})", 120}}
   end
 
   defp apply_event({tag, :load_state}, ctx) when tag in [:key, :press] do
     case Save.read_state(state_path(ctx)) do
       {:ok, {state, ram, apu}} ->
-        # Le câble courant survit au voyage dans le temps.
+        # The current cable survives the trip through time.
         ram =
           case Map.get(ctx.ram, :link) do
             nil -> Map.delete(ram, :link)
             link -> Map.put(ram, :link, link)
           end
 
-        %{ctx | state: state, ram: ram, apu: apu, note: {"état repris (case #{ctx.state_slot})", 120}}
+        %{
+          ctx
+          | state: state,
+            ram: ram,
+            apu: apu,
+            note: {"state loaded (slot #{ctx.state_slot})", 120}
+        }
 
       :error ->
-        %{ctx | note: {"case #{ctx.state_slot} vide", 120}}
+        %{ctx | note: {"slot #{ctx.state_slot} empty", 120}}
     end
   end
 
-  # Les chiffres choisissent la case d'état courante — neuf instantanés par
-  # partie, la case 1 étant le fichier historique.
+  # The digits pick the current state slot — nine snapshots per game, slot 1
+  # being the historical file.
   defp apply_event({tag, {:slot, n}}, ctx) when tag in [:key, :press],
-    do: %{ctx | state_slot: n, note: {"case d'état #{n}", 120}}
+    do: %{ctx | state_slot: n, note: {"state slot #{n}", 120}}
 
   defp apply_event({_tag, {:slot, _n}}, ctx), do: ctx
 
-  # Le turbo affame tout lecteur audio (production stoppée, consommation
-  # continue) : on ferme ffplay à l'entrée, on en rouvre un neuf à la
-  # sortie — tampon vierge, pas de famine héritée.
-  # Le câble exige le tempo : deux consoles en turbo dérivent l'une de
-  # l'autre et le protocole série se déchire — turbo indisponible branché.
+  # Turbo starves any audio player (production stopped, consumption
+  # ongoing): we close ffplay on the way in and open a fresh one on the way
+  # out — clean buffer, no inherited starvation.
+  # The cable demands the tempo: two consoles in turbo drift apart and the
+  # serial protocol tears — so turbo is unavailable while plugged in.
   defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press] do
     if Map.has_key?(ctx.ram, :link) do
-      %{ctx | note: {"turbo indisponible : câble branché", 120}}
+      %{ctx | note: {"turbo unavailable: link cable plugged in", 120}}
     else
       turbo_toggle(ctx)
     end
   end
-
 
   defp apply_event({tag, :pause}, ctx) when tag in [:key, :press],
     do: %{ctx | paused: not ctx.paused}
@@ -508,16 +526,16 @@ defmodule Atomboy.Play do
   defp apply_event({tag, key}, %{kitty: true} = ctx) when tag in [:press, :repeat],
     do: %{ctx | down: MapSet.put(ctx.down, key)}
 
-  # En kitty, la presse nue d'une flèche (« ESC [ A ») aura son relâchement.
+  # Under kitty, the bare press of an arrow ("ESC [ A") will get its release.
   defp apply_event({:key, key}, %{kitty: true} = ctx)
        when key in [:up, :down, :left, :right],
        do: %{ctx | down: MapSet.put(ctx.down, key)}
 
-  # Régime classique : frappe sans relâchement connu → pression tenue.
+  # Classic regime: a keystroke with no known release → a held press.
   defp apply_event({tag, key}, ctx) when tag in [:key, :press, :repeat],
     do: %{ctx | hold: Map.put(ctx.hold, key, ctx.hold_frames)}
 
-  # Relâchement sans protocole confirmé : ignoré.
+  # A release with no confirmed protocol: ignored.
   defp apply_event(_event, ctx), do: ctx
 
   defp turbo_toggle(ctx) do
@@ -528,26 +546,28 @@ defmodule Atomboy.Play do
         Audio.close(ctx.audio)
         nil
       else
-        if ctx.son?, do: Audio.open()
+        if ctx.sound?, do: Audio.open()
       end
 
     %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
   end
 
-  # Les actions choisies au menu passent par les mêmes chemins que les
-  # raccourcis directs — le menu n'est qu'une autre façon d'appuyer.
+  # The actions chosen in the menu take the same paths as the direct
+  # shortcuts — the menu is only another way of pressing a key.
   defp menu_action(:save_state, ctx), do: apply_event({:key, :save_state}, ctx)
   defp menu_action(:load_state, ctx), do: apply_event({:key, :load_state}, ctx)
   defp menu_action({:slot, n}, ctx), do: apply_event({:key, {:slot, n}}, ctx)
   defp menu_action({:palette, p}, ctx), do: %{ctx | palette: p}
 
-  # Le mixer vit dans la map mémoire : l'APU le replie dans sa config par
-  # frame, et il voyage avec les états sauvés.
+  # The mixer lives in the memory map: the APU folds it into its per-frame
+  # config, and it travels along with saved states.
   defp menu_action({:mixer, m}, ctx), do: %{ctx | ram: Map.put(ctx.ram, :mixer, m)}
-  # Quitter par le menu : le budget de frames tombe à zéro restant — la
-  # boucle conclut par le chemin normal (sauvegarde, terminal restauré).
+  # Quitting through the menu: the frame budget drops to zero remaining —
+  # the loop concludes by the normal path (save written, terminal restored).
   defp menu_action(:quit, ctx), do: %{ctx | max_frames: ctx.frame}
 
+  # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
+  # on-disk convention `Atomboy.Save` also spells out.
   defp state_path(ctx) do
     if ctx.state_slot == 1 do
       ctx.state_base <> ".state"
@@ -556,10 +576,9 @@ defmodule Atomboy.Play do
     end
   end
 
-
-  # Le \r explicite avant chaque \n : inoffensif quand opost traduit déjà,
-  # salvateur si un environnement l'a éteint — l'affichage ne dépend ainsi
-  # d'aucun réglage de sortie du terminal.
+  # The explicit \r before each \n: harmless when opost already translates,
+  # a lifesaver if some environment turned it off — the display then depends
+  # on no terminal output setting at all.
   defp crlf(text), do: :binary.replace(text, "\n", "\r\n", [:global])
 
   defp finish(ctx) do
@@ -576,8 +595,8 @@ defmodule Atomboy.Play do
   defp collect_input(acc) do
     receive do
       {:input, data} -> collect_input([acc | data])
-      # Les messages du port audio (sortie, code de fin) : sans intérêt,
-      # mais à drainer — une boîte aux lettres qui enfle ralentit tout.
+      # The audio port's messages (output, exit status): of no interest, but
+      # to be drained — a mailbox that swells slows everything down.
       {port, {:data, _}} when is_port(port) -> collect_input(acc)
       {port, {:exit_status, _}} when is_port(port) -> collect_input(acc)
     after
@@ -603,8 +622,8 @@ defmodule Atomboy.Play do
       end
 
     [
-      "\e[0m ✚ flèches · x A · c B · ⏎ Start · ␣ Select · s/r état · ⇥ turbo · p pause · q quitte   ",
-      :io_lib.format(~c"~5.1f fps · banque ~2..0B", [ctx.fps, bank]),
+      "\e[0m ✚ arrows · x A · c B · ⏎ Start · ␣ Select · s/r state · ⇥ turbo · p pause · q quit   ",
+      :io_lib.format(~c"~5.1f fps · bank ~2..0B", [ctx.fps, bank]),
       if(ctx.audio, do: " · ♪", else: ""),
       if(Map.has_key?(ram, :link), do: " · ⇄", else: ""),
       if(ctx.turbo, do: " · »»", else: ""),
@@ -615,13 +634,13 @@ defmodule Atomboy.Play do
     ]
   end
 
-  # ── Le clavier ──────────────────────────────────────────────────────────────
+  # ── The keyboard ────────────────────────────────────────────────────────────
 
-  # Le pty s'ouvre ici même : un descripteur :raw ne se lit que depuis le
-  # processus qui l'a ouvert. Puis un octet à la fois, en lecture bloquante
-  # hors de l'étage d'E/S d'Erlang — c'est elle que le terminal en -icanon
-  # réveille à chaque frappe. La fin de flux (entrée redirigée épuisée)
-  # arrête juste la lecture : la partie continue au joypad relâché.
+  # The pty is opened right here: a :raw descriptor can only be read from
+  # the process that opened it. Then one byte at a time, in a blocking read
+  # outside Erlang's I/O stack — that read is the one a terminal in -icanon
+  # wakes on every keystroke. End of stream (redirected input exhausted)
+  # merely stops the reading: the game goes on with the joypad released.
   defp read_keys(parent, path) do
     case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
       {:ok, f} -> read_loop(parent, f)
@@ -640,10 +659,10 @@ defmodule Atomboy.Play do
     end
   end
 
-  # ── Le terminal ─────────────────────────────────────────────────────────────
+  # ── The terminal ────────────────────────────────────────────────────────────
 
-  # Le nom du pty de ce BEAM — « ttys005 » — par ps, seul lien qui survive
-  # au setsid. nil sans terminal (entrée redirigée, CI).
+  # The name of this BEAM's pty — "ttys005" — through ps, the only link that
+  # survives the setsid. nil with no terminal (redirected input, CI).
   defp pty_path do
     tty = :os.cmd(String.to_charlist("ps -o tty= -p #{System.pid()}"))
     tty = tty |> to_string() |> String.trim()
@@ -660,15 +679,15 @@ defmodule Atomboy.Play do
 
     IO.write("\e[?1049h\e[?25l\e[2J")
 
-    # Le protocole clavier kitty, s'il est parlé : pousser les flags
-    # (1 désambiguïser, 2 événements presse/relâchement, 8 toutes les touches
-    # en séquences) puis interroger — la réponse « CSI ? … u » confirme, et
-    # les relâchements donnent l'état réel du clavier (diagonales, accords).
-    # Un terminal muet ignore tout : le maintien par frames reste en place.
+    # The kitty keyboard protocol, if it is spoken: push the flags
+    # (1 disambiguate, 2 press/release events, 8 all keys as sequences) then
+    # query — the "CSI ? … u" answer confirms it, and the releases give the
+    # real keyboard state (diagonals, chords). A mute terminal ignores the
+    # whole thing: the frame-based hold stays in place.
     if tty, do: IO.write("\e[>11u\e[?u")
 
-    # Et le protocole graphique : transmettre un pixel en requête (a=q) —
-    # « OK » en réponse = de vraies images plutôt que des demi-blocs.
+    # And the graphics protocol: transmit one pixel as a query (a=q) —
+    # "OK" in reply = real images rather than half blocks.
     if tty, do: IO.write("\e_Gi=31,a=q,t=d,f=24,s=1,v=1;AAAA\e\\")
     saved
   end
@@ -685,7 +704,7 @@ defmodule Atomboy.Play do
     :ok
   end
 
-  # macOS dit `stty -f fichier`, GNU dit `stty -F fichier`.
+  # macOS says `stty -f file`, GNU says `stty -F file`.
   defp stty(tty, args) do
     flag = if match?({:unix, :linux}, :os.type()), do: "-F", else: "-f"
     String.to_charlist("stty #{flag} #{tty} #{args}")

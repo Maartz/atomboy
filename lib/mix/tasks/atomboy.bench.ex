@@ -1,36 +1,36 @@
 defmodule Mix.Tasks.Atomboy.Bench do
-  @shortdoc "Mesure le débit du CPU en instructions par seconde"
+  @shortdoc "Measures CPU throughput in instructions per second"
 
   @moduledoc """
-  Combien d'instructions Game Boy par seconde, sur cette machine.
+  How many Game Boy instructions per second, on this machine.
 
-      mix atomboy.bench [nombre_d_instructions]
+      mix atomboy.bench [instruction_count]
 
-  ## Ce que le chiffre veut dire, et ne veut pas dire
+  ## What the number means, and what it does not
 
-  Le programme mesuré est fait de `LD r, r'` registre à registre : aucun accès
-  mémoire hors le fetch d'opcode. C'est délibéré — il s'agit d'isoler le coût de
-  la **convention d'appel**, pas celui du backend mémoire.
+  The program being measured is made of register-to-register `LD r, r'`: no
+  memory access beyond the opcode fetch. That is deliberate — the point is to
+  isolate the cost of the **calling convention**, not that of the memory
+  backend.
 
-  Deux conséquences à garder en tête :
+  Two consequences worth keeping in mind:
 
-    * Le chiffre est un **plafond optimiste**. Les vraies instructions touchent
-      la mémoire, manipulent des drapeaux, sautent.
-    * Chaque instruction paie quand même une lecture dans la map de
-      `Atomboy.Memory.Flat` pour son fetch. Ce coût est identique quelle que
-      soit la convention de registres, donc il **comprime** l'écart mesuré entre
-      deux conventions : la différence réelle sur la manipulation de registres
-      est plus grande que le rapport affiché.
+    * The number is an **optimistic ceiling**. Real instructions touch memory,
+      juggle flags, jump.
+    * Every instruction still pays for a read in the `Atomboy.Memory.Flat` map
+      for its fetch. That cost is identical whatever the register convention,
+      so it **compresses** the measured gap between two conventions: the real
+      difference on register handling is larger than the displayed ratio.
 
-  La cible à garder en tête est **500 000 instructions/s**, le débit soutenu
-  d'une DMG à 4,194304 MHz.
+  The target to keep in mind is **500,000 instructions/s**, the throughput a
+  DMG sustains at 4.194304 MHz.
   """
 
   use Mix.Task
 
-  # Toute la plage d'adressage est remplie d'un opcode registre-à-registre, pour
-  # que PC avance et reboucle à 0xFFFF sans qu'aucune remise à zéro ne vienne
-  # polluer la boucle de mesure.
+  # The whole address range is filled with a register-to-register opcode, so
+  # that PC advances and wraps at 0xFFFF without any reset coming to pollute
+  # the measurement loop.
   @filler 0x41
 
   @default_count 3_000_000
@@ -48,7 +48,7 @@ defmodule Mix.Tasks.Atomboy.Bench do
     mem = Atomboy.Memory.Flat.new(for addr <- 0..0xFFFF, do: {addr, @filler})
     state = %Atomboy.CPU.State{c: 0x42, h: 0xC0, sp: 0xFFFE}
 
-    # Un tour à blanc pour que le JIT de la BEAM ait chauffé avant la mesure.
+    # A dry run, so the BEAM's JIT has warmed up before the measurement.
     loop(state, mem, min(count, 100_000), 0)
 
     {microseconds, cycles} = :timer.tc(fn -> loop(state, mem, count, 0) end)
@@ -66,16 +66,16 @@ defmodule Mix.Tasks.Atomboy.Bench do
   defp report(count, microseconds, cycles) do
     seconds = microseconds / 1_000_000
     per_second = count / seconds
-    # 4,194304 MHz : le débit de T-cycles qu'une DMG soutient réellement.
+    # 4.194304 MHz: the T-cycle throughput a DMG actually sustains.
     realtime = cycles / seconds / 4_194_304
 
     Mix.shell().info("""
 
-    #{format(count)} instructions en #{Float.round(seconds, 2)} s
+    #{format(count)} instructions in #{Float.round(seconds, 2)} s
 
       #{format(round(per_second))} instructions/s
-      #{Float.round(per_second / 500_000, 2)}× la cible de 500 000/s
-      #{Float.round(realtime * 100, 1)} % de la vitesse d'une DMG réelle
+      #{Float.round(per_second / 500_000, 2)}× the 500,000/s target
+      #{Float.round(realtime * 100, 1)} % of a real DMG's speed
     """)
   end
 
@@ -83,7 +83,7 @@ defmodule Mix.Tasks.Atomboy.Bench do
     n
     |> Integer.to_string()
     |> String.reverse()
-    |> String.replace(~r/(\d{3})(?=\d)/, "\\1 ")
+    |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
     |> String.reverse()
   end
 end

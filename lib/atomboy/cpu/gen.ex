@@ -1,62 +1,61 @@
 defmodule Atomboy.CPU.Gen do
   @moduledoc """
-  Traduit un `Atomboy.CPU.Insn` en code, à la compilation — vers deux backends.
+  Translates an `Atomboy.CPU.Insn` into code, at compile time — for two backends.
 
-  C'est la seule couche qui connaît les conventions d'appel. `Atomboy.CPU.Table`
-  décrit *quoi*, ce module décide *comment* — et il le décide deux fois :
+  This is the only layer that knows the calling conventions. `Atomboy.CPU.Table`
+  describes *what*, this module decides *how* — and it decides it twice:
 
-    * **`clause/1` — le backend struct.** `exec(opcode, %State{}, mem)` renvoie
-      `{state, mem, cycles}`. Une allocation par instruction, un état
-      observable après chacune : c'est l'oracle. Les vecteurs SM83 le valident,
-      le débogage s'y fait, et la phase 5 comparera le code recompilé à lui.
+    * **`clause/1` — the struct backend.** `exec(opcode, %State{}, mem)` returns
+      `{state, mem, cycles}`. One allocation per instruction, an observable state
+      after each one: this is the oracle. The SM83 vectors validate it, debugging
+      happens here, and phase 5 will compare the recompiled code against it.
 
-    * **`loop_clause/1` — la boucle rapide.** Les registres voyagent en
-      arguments de fonction, chaque clause finit par un appel terminal vers le
-      fetch suivant, et rien n'est construit tant que le budget de cycles
-      n'est pas épuisé. Dans du code natif AOT, ces arguments deviennent des
-      registres machine.
+    * **`loop_clause/1` — the fast loop.** The registers travel as function
+      arguments, every clause ends in a tail call to the next fetch, and nothing
+      is built until the cycle budget runs out. In AOT native code, those
+      arguments become machine registers.
 
-  Pourquoi deux backends plutôt qu'un : la mesure. Sur AtomVM natif, la boucle
-  à struct plafonne à ×1,21 de l'interprété — loi d'Amdahl, tout le temps part
-  dans les BIFs de map que le natif ne compile pas. La sonde sans maps a donné
-  ×43. Le confort du struct reste là où on lit l'état ; la vitesse là où on ne
-  lit rien.
+  Why two backends rather than one: measurement. On native AtomVM, the struct
+  loop tops out at ×1.21 over interpreted — Amdahl's law, all the time goes into
+  map BIFs that the native compiler does not compile. The map-free probe gave
+  ×43. The struct's comfort stays where the state gets read; the speed goes where
+  nothing gets read.
 
-  La sémantique, elle, n'est écrite qu'une fois : les deux émetteurs partagent
-  la même table et les mêmes primitives `Atomboy.CPU.ALU`. Un test
-  d'équivalence croisée verrouille le reste.
+  The semantics, meanwhile, are written only once: both emitters share the same
+  table and the same `Atomboy.CPU.ALU` primitives. A cross-equivalence test locks
+  down the rest.
   """
 
   alias Atomboy.CPU.Insn
 
   @state [:a, :f, :b, :c, :d, :e, :h, :l, :sp, :pc]
 
-  # L'état non-registre que la boucle rapide transporte en plus : IME (RETI,
-  # EI, DI) et halted (HALT). Étendre cette liste étend la boucle — têtes de
-  # clauses, appels terminaux et matérialisation suivent.
+  # The non-register state the fast loop carries in addition: IME (RETI, EI, DI)
+  # and halted (HALT). Extending this list extends the loop — clause heads, tail
+  # calls and materialisation all follow.
   @loop_extra [:ime, :halted, :ime_pending]
 
-  @doc "Les registres qui composent l'état, dans l'ordre des arguments."
+  @doc "The registers that make up the state, in argument order."
   @spec state_names() :: [atom()]
   def state_names, do: @state
 
   @doc """
-  Une variable non hygiénique.
+  An unhygienic variable.
 
-  Le contexte `nil` est indispensable : ces variables sont construites ici mais
-  doivent se lier à celles de la tête de fonction chez l'appelant. Avec le
-  contexte par défaut elles appartiendraient à ce module et ne matcheraient rien.
+  The `nil` context is essential: these variables are built here but have to bind
+  to the ones in the caller's function head. With the default context they would
+  belong to this module and match nothing.
   """
   @spec var(atom()) :: Macro.t()
   def var(name), do: Macro.var(name, nil)
 
-  # ══ Backend struct ═══════════════════════════════════════════════════════════
+  # ══ Struct backend ═══════════════════════════════════════════════════════════
 
   @doc """
-  La clause de `exec/3` (backend struct) pour une instruction.
+  The `exec/3` clause (struct backend) for one instruction.
 
-  Renvoie `{arguments, corps}`, à injecter par `unquote_splicing/1` et
-  `unquote/1` dans un `def` chez l'appelant.
+  Returns `{arguments, body}`, to be injected through `unquote_splicing/1` and
+  `unquote/1` into a `def` at the call site.
   """
   @spec clause(Insn.t()) :: {[Macro.t()], Macro.t()}
   def clause(%Insn{} = insn), do: {[var(:st), var(:mem)], struct_body(insn)}
@@ -65,10 +64,10 @@ defmodule Atomboy.CPU.Gen do
     struct_ret(var(:st), var(:mem), cycles)
   end
 
-  # LD r, d8 et LD (HL), d8 — l'immédiat se lit à PC, qui avance d'un cran de
-  # plus. L'immédiat est lié à une variable avant l'appel : la lecture doit
-  # précéder toute écriture mémoire, et un PC déjà avancé ne doit pas resservir
-  # à la lecture.
+  # LD r, d8 and LD (HL), d8 — the immediate is read at PC, which advances one
+  # step further. The immediate is bound to a variable before the call: the read
+  # has to precede any memory write, and an already-advanced PC must not be
+  # reused for the read.
   defp struct_body(%Insn{mnemonic: :ld, operands: [dst, {:imm, 8}], cycles: cycles}) do
     imm = Macro.var(:imm, __MODULE__)
     read = quote do: unquote(imm) = mem_read_pc(unquote(var(:mem)), unquote(var(:st)))
@@ -90,13 +89,13 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # STOP — un octet et rien d'autre dans le modèle du corpus ; voir la table.
+  # STOP — one byte and nothing else in the corpus's model; see the table.
   defp struct_body(%Insn{mnemonic: :stop, cycles: cycles}) do
     struct_ret(var(:st), var(:mem), cycles)
   end
 
-  # JR — offset signé d'un octet, relatif au PC qui suit l'opérande. Le calcul
-  # du signe est sans branche : retrancher 256 quand le bit 7 est levé.
+  # JR — one signed byte of offset, relative to the PC that follows the operand.
+  # The sign is computed branch-free: subtract 256 when bit 7 is set.
   defp struct_body(%Insn{mnemonic: :jr, operands: [{:imm, 8}]} = insn) do
     offset = Macro.var(:offset, __MODULE__)
 
@@ -134,7 +133,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LD (a16), SP — l'unique écriture 16 bits directe.
+  # LD (a16), SP — the one direct 16-bit write.
   defp struct_body(%Insn{mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: cycles}) do
     addr = Macro.var(:addr, __MODULE__)
     bumped = quote do: Bitwise.band(unquote(field(:pc)) + 2, 0xFFFF)
@@ -148,8 +147,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LD (BC/DE/HL±), A — écriture de A à l'adresse d'une paire, avec
-  # post-ajustement de HL pour les deux dernières formes.
+  # LD (BC/DE/HL±), A — writes A at a pair's address, with HL post-adjusted for
+  # the last two forms.
   defp struct_body(%Insn{mnemonic: :ld, operands: [{:ind, target}, {:reg, :a}], cycles: cycles}) do
     addr = Macro.var(:addr, __MODULE__)
     write = quote do: mem_write_at(unquote(var(:mem)), unquote(addr), unquote(field(:a)))
@@ -182,27 +181,27 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LD (HL), r — la mémoire change, l'état non : `st` repart tel quel.
+  # LD (HL), r — memory changes, the state does not: `st` goes back out as-is.
   defp struct_body(%Insn{mnemonic: :ld, operands: [:hl_ind, src], cycles: cycles}) do
     write = quote do: mem_write(unquote(var(:mem)), unquote(var(:st)), unquote(struct_read(src)))
     struct_ret(var(:st), write, cycles)
   end
 
-  # LD r, r' et LD r, (HL) — un seul champ change. La garde écarte les
-  # opérandes d'E/S, qui ont leurs propres clauses : sans elle, l'ordre des
-  # clauses déciderait silencieusement.
+  # LD r, r' and LD r, (HL) — a single field changes. The guard rules out the I/O
+  # operands, which have clauses of their own: without it, clause order would
+  # decide silently.
   defp struct_body(%Insn{mnemonic: :ld, operands: [{:reg, dst}, src], cycles: cycles})
        when is_tuple(src) or src == :hl_ind do
     struct_ret(struct_update(%{dst => struct_read(src)}), var(:mem), cycles)
   end
 
-  # JP HL — aucun accès mémoire malgré la notation « JP (HL) » : PC reçoit la
-  # paire. Le saut calculé du futur trampoline de phase 5.
+  # JP HL — no memory access at all, despite the "JP (HL)" notation: PC receives
+  # the pair. The computed jump of phase 5's future trampoline.
   defp struct_body(%Insn{mnemonic: :jp, operands: [{:pair, :hl}], cycles: cycles}) do
     struct_ret(struct_update(%{pc: struct_pair_read({:pair, :hl})}), var(:mem), cycles)
   end
 
-  # JP a16 et ses formes conditionnelles.
+  # JP a16 and its conditional forms.
   defp struct_body(%Insn{mnemonic: :jp, operands: [{:imm, 16}]} = insn) do
     target = Macro.var(:target, __MODULE__)
     taken = struct_ret(struct_update(%{pc: target}), var(:mem), insn.cycles)
@@ -219,7 +218,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # CALL a16 — l'adresse de retour (PC après l'opérande) part sur la pile.
+  # CALL a16 — the return address (PC past the operand) goes onto the stack.
   defp struct_body(%Insn{mnemonic: :call, operands: [{:imm, 16}]} = insn) do
     target = Macro.var(:target, __MODULE__)
     new_sp = Macro.var(:new_sp, __MODULE__)
@@ -249,8 +248,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # RET, RET cc, RETI — la lecture de pile n'a lieu que si le retour se fait,
-  # et RETI rallume IME dans le même souffle.
+  # RET, RET cc, RETI — the stack read only happens if the return is taken, and
+  # RETI switches IME back on in the same breath.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: []} = insn)
        when mnemonic in [:ret, :reti] do
     value = Macro.var(:value, __MODULE__)
@@ -275,7 +274,7 @@ defmodule Atomboy.CPU.Gen do
     end)
   end
 
-  # RST — un CALL vers une cible fixe encodée dans l'opcode.
+  # RST — a CALL to a fixed target encoded in the opcode.
   defp struct_body(%Insn{mnemonic: :rst, operands: [{:rst, target}], cycles: cycles}) do
     new_sp = Macro.var(:new_sp, __MODULE__)
 
@@ -292,7 +291,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # PUSH rr — SP descend de deux, la paire s'écrit little-endian au nouveau SP.
+  # PUSH rr — SP drops by two, the pair is written little-endian at the new SP.
   defp struct_body(%Insn{mnemonic: :push, operands: [pair], cycles: cycles}) do
     new_sp = Macro.var(:new_sp, __MODULE__)
 
@@ -306,8 +305,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # POP rr — lecture au SP courant, SP remonte de deux. Voir pop_overrides/3
-  # pour le masque de POP AF.
+  # POP rr — read at the current SP, then SP climbs back by two. See
+  # pop_overrides/3 for POP AF's mask.
   defp struct_body(%Insn{mnemonic: :pop, operands: [pair], cycles: cycles}) do
     value = Macro.var(:value, __MODULE__)
     bumped = quote do: Bitwise.band(unquote(field(:sp)) + 2, 0xFFFF)
@@ -322,8 +321,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # Les opérations sur l'accumulateur (z=7) — signature uniforme (a, f) → {a, f}
-  # côté ALU, donc une seule clause pour les huit.
+  # The accumulator operations (z=7) — a uniform (a, f) → {a, f} signature on the
+  # ALU side, hence a single clause for all eight.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [], cycles: cycles})
        when mnemonic in [:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf] do
     result = Macro.var(:result, __MODULE__)
@@ -336,7 +335,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LD rr, d16 — le mot immédiat, little-endian, PC avance de deux.
+  # LD rr, d16 — the immediate word, little-endian, PC advances by two.
   defp struct_body(%Insn{mnemonic: :ld, operands: [{:pair, _} = dst, {:imm, 16}], cycles: cycles}) do
     imm = Macro.var(:imm, __MODULE__)
     bumped = quote do: Bitwise.band(unquote(field(:pc)) + 2, 0xFFFF)
@@ -348,7 +347,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # ADD HL, rr — l'unique addition 16 bits ; Z préservé, voir ALU.add16/3.
+  # ADD HL, rr — the one 16-bit addition; Z preserved, see ALU.add16/3.
   defp struct_body(%Insn{mnemonic: :add, operands: [{:pair, :hl}, src], cycles: cycles}) do
     result = Macro.var(:result, __MODULE__)
     f = Macro.var(:new_f, __MODULE__)
@@ -369,7 +368,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC rr / DEC rr — arithmétique 16 bits pure, aucun drapeau.
+  # INC rr / DEC rr — pure 16-bit arithmetic, no flags.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [{:pair, _} = target], cycles: cycles})
        when mnemonic in [:inc, :dec] do
     result = Macro.var(:result, __MODULE__)
@@ -383,8 +382,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC r / DEC r et les huit rotations/décalages CB — même forme :
-  # (valeur, F) → {valeur, F}, la primitive porte toute la sémantique.
+  # INC r / DEC r and the eight CB rotations/shifts — the same shape:
+  # (value, F) → {value, F}, with the primitive carrying all the semantics.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [{:reg, name}], cycles: cycles})
        when mnemonic in [:inc, :dec, :rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl] do
     result = Macro.var(:result, __MODULE__)
@@ -397,8 +396,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC (HL) / DEC (HL) et rotations (HL) — lu-modifié-écrit : la valeur passe
-  # par la mémoire dans les deux sens, seul F change dans l'état.
+  # INC (HL) / DEC (HL) and the (HL) rotations — read-modify-write: the value goes
+  # through memory both ways, and F is the only thing that changes in the state.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [:hl_ind], cycles: cycles})
        when mnemonic in [:inc, :dec, :rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl] do
     result = Macro.var(:result, __MODULE__)
@@ -418,8 +417,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # DI / EI / HALT — un seul champ de contrôle chacun.
-  # BIT n — lecture seule, F seul change ; C traverse.
+  # DI / EI / HALT — one control field each.
+  # BIT n — read-only, F alone changes; C passes through.
   defp struct_body(%Insn{mnemonic: :bit, operands: [{:bit, n}, target], cycles: cycles}) do
     f = Macro.var(:new_f, __MODULE__)
 
@@ -431,8 +430,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # RES n / SET n — bit effacé ou posé, aucun drapeau. L'arithmétique est
-  # inline : il n'y a aucune subtilité à centraliser.
+  # RES n / SET n — the bit cleared or set, no flags. The arithmetic is inline:
+  # there is no subtlety here worth centralising.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [{:bit, n}, target], cycles: cycles})
        when mnemonic in [:res, :set] do
     result = Macro.var(:result, __MODULE__)
@@ -463,12 +462,12 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # DI coupe tout, l'armement différé d'un EI précédent compris.
+  # DI cuts everything off, including a preceding EI's deferred arming.
   defp struct_body(%Insn{mnemonic: :di, cycles: cycles}),
     do: struct_ret(struct_update(%{ime: 0, ime_pending: 0}), var(:mem), cycles)
 
-  # EI n'autorise pas : il arme. La promotion se fait au pas suivant, dans
-  # step/2 côté oracle et dans fetch côté boucle — même point dans les deux.
+  # EI does not enable: it arms. The promotion happens on the next step, in step/2
+  # on the oracle side and in fetch on the loop side — the same point in both.
   defp struct_body(%Insn{mnemonic: :ei, cycles: cycles}),
     do: struct_ret(struct_update(%{ime_pending: 1}), var(:mem), cycles)
 
@@ -480,7 +479,7 @@ defmodule Atomboy.CPU.Gen do
     struct_ret(struct_update(%{sp: struct_pair_read({:pair, :hl})}), var(:mem), cycles)
   end
 
-  # ADD SP, r8 et LD HL, SP+r8 — même arithmétique, destination différente.
+  # ADD SP, r8 and LD HL, SP+r8 — same arithmetic, different destination.
   defp struct_body(%Insn{mnemonic: :add_sp, operands: [dst, {:imm, 8}], cycles: cycles}) do
     imm = Macro.var(:imm, __MODULE__)
     result = Macro.var(:result, __MODULE__)
@@ -504,8 +503,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LDH et LD absolus de A — la page haute (0xFF00 + a8 ou + C) et l'adresse
-  # 16 bits directe partagent la même mécanique, seule l'adresse change.
+  # LDH and the absolute LDs of A — the high page (0xFF00 + a8, or + C) and the
+  # direct 16-bit address share the same mechanics; only the address changes.
   defp struct_body(%Insn{mnemonic: mnemonic, operands: [io, {:reg, :a}], cycles: cycles})
        when io in [:a8_ind, :c_ind, :a16_ind] and mnemonic in [:ld, :ldh] do
     {prelude, addr, pc_overrides} = struct_io(io)
@@ -529,7 +528,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # ALU A, d8 — l'immédiat comme source.
+  # ALU A, d8 — the immediate as the source.
   defp struct_body(%Insn{mnemonic: :cp, operands: [{:reg, :a}, {:imm, 8}], cycles: cycles}) do
     imm = Macro.var(:imm, __MODULE__)
     f = Macro.var(:new_f, __MODULE__)
@@ -559,8 +558,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # ALU — l'arithmétique vit dans Atomboy.CPU.ALU, au niveau valeurs. Ici on ne
-  # fait qu'envelopper le résultat dans la mise à jour de structure.
+  # ALU — the arithmetic lives in Atomboy.CPU.ALU, at the value level. All we do
+  # here is wrap the result in the struct update.
   defp struct_body(%Insn{mnemonic: :cp, operands: [{:reg, :a}, src], cycles: cycles}) do
     f = Macro.var(:new_f, __MODULE__)
 
@@ -589,8 +588,8 @@ defmodule Atomboy.CPU.Gen do
 
   defp struct_read({:reg, name}), do: field(name)
 
-  # L'adresse d'un opérande d'E/S : `{prélude, expression d'adresse,
-  # surcharges de PC}`. Le prélude lit l'éventuel immédiat.
+  # An I/O operand's address: `{prelude, address expression, PC overrides}`. The
+  # prelude reads the immediate, if there is one.
   defp struct_io(:c_ind) do
     {[], quote(do: Bitwise.bor(0xFF00, unquote(field(:c)))), %{}}
   end
@@ -616,8 +615,8 @@ defmodule Atomboy.CPU.Gen do
     quote do: Bitwise.bsl(unquote(field(hi)), 8) |> Bitwise.bor(unquote(field(lo)))
   end
 
-  # Les surcharges d'état qui écrivent `value` — une expression déjà liée à
-  # une variable, jamais réévaluée — dans une paire.
+  # The state overrides that write `value` — an expression already bound to a
+  # variable, never re-evaluated — into a pair.
   defp struct_pair_overrides({:pair, :sp}, value), do: %{sp: value}
 
   defp struct_pair_overrides({:pair, name}, value) do
@@ -632,8 +631,8 @@ defmodule Atomboy.CPU.Gen do
   # `st.<name>`
   defp field(name), do: {{:., [], [var(:st), name]}, [no_parens: true], []}
 
-  # `%{st | champ: valeur, ...}` — une seule mise à jour, tous champs groupés.
-  # Sans surcharge, `st` repart tel quel : aucune allocation.
+  # `%{st | field: value, ...}` — a single update, all fields grouped. With no
+  # overrides, `st` goes back out as-is: no allocation at all.
   defp struct_update(fields) when map_size(fields) == 0, do: var(:st)
 
   defp struct_update(fields) do
@@ -644,16 +643,16 @@ defmodule Atomboy.CPU.Gen do
     {:{}, [], [state_expr, mem_expr, cycles]}
   end
 
-  # ══ Backend boucle rapide ════════════════════════════════════════════════════
+  # ══ Fast loop backend ════════════════════════════════════════════════════════
 
   @doc """
-  La clause de `exec/15` de `Atomboy.CPU.Loop` pour une instruction.
+  `Atomboy.CPU.Loop`'s `exec/15` clause for one instruction.
 
-  La tête reçoit `(opcode, rom, ram, budget, cycles, a, f, b, c, d, e, h, l,
-  sp, pc)` ; le corps se termine par un appel terminal vers `fetch/14` avec les
-  registres mis à jour. Les variables que le corps ne lit pas sont soulignées
-  dans la tête — `LD B, C` écrase `b` sans le lire, et sur des centaines de
-  clauses générées, les avertissements parasites noieraient ceux qui comptent.
+  The head receives `(opcode, rom, ram, budget, cycles, a, f, b, c, d, e, h, l,
+  sp, pc)`; the body ends in a tail call to `fetch/14` with the updated registers.
+  Variables the body does not read are underscored in the head — `LD B, C`
+  overwrites `b` without reading it, and across hundreds of generated clauses the
+  spurious warnings would drown out the ones that matter.
   """
   @spec loop_clause(Insn.t()) :: {[Macro.t()], Macro.t()}
   def loop_clause(%Insn{} = insn) do
@@ -665,12 +664,12 @@ defmodule Atomboy.CPU.Gen do
     loop_ret(%{}, var(:ram), cycles)
   end
 
-  # STOP — voir le backend struct.
+  # STOP — see the struct backend.
   defp loop_body(%Insn{mnemonic: :stop, cycles: cycles}) do
     loop_ret(%{}, var(:ram), cycles)
   end
 
-  # JR — voir le commentaire du backend struct pour le calcul du signe.
+  # JR — see the struct backend's comment for how the sign is computed.
   defp loop_body(%Insn{mnemonic: :jr, operands: [{:imm, 8}]} = insn) do
     offset = Macro.var(:offset, __MODULE__)
 
@@ -708,7 +707,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LD (a16), SP — deux écritures chaînées, little-endian.
+  # LD (a16), SP — two chained writes, little-endian.
   defp loop_body(%Insn{mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: cycles}) do
     addr = Macro.var(:addr, __MODULE__)
     lo = Macro.var(:lo, __MODULE__)
@@ -763,8 +762,8 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LD r, d8 / LD (HL), d8 — même logique que côté struct : lire l'immédiat à
-  # PC, puis repartir avec PC avancé d'un cran de plus.
+  # LD r, d8 / LD (HL), d8 — same logic as on the struct side: read the immediate
+  # at PC, then leave with PC advanced one step further.
   defp loop_body(%Insn{mnemonic: :ld, operands: [dst, {:imm, 8}], cycles: cycles}) do
     imm = Macro.var(:imm, __MODULE__)
 
@@ -796,8 +795,8 @@ defmodule Atomboy.CPU.Gen do
     loop_ret(%{}, ram, cycles)
   end
 
-  # Même garde que la clause struct équivalente : les opérandes d'E/S ont
-  # leurs propres clauses.
+  # Same guard as the equivalent struct clause: the I/O operands have clauses of
+  # their own.
   defp loop_body(%Insn{mnemonic: :ld, operands: [{:reg, dst}, src], cycles: cycles})
        when is_tuple(src) or src == :hl_ind do
     loop_ret(%{dst => loop_read(src)}, var(:ram), cycles)
@@ -1072,7 +1071,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # Les opérations sur l'accumulateur (z=7).
+  # The accumulator operations (z=7).
   defp loop_body(%Insn{mnemonic: mnemonic, operands: [], cycles: cycles})
        when mnemonic in [:rlca, :rrca, :rla, :rra, :daa, :cpl, :scf, :ccf] do
     result = Macro.var(:result, __MODULE__)
@@ -1085,7 +1084,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # LD rr, d16 — deux lectures à PC, little-endian.
+  # LD rr, d16 — two reads at PC, little-endian.
   defp loop_body(%Insn{mnemonic: :ld, operands: [{:pair, _} = dst, {:imm, 16}], cycles: cycles}) do
     imm = Macro.var(:imm, __MODULE__)
     lo = Macro.var(:lo, __MODULE__)
@@ -1129,7 +1128,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC rr / DEC rr — aucun drapeau.
+  # INC rr / DEC rr — no flags.
   defp loop_body(%Insn{mnemonic: mnemonic, operands: [{:pair, _} = target], cycles: cycles})
        when mnemonic in [:inc, :dec] do
     result = Macro.var(:result, __MODULE__)
@@ -1141,7 +1140,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # INC r / DEC r, rotations CB, et leurs formes (HL).
+  # INC r / DEC r, the CB rotations, and their (HL) forms.
   defp loop_body(%Insn{mnemonic: mnemonic, operands: [target], cycles: cycles})
        when mnemonic in [:inc, :dec, :rlc, :rrc, :rl, :rr, :sla, :sra, :swap, :srl] do
     result = Macro.var(:result, __MODULE__)
@@ -1192,7 +1191,7 @@ defmodule Atomboy.CPU.Gen do
 
   defp loop_read({:reg, name}), do: var(name)
 
-  # L'adresse d'un opérande d'E/S, côté boucle — même contrat que struct_io/1.
+  # An I/O operand's address, loop side — same contract as struct_io/1.
   defp loop_io(:c_ind) do
     {[], quote(do: Bitwise.bor(0xFF00, unquote(var(:c)))), %{}}
   end
@@ -1216,7 +1215,7 @@ defmodule Atomboy.CPU.Gen do
     {[prelude], addr, %{pc: bumped}}
   end
 
-  # Le mot little-endian à PC, côté boucle.
+  # The little-endian word at PC, loop side.
   defp loop_read16_pc do
     quote do
       Bitwise.bsl(
@@ -1231,7 +1230,7 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # L'écriture d'un mot sur la pile, little-endian, côté boucle.
+  # Writing a word onto the stack, little-endian, loop side.
   defp loop_push16(sp_expr, value_expr) do
     quote do
       ram_write(
@@ -1264,8 +1263,8 @@ defmodule Atomboy.CPU.Gen do
     quote do: Bitwise.bsl(unquote(var(:h)), 8) |> Bitwise.bor(unquote(var(:l)))
   end
 
-  # L'appel terminal vers le fetch suivant : tous les registres repartent en
-  # arguments, ceux d'`overrides` remplacés par leur nouvelle valeur.
+  # The tail call to the next fetch: every register leaves as an argument, with
+  # those in `overrides` replaced by their new value.
   defp loop_ret(overrides, ram_expr, cycles) do
     regs = Enum.map(@state ++ @loop_extra, fn name -> Map.get(overrides, name, var(name)) end)
     counted = quote do: unquote(var(:cycles)) + unquote(cycles)
@@ -1274,9 +1273,9 @@ defmodule Atomboy.CPU.Gen do
     quote do: fetch(unquote_splicing(args))
   end
 
-  # La tête de clause : opcode exclu (littéral chez l'appelant), variables non
-  # lues par le corps préfixées d'un souligné. Calculé sur l'AST pour que les
-  # familles à venir en héritent sans y penser.
+  # The clause head: opcode excluded (it is a literal at the call site), variables
+  # the body does not read prefixed with an underscore. Computed from the AST so
+  # that future families inherit it without anyone having to think about it.
   defp loop_args(body) do
     used = read_vars(body)
 
@@ -1285,8 +1284,8 @@ defmodule Atomboy.CPU.Gen do
     end)
   end
 
-  # Les variables référencées quelque part dans un AST. Une variable est un
-  # triplet dont le troisième élément est un atome (le contexte).
+  # The variables referenced anywhere in an AST. A variable is a triple whose
+  # third element is an atom (the context).
   defp read_vars(ast) do
     {_ast, vars} =
       Macro.prewalk(ast, MapSet.new(), fn
@@ -1300,22 +1299,22 @@ defmodule Atomboy.CPU.Gen do
     vars
   end
 
-  # ══ Dispatch arborescent ═════════════════════════════════════════════════════
+  # ══ Tree dispatch ════════════════════════════════════════════════════════════
   #
-  # Le JIT d'AtomVM compile un `select_val` en balayage linéaire — un appel de
-  # fonction C de comparaison par entrée. Sur 245 clauses plates, le coût du
-  # dispatch est proportionnel à la position de l'opcode : mesuré ×10,6 entre
-  # un programme de NOP (première entrée) et un programme d'OR A (~180e).
+  # AtomVM's JIT compiles a `select_val` into a linear scan — one C comparison
+  # function call per entry. Across 245 flat clauses, the dispatch cost is
+  # proportional to the opcode's position: measured at ×10.6 between a program of
+  # NOPs (first entry) and a program of OR A (~180th).
   #
-  # D'où l'arbre à deux étages : `case opcode >>> 4` puis `case opcode &&& 15`.
-  # Deux selects de 16 entrées au plus — pire cas ~32 comparaisons au lieu de
-  # 245, moyenne ~17 au lieu de ~120. Le jour où le JIT saura émettre une table
-  # de saut, il suffira de revenir aux clauses plates ici.
+  # Hence the two-level tree: `case opcode >>> 4` then `case opcode &&& 15`. Two
+  # selects of at most 16 entries — worst case ~32 comparisons instead of 245, on
+  # average ~17 instead of ~120. The day the JIT can emit a jump table, going back
+  # to flat clauses here is all it takes.
 
   @doc """
-  Le corps d'un `exec` de boucle rapide : l'arbre de dispatch complet sur les
-  instructions données, plus les entrées supplémentaires (le préfixe CB), avec
-  `fallback` comme branche par défaut.
+  The body of a fast-loop `exec`: the complete dispatch tree over the given
+  instructions, plus the extra entries (the CB prefix), with `fallback` as the
+  default branch.
   """
   @spec loop_dispatch([Insn.t()], [{0..0xFF, Macro.t()}], Macro.t()) :: Macro.t()
   def loop_dispatch(insns, extra_entries, fallback) do
@@ -1323,14 +1322,14 @@ defmodule Atomboy.CPU.Gen do
     dispatch_tree(entries, fallback)
   end
 
-  @doc "Le pendant backend struct de `loop_dispatch/3`."
+  @doc "The struct backend's counterpart to `loop_dispatch/3`."
   @spec struct_dispatch([Insn.t()], [{0..0xFF, Macro.t()}], Macro.t()) :: Macro.t()
   def struct_dispatch(insns, extra_entries, fallback) do
     entries = Enum.map(insns, fn insn -> {insn.opcode, struct_body(insn)} end) ++ extra_entries
     dispatch_tree(entries, fallback)
   end
 
-  @doc "L'entrée 0xCB d'une boucle rapide : second fetch, dispatch vers exec_cb."
+  @doc "A fast loop's 0xCB entry: second fetch, dispatch into exec_cb."
   @spec loop_cb_entry() :: {0xCB, Macro.t()}
   def loop_cb_entry do
     first = quote do: mem_read(unquote(var(:rom)), unquote(var(:ram)), unquote(var(:pc)))
@@ -1344,7 +1343,7 @@ defmodule Atomboy.CPU.Gen do
     {0xCB, quote(do: exec_cb(unquote_splicing([first | rest])))}
   end
 
-  @doc "L'entrée 0xCB du backend struct."
+  @doc "The struct backend's 0xCB entry."
   @spec struct_cb_entry() :: {0xCB, Macro.t()}
   def struct_cb_entry do
     body =
@@ -1360,11 +1359,10 @@ defmodule Atomboy.CPU.Gen do
   end
 
   @doc """
-  La branche par défaut : un appel vers un helper local du module hôte, pas un
-  `raise` inline — le fallback apparaît à chaque feuille de l'arbre, et 245
-  copies de la construction d'exception par table diluent le code chaud dans
-  le cache d'instructions. Le module hôte définit `unimplemented_base/1` et
-  `unimplemented_cb/1`.
+  The default branch: a call to a local helper in the host module, not an inline
+  `raise` — the fallback appears at every leaf of the tree, and 245 copies of the
+  exception construction per table dilute the hot code in the instruction cache.
+  The host module defines `unimplemented_base/1` and `unimplemented_cb/1`.
   """
   @spec unimplemented(atom()) :: Macro.t()
   def unimplemented(helper) when is_atom(helper) do
@@ -1372,15 +1370,15 @@ defmodule Atomboy.CPU.Gen do
   end
 
   @doc """
-  Le repli situé des boucles : l'opcode, mais aussi PC et la map mémoire —
-  de quoi raconter *où* le processeur s'est perdu, pas seulement sur quoi.
+  The loops' located fallback: the opcode, but also PC and the memory map — enough
+  to tell *where* the processor got lost, not only on what.
   """
   @spec unimplemented_at(atom()) :: Macro.t()
   def unimplemented_at(helper) when is_atom(helper) do
     quote do: unquote(helper)(unquote(var(:opcode)), unquote(var(:pc)), unquote(var(:ram)))
   end
 
-  @doc "Les arguments de tête d'un `exec` — opcode inclus, contexte nil partout."
+  @doc "An `exec`'s head arguments — opcode included, nil context throughout."
   @spec head_args(:loop | :struct) :: [Macro.t()]
   def head_args(:loop) do
     Enum.map([:opcode, :rom, :ram, :budget, :cycles] ++ @state ++ @loop_extra, &var/1)
@@ -1388,19 +1386,19 @@ defmodule Atomboy.CPU.Gen do
 
   def head_args(:struct), do: [var(:opcode), var(:st), var(:mem)]
 
-  # Recherche binaire en `if <` purs — profondeur log2(n), comparaisons
-  # entières que le JIT compile en tests inline. La première version en `case`
-  # imbriqués (16×16) compilait juste sur BEAM mais était mal traduite par le
-  # JIT natif : un opcode implémenté tombait dans le fallback. Les selects sont
-  # donc bannis du dispatch, pas seulement raccourcis.
+  # Binary search in pure `if <` — depth log2(n), integer comparisons that the JIT
+  # compiles into inline tests. The first version, in nested `case` (16×16),
+  # compiled correctly on the BEAM but was mistranslated by the native JIT: an
+  # implemented opcode fell through to the fallback. Selects are therefore banned
+  # from the dispatch, not merely shortened.
   defp dispatch_tree(entries, fallback) do
     entries
     |> Enum.sort_by(fn {opcode, _body} -> opcode end)
     |> search_tree(fallback)
   end
 
-  # La feuille garde son test d'égalité : les trous de la table — les onze
-  # encodages invalides — doivent tomber dans le fallback.
+  # The leaf keeps its equality test: the table's holes — the eleven invalid
+  # encodings — have to fall through to the fallback.
   defp search_tree([{opcode, body}], fallback) do
     quote do
       if unquote(var(:opcode)) === unquote(opcode) do
@@ -1424,20 +1422,19 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # ══ Commun ═══════════════════════════════════════════════════════════════════
+  # ══ Shared ═══════════════════════════════════════════════════════════════════
 
-  # Les moitiés d'une paire 16 bits. SP n'y figure pas : il vit déjà en un
-  # seul champ. AF n'existe que pour la pile.
+  # The halves of a 16-bit pair. SP does not appear: it already lives in a single
+  # field. AF exists only for the stack.
   defp pair_regs(:bc), do: {:b, :c}
   defp pair_regs(:de), do: {:d, :e}
   defp pair_regs(:hl), do: {:h, :l}
   defp pair_regs(:af), do: {:a, :f}
 
-  # Les surcharges d'un POP. Identiques aux surcharges de paire ordinaires,
-  # sauf pour AF : **les quatre bits bas de F n'existent pas physiquement** —
-  # quel que soit l'octet dépopé, ils lisent zéro. Oublier ce masque laisse
-  # entrer des bits fantômes dans F, que tous les calculs de drapeaux suivants
-  # traînent ensuite.
+  # A POP's overrides. Identical to the ordinary pair overrides, except for AF:
+  # **F's four low bits do not physically exist** — whatever byte gets popped, they
+  # read as zero. Forgetting this mask lets phantom bits into F, which every
+  # subsequent flag computation then drags along.
   defp pop_overrides({:pair, :af}, value, overrides_fun) do
     overrides_fun.({:pair, :af}, value)
     |> Map.put(:f, quote(do: Bitwise.band(unquote(value), 0xF0)))
@@ -1445,13 +1442,13 @@ defmodule Atomboy.CPU.Gen do
 
   defp pop_overrides(pair, value, overrides_fun), do: overrides_fun.(pair, value)
 
-  # La paire qui porte l'adresse d'un opérande indirect.
+  # The pair that carries an indirect operand's address.
   defp ind_pair(:bc), do: {:pair, :bc}
   defp ind_pair(:de), do: {:pair, :de}
   defp ind_pair(_hl), do: {:pair, :hl}
 
-  # Les surcharges d'état du post-ajustement de HL — vides pour BC et DE.
-  # `overrides_fun` est la fabrique de surcharges du backend appelant.
+  # The state overrides for HL's post-adjustment — empty for BC and DE.
+  # `overrides_fun` is the calling backend's override factory.
   defp ind_overrides(:hl_inc, addr, overrides_fun) do
     overrides_fun.({:pair, :hl}, quote(do: Bitwise.band(unquote(addr) + 1, 0xFFFF)))
   end
@@ -1462,16 +1459,16 @@ defmodule Atomboy.CPU.Gen do
 
   defp ind_overrides(_other, _addr, _overrides_fun), do: %{}
 
-  # Le test d'une condition de branchement sur une expression de F.
+  # The test of a branch condition against an F expression.
   defp condition_expr(:nz, f), do: quote(do: Bitwise.band(unquote(f), 0x80) == 0)
   defp condition_expr(:z, f), do: quote(do: Bitwise.band(unquote(f), 0x80) != 0)
   defp condition_expr(:nc, f), do: quote(do: Bitwise.band(unquote(f), 0x10) == 0)
   defp condition_expr(:c, f), do: quote(do: Bitwise.band(unquote(f), 0x10) != 0)
 
-  # Enveloppe un corps dans le test de condition de l'instruction — ou pas,
-  # pour les formes inconditionnelles. `untaken_fun` est paresseux : la branche
-  # non prise n'existe pas pour elles. `f_expr` vient du backend appelant :
-  # `field(:f)` côté struct, `var(:f)` côté boucle.
+  # Wraps a body in the instruction's condition test — or does not, for the
+  # unconditional forms. `untaken_fun` is lazy: the untaken branch does not exist
+  # for those. `f_expr` comes from the calling backend: `field(:f)` on the struct
+  # side, `var(:f)` on the loop side.
   defp conditional(%Insn{condition: nil}, _f_expr, taken, _untaken_fun), do: taken
 
   defp conditional(%Insn{condition: condition}, f_expr, taken, untaken_fun) do
@@ -1484,9 +1481,9 @@ defmodule Atomboy.CPU.Gen do
     end
   end
 
-  # L'appel ALU d'un mnémonique. `adc` et `sbc` consomment F entrant, les
-  # autres non ; `and`/`or`/`xor` portent d'autres noms côté primitives parce
-  # que ce sont des opérateurs d'Elixir.
+  # A mnemonic's ALU call. `adc` and `sbc` consume the incoming F, the others do
+  # not; `and`/`or`/`xor` go by other names on the primitive side because they are
+  # Elixir operators.
   defp alu_call(mnemonic, a_expr, f_expr, value_expr) do
     {name, args} =
       case mnemonic do

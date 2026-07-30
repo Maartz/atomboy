@@ -23,7 +23,7 @@ defmodule Atomboy.CGBTest do
     CartLoop.run(%State{pc: 0x100}, rom, Screen.boot_ram(rom), budget)
   end
 
-  test "l'en-tête choisit le mode couleur et le MBC5" do
+  test "the header picks colour mode and MBC5" do
     rom = :binary.copy(<<0>>, 0x8000) |> header(0x143, 0x80) |> header(0x147, 0x19)
     assert Screen.boot_ram(rom).mbc == :mbc5
     assert Screen.boot_ram(rom)[:cgb] == true
@@ -34,22 +34,22 @@ defmodule Atomboy.CGBTest do
     assert Screen.boot_state(dmg).a == 0x01
   end
 
-  test "MBC5 : huit bits de banque, et la banque zéro est permise" do
-    # LD A,66 ; LD (0x2000),A ; LD A,(0x4000) — la banque 66 se lit.
+  test "MBC5: eight bits of bank, and bank zero is allowed" do
+    # LD A,66 ; LD (0x2000),A ; LD A,(0x4000) — bank 66 reads back.
     code = <<0x3E, 66, 0xEA, 0x00, 0x20, 0xFA, 0x00, 0x40>>
     {state, _ram, _} = run(code, 36)
     assert state.a == 66
 
-    # LD A,0 ; LD (0x2000),A ; LD A,(0x4100) — banque 0 dans la fenêtre
-    # haute : relit le premier octet du code (0x3E).
+    # LD A,0 ; LD (0x2000),A ; LD A,(0x4100) — bank 0 in the high window:
+    # reads back the code's first byte (0x3E).
     code = <<0x3E, 0x00, 0xEA, 0x00, 0x20, 0xFA, 0x00, 0x41>>
     {state, ram, _} = run(code, 36)
     assert ram[:rom_bank_base] == 0
     assert state.a == 0x3E
   end
 
-  test "MBC5 : les banques de RAM cartouche vont jusqu'à quinze" do
-    # Déverrouille ; banque 5 ; écrit 0x42 ; relit.
+  test "MBC5: the cartridge RAM banks go up to fifteen" do
+    # Unlock; bank 5; write 0x42; read back.
     code =
       <<0x3E, 0x0A, 0xEA, 0x00, 0x00, 0x3E, 0x05, 0xEA, 0x00, 0x40>> <>
         <<0x3E, 0x42, 0xEA, 0x00, 0xA0, 0xFA, 0x00, 0xA0>>
@@ -59,9 +59,9 @@ defmodule Atomboy.CGBTest do
     assert ram[0xA000 + 5 * 0x10000] == 0x42
   end
 
-  test "SVBK : la WRAM haute se banque, l'écho la traverse" do
-    # Banque 2 ; écrit 0x11 à 0xD000 ; banque 1 ; écrit 0x22 ;
-    # banque 2 ; relit par l'écho 0xF000.
+  test "SVBK: the high WRAM is banked, and the echo goes through it" do
+    # Bank 2; write 0x11 at 0xD000; bank 1; write 0x22; bank 2; read back
+    # through the echo at 0xF000.
     code =
       <<0x3E, 0x02, 0xE0, 0x70, 0x3E, 0x11, 0xEA, 0x00, 0xD0>> <>
         <<0x3E, 0x01, 0xE0, 0x70, 0x3E, 0x22, 0xEA, 0x00, 0xD0>> <>
@@ -73,8 +73,8 @@ defmodule Atomboy.CGBTest do
     assert ram[0xD000] == 0x22
   end
 
-  test "VBK : la VRAM se banque" do
-    # Banque 1 ; écrit 0x33 à 0x8800 ; banque 0 ; écrit 0x44 ; banque 1 ; relit.
+  test "VBK: the VRAM is banked" do
+    # Bank 1; write 0x33 at 0x8800; bank 0; write 0x44; bank 1; read back.
     code =
       <<0x3E, 0x01, 0xE0, 0x4F, 0x3E, 0x33, 0xEA, 0x00, 0x88>> <>
         <<0x3E, 0x00, 0xE0, 0x4F, 0x3E, 0x44, 0xEA, 0x00, 0x88>> <>
@@ -86,22 +86,22 @@ defmodule Atomboy.CGBTest do
     assert ram[0x8800] == 0x44
   end
 
-  test "KEY1 + STOP : la double vitesse bascule, et le budget suit" do
-    # LD A,1 ; LDH (4D),A ; STOP ; puis des NOP à l'infini.
+  test "KEY1 + STOP: double speed kicks in, and the budget follows" do
+    # LD A,1 ; LDH (4D),A ; STOP ; then NOPs for ever.
     code = <<0x3E, 0x01, 0xE0, 0x4D, 0x10>> <> :binary.copy(<<0x00>>, 0x1000)
     {_state, ram, _} = run(code, 40)
 
     assert ram[:speed] == 2
     assert ram[0xFF4D] == 0x80
 
-    # Une scanline entière : en double vitesse, ~912 cycles consommés.
+    # A whole scanline: at double speed, ~912 cycles consumed.
     rom = :binary.copy(<<0>>, 0x100) <> code
     rom = rom <> :binary.copy(<<0>>, 0x8000 - byte_size(rom))
     {_state, _ram, cycles} = CartLoop.run(%State{pc: 0x105}, rom, ram, 912)
     assert cycles >= 912
   end
 
-  test "hors CGB, KEY1 reste inerte" do
+  test "outside CGB, KEY1 stays inert" do
     code = <<0x3E, 0x01, 0xE0, 0x4D, 0x10, 0x00>>
     rom = :binary.copy(<<0>>, 0x100) <> code
     rom = rom <> :binary.copy(<<0>>, 0x8000 - byte_size(rom))
@@ -110,8 +110,8 @@ defmodule Atomboy.CGBTest do
     refute Map.has_key?(ram, :speed)
   end
 
-  test "GDMA : seize octets copiés de la WRAM vers la VRAM" do
-    # Source 0xC100 remplie ; src/dst posés ; HDMA5 = 0 (un bloc).
+  test "GDMA: sixteen bytes copied from the WRAM to the VRAM" do
+    # Source 0xC100 filled; src/dst laid down; HDMA5 = 0 (one block).
     data = for i <- 0..15, into: %{}, do: {0xC100 + i, i + 0x30}
 
     code =
@@ -131,8 +131,8 @@ defmodule Atomboy.CGBTest do
     assert ram[0xFF55] == 0xFF
   end
 
-  test "GDMA : la source peut être une banque ROM" do
-    # Banque 66 (MBC5) ; source 0x4000 ; destination 0x8000 ; un bloc.
+  test "GDMA: the source may be a ROM bank" do
+    # Bank 66 (MBC5); source 0x4000; destination 0x8000; one block.
     code =
       <<0x3E, 66, 0xEA, 0x00, 0x20>> <>
         <<0x3E, 0x40, 0xE0, 0x51, 0x3E, 0x00, 0xE0, 0x52>> <>
@@ -146,14 +146,14 @@ defmodule Atomboy.CGBTest do
 
     {_state, ram} = Screen.step_line(%State{pc: 0x100}, rom, Screen.boot_ram(rom), 0)
 
-    # Le premier octet de la banque 66 est son numéro.
+    # The first byte of bank 66 is its number.
     assert ram[0x8000] == 66
   end
 
-  test "HDMA : un bloc par scanline visible, VBK respecté" do
+  test "HDMA: one block per visible scanline, VBK honoured" do
     data = for i <- 0..31, into: %{}, do: {0xC000 + i, i + 1}
 
-    # VBK = 1 ; src 0xC000 ; dst 0x8000 ; HDMA5 = 0x81 (deux blocs, HBlank).
+    # VBK = 1; src 0xC000; dst 0x8000; HDMA5 = 0x81 (two blocks, HBlank).
     code =
       <<0x3E, 0x01, 0xE0, 0x4F>> <>
         <<0x3E, 0xC0, 0xE0, 0x51, 0x3E, 0x00, 0xE0, 0x52>> <>
@@ -175,9 +175,9 @@ defmodule Atomboy.CGBTest do
     assert ram[0xFF55] == 0xFF
   end
 
-  test "les palettes couleur s'écrivent en auto-incrément et se relisent" do
-    # BCPS = 0x80 (index 0, auto-inc) ; trois octets par BCPD ;
-    # BCPS = 0x01 ; relit BCPD.
+  test "the colour palettes are written with auto-increment and read back" do
+    # BCPS = 0x80 (index 0, auto-inc); three bytes through BCPD;
+    # BCPS = 0x01; read BCPD back.
     code =
       <<0x3E, 0x80, 0xE0, 0x68, 0x3E, 0xAA, 0xE0, 0x69, 0x3E, 0xBB, 0xE0, 0x69>> <>
         <<0x3E, 0xCC, 0xE0, 0x69, 0x3E, 0x01, 0xE0, 0x68, 0xF0, 0x69>>

@@ -1,16 +1,15 @@
-defmodule Atomboy.Menu.Police do
+defmodule Atomboy.Menu.Font do
   @moduledoc """
-  La police du menu : 5×7 pixels par glyphe, dessinée à la main.
+  The menu font: 5×7 pixels per glyph, drawn by hand.
 
-  Majuscules, chiffres et la ponctuation dont les écrans du menu ont
-  besoin — le texte français du menu s'écrit en capitales sans accents,
-  comme les jeux de l'époque. Chaque glyphe est sept rangées de cinq
-  bits, bit 4 à gauche.
+  Capitals, digits and the punctuation the menu screens need — the menu
+  text is written in unaccented capitals, like the games of the era. Each
+  glyph is seven rows of five bits, bit 4 on the left.
   """
 
   import Bitwise
 
-  @glyphes %{
+  @glyphs %{
     "A" => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
     "B" => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
     "C" => [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
@@ -60,34 +59,35 @@ defmodule Atomboy.Menu.Police do
     "▶" => [0x10, 0x18, 0x1C, 0x1E, 0x1C, 0x18, 0x10]
   }
 
-  @doc "Le glyphe d'un graphème — sept rangées de cinq bits. Inconnu : plein."
-  @spec glyphe(String.t()) :: [0..31]
-  def glyphe(graphème), do: Map.get(@glyphes, graphème, [0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F])
+  @doc "The glyph of a grapheme — seven rows of five bits. Unknown: solid."
+  @spec glyph(String.t()) :: [0..31]
+  def glyph(grapheme),
+    do: Map.get(@glyphs, grapheme, [0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F])
 
-  @doc "Largeur d'avance d'un caractère, en pixels."
-  @spec avance() :: pos_integer()
-  def avance, do: 6
+  @doc "Advance width of one character, in pixels."
+  @spec advance() :: pos_integer()
+  def advance, do: 6
 
-  @doc "Hauteur d'un glyphe, en pixels."
-  @spec hauteur() :: pos_integer()
-  def hauteur, do: 7
+  @doc "Height of a glyph, in pixels."
+  @spec height() :: pos_integer()
+  def height, do: 7
 
   @doc """
-  Les pixels allumés d'un texte posé en (x, y) — une map {x, y} => true.
+  The lit pixels of a text laid out at (x, y) — a map {x, y} => true.
   """
   @spec pixels(String.t(), integer(), integer()) :: %{{integer(), integer()} => true}
-  def pixels(texte, x, y) do
-    texte
+  def pixels(text, x, y) do
+    text
     |> String.graphemes()
     |> Enum.with_index()
     |> Enum.reduce(%{}, fn {g, i}, acc ->
-      base_x = x + i * avance()
+      base_x = x + i * advance()
 
-      glyphe(g)
+      glyph(g)
       |> Enum.with_index()
-      |> Enum.reduce(acc, fn {rangée, dy}, acc ->
+      |> Enum.reduce(acc, fn {row, dy}, acc ->
         Enum.reduce(0..4, acc, fn dx, acc ->
-          if (rangée >>> (4 - dx) &&& 1) == 1 do
+          if (row >>> (4 - dx) &&& 1) == 1 do
             Map.put(acc, {base_x + dx, y + dy}, true)
           else
             acc
