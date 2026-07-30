@@ -42,12 +42,18 @@ defmodule Atomboy.NativeMachineTest do
   alias Atomboy.CPU.CartLoop
   alias Atomboy.CPU.State
   alias Atomboy.Native.Machine
+  alias Atomboy.PPU
   alias Atomboy.Screen
   alias Potion.ROM
 
   @moduletag :qemu
   # One qemu launch, a 64 KB dump per run, and ten frames of a real game.
   @moduletag timeout: 600_000
+
+  # hero.gb's tenth frame: a white screen with the hero's 8x8 square on it. Pinned
+  # so that the pixel test cannot pass against a picture nobody recognises -- the
+  # same guard `native_ppu_test` puts on dmg-acid2.
+  @hero_crc 0x5AA2E5B7
 
   # The regions where the two models must agree byte for byte.
   @regions [
@@ -350,46 +356,186 @@ defmodule Atomboy.NativeMachineTest do
     end
   end
 
-  # ══ The number that decides the C6 ═══════════════════════════════════════════
+  # ══ The pixels ═══════════════════════════════════════════════════════════════
 
-  describe "cost" do
-    test "the generated code fits in the C6's instruction cache" do
-      image = Machine.image(:binary.copy(<<0x00>>, 0x10000), %State{}, 1)
+  describe "pixels" do
+    @tag timeout: 900_000
+    test "hero.gb draws the same frame on both cores, pixel for pixel" do
+      # The one that matters. Everything the memory comparison proved is a
+      # precondition; this is the output a player would see, 23040 bytes of it,
+      # produced by generated RISC-V calling a generated renderer inside a
+      # generated machine loop.
+      rom = hero()
+      state = Screen.boot_state(rom, true)
+      ram = Map.merge(Screen.boot_ram(rom, true), seed())
 
-      # `table_base` opens the data section: everything before it is code.
-      assert image.labels[:table_base] < 32 * 1024,
-             "the code is #{image.labels[:table_base]} bytes -- the C6 cache is 32768"
+      # The oracle renders only its last frame, as `Screen.run/3` does; the guest
+      # renders all ten, as a console would. They agree because the renderer's
+      # state is per-frame -- the window counter resets, the destination rewinds --
+      # and because it writes nothing the CPU can reach. The next test is the one
+      # that holds that second claim down.
+      expected = oracle_pixels(state, rom, ram, 10)
+      result = Machine.run!(memory(rom, ram), state, 10, render: true)
+
+      assert result.status == :ok
+      assert byte_size(result.pixels) == Machine.frame_bytes()
+      assert divergent_pixels(expected, result.pixels) == []
+      assert result.pixels == expected
+
+      # A frame nobody recognises is not a passing test. The CRC pins the image
+      # itself, the way `native_ppu_test` pins dmg-acid2's.
+      assert :erlang.crc32(result.pixels) == @hero_crc,
+             "the frame changed: crc #{inspect(:erlang.crc32(result.pixels), base: :hex)}"
+
+      # And the image, described rather than hashed: hero draws one solid 8x16
+      # tile-half at the position the actor holds, on an empty background. Sprite 0
+      # sits at OAM (88, 88), which is screen (80, 72) once the hardware's offsets
+      # of 8 and 16 come off.
+      dark =
+        for {shade, i} <- Enum.with_index(:binary.bin_to_list(result.pixels)),
+            shade == 3,
+            do: {rem(i, 160), div(i, 160)}
+
+      assert length(dark) == 64, "the hero is 8 by 8"
+      assert Enum.min_max(Enum.map(dark, &elem(&1, 0))) == {80, 87}, "the hero's columns"
+      assert Enum.min_max(Enum.map(dark, &elem(&1, 1))) == {72, 79}, "the hero's rows"
+
+      assert result.pixels |> :binary.bin_to_list() |> Enum.uniq() |> Enum.sort() == [0, 3],
+             "hero's palette only ever produces the lightest and the darkest shade"
+    end
+
+    test "a raster effect and a window pin when the registers are read" do
+      # hero.gb cannot carry this test, and it took a mutation to notice: its
+      # picture is static -- SCX and SCY never move, there is no window -- so
+      # rendering a line before its CPU slice instead of after, or restarting the
+      # window's counter every line, produces exactly the same ten frames. Both
+      # mutations pass every other assertion in this file.
+      #
+      # So: a program that writes SCX = LY on a loop, which makes the scroll a
+      # function of the scanline and nothing else, and a window switched on from
+      # line 60 with its left edge at x 80. The background occupies the left half,
+      # the window the right, and the tile is a diagonal -- a pattern with no
+      # symmetry in either axis, so a shift of one line or one pixel shows.
+      #
+      # What each half proves: the left, that the renderer reads SCX as the CPU left
+      # it at the *end* of the line it is drawing, which is where
+      # `Atomboy.Screen.frame/4` renders; the right, that the window's internal
+      # counter is carried from line to line and reset per frame. WY is 60 rather
+      # than 64 on purpose -- 64 is a multiple of the tile height, which would make
+      # the window's rows coincide with the background's and hide a frozen counter.
+      rom =
+        ROM.build(
+          [
+            {:label, :main},
+            {:label, :loop},
+            {:ldh, :a, {:high, 0x44}},
+            {:ldh, {:high, 0x43}, :a},
+            {:jr, {:label, :loop}}
+          ],
+          title: "RASTER"
+        )
+
+      extra = Map.merge(diagonal_tile(), %{0xFF40 => 0xB1, 0xFF4A => 60, 0xFF4B => 87})
+      state = Screen.boot_state(rom, true)
+      ram = Screen.boot_ram(rom, true) |> Map.merge(seed()) |> Map.merge(extra)
+
+      result = pixel_equivalence!(rom, 2, extra)
+
+      # Agreement only means something if the two plausible bugs would have
+      # produced a *different* picture on this program. Both are rendered here on
+      # the Elixir side, from the same ROM and the same VRAM, and the frame the
+      # guest sent back has to differ from each of them. Without these two
+      # assertions the test could not tell a correct integration from either
+      # mutation -- checked by making both mutations and watching this fail.
+      assert result.pixels != pixels_rendered_early(state, rom, ram, 2),
+             "drawing a line before its CPU slice would give this same frame"
+
+      assert result.pixels != pixels_window_frozen(state, rom, ram, 2),
+             "restarting the window's counter every line would give this same frame"
+
+      # And the picture is not a flat field, which would make any comparison
+      # vacuous: both shades appear, and consecutive rows differ.
+      assert result.pixels |> :binary.bin_to_list() |> Enum.uniq() |> Enum.sort() == [0, 3]
+      assert frame_row(result.pixels, 100) != frame_row(result.pixels, 101)
     end
 
     @tag timeout: 900_000
-    test "instructions retired per frame, running a real game" do
+    test "rendering leaves the CPU and its memory untouched" do
+      # The renderer reads the 64 KB and never writes it, and it saves every
+      # register the interpreter carries. Both claims are what let the call sit
+      # between two scanlines; this is the test that would notice if either stopped
+      # being true -- a clobbered HL or a stray byte in VRAM would show up as a
+      # difference between the two regimes, on a real game, ten frames deep.
+      rom = hero()
+      state = Screen.boot_state(rom, true)
+      memory = memory(rom, seed())
+
+      without = Machine.run!(memory, state, 10)
+      with_pixels = Machine.run!(memory, state, 10, render: true)
+
+      assert with_pixels.state == without.state
+      assert with_pixels.memory == without.memory
+      assert with_pixels.cycles == without.cycles
+      assert without.pixels == nil, "a run with no renderer must send no pixels"
+    end
+
+    test "a rendered frame with the screen off is uniformly shade zero" do
+      # `Atomboy.PPU` returns shade 0 across the line when LCDC bit 7 is down --
+      # not BGP's colour 0, shade 0. Reached here through the integration rather
+      # than by calling the renderer directly, so the LY the machine loop passes and
+      # the buffer it points at are part of what is checked.
+      result =
+        Machine.run!(sleeper(%{0xFF40 => 0x00}), %State{pc: 0x100}, 1, render: true)
+
+      assert result.status == :ok
+      assert result.pixels == :binary.copy(<<0>>, Machine.frame_bytes())
+    end
+  end
+
+  # ══ The numbers that decide the C6 ═══════════════════════════════════════════
+
+  describe "cost" do
+    test "the generated code fits in the C6's instruction cache, renderer included" do
+      memory = :binary.copy(<<0x00>>, 0x10000)
+      without = Machine.image(memory, %State{}, 1)
+      with_ppu = Machine.image(memory, %State{}, 1, render: true)
+
+      # `table_base` opens the data section: everything before it is code.
+      cpu = without.labels[:table_base]
+      whole = with_ppu.labels[:table_base]
+
+      assert whole < 32 * 1024,
+             "CPU, machine loop and PPU come to #{whole} bytes -- the C6 cache is 32768"
+
+      assert whole > cpu, "the renderer must actually be in the image"
+    end
+
+    @tag timeout: 1_800_000
+    test "instructions retired per frame, with and without the renderer" do
       # `-icount shift=0` is what makes the `instret` CSR exact. The average over
       # ten frames is dominated by hero's init -- clearing 8 KB of VRAM costs more
       # than any frame of play -- so the steady-state cost is read as a marginal
       # one: the difference between twenty frames and ten, over ten.
-      rom = Screen.load(Path.join([__DIR__, "..", "games", "hero.gb"]))
+      rom = hero()
       state = Screen.boot_state(rom, true)
       memory = memory(rom, seed())
 
-      ten = Machine.run!(memory, state, 10, icount: true)
-      twenty = Machine.run!(memory, state, 20, icount: true)
+      %{steady: bare} = marginal(memory, state, render: false)
+      %{steady: drawn, ten: ten} = marginal(memory, state, render: true)
 
-      steady = div(twenty.instret - ten.instret, 10)
-
-      per_second = Float.round(steady * 60 / 1_000_000, 1)
+      code = Machine.image(memory, state, 1, render: true).labels[:table_base]
 
       IO.puts("""
 
-      hero.gb, native machine loop:
-        ten frames      #{ten.instret} RV32 instructions, #{ten.cycles} T-cycles
-        twenty frames   #{twenty.instret} RV32 instructions
-        steady state    #{steady} RV32 instructions per frame
-        that is         #{per_second} M instructions per second at 60 fps
+      hero.gb, native machine loop, steady state per frame:
+        CPU only        #{bare} RV32 instructions  (#{rate(bare)} M/s at 60 fps)
+        with the PPU    #{drawn} RV32 instructions  (#{rate(drawn)} M/s at 60 fps)
+        the renderer    #{drawn - bare} of those
+        ten frames      #{ten.instret} instructions, #{ten.cycles} T-cycles
+        code            #{code} bytes of the C6's 32768 byte cache
       """)
 
-      assert ten.status == :ok
-      assert twenty.status == :ok
-      assert steady > 0
+      assert bare > 0 and drawn > bare
     end
   end
 
@@ -449,6 +595,141 @@ defmodule Atomboy.NativeMachineTest do
     oracle(state, rom, ram, frames - 1)
   end
 
+  # `Screen.run/3`'s composition: N frames, rendered on the last one only.
+  defp oracle_pixels(state, rom, ram, frames) do
+    {pixels, _state, _ram} =
+      Enum.reduce(1..frames, {<<>>, state, ram}, fn index, {_pixels, state, ram} ->
+        Screen.frame(state, rom, ram, index == frames)
+      end)
+
+    pixels
+  end
+
+  # The same equivalence as `equivalence!/3`, plus the pixels. `extra` seeds I/O
+  # registers and VRAM on both sides at once, which is how a test gets a picture
+  # without writing an init routine in SM83.
+  defp pixel_equivalence!(rom, frames, extra) do
+    state = Screen.boot_state(rom, true)
+    ram = Screen.boot_ram(rom, true) |> Map.merge(seed()) |> Map.merge(extra)
+
+    {expected_state, oracle_ram} = oracle(state, rom, ram, frames)
+    expected = oracle_pixels(state, rom, ram, frames)
+    result = Machine.run!(memory(rom, ram), state, frames, render: true)
+
+    assert result.status == :ok
+    assert result.state == expected_state
+
+    divergences = divergent_pixels(expected, result.pixels)
+
+    assert divergences == [], """
+    #{length(divergences)} pixels disagree, the first ten:
+    #{divergences |> Enum.take(10) |> Enum.map_join("\n", fn {x, y, want, got} -> "  (#{x}, #{y}): oracle shade #{want}, native #{got}" end)}
+    """
+
+    # The memory has to agree too, or a pixel agreement could be two renderers
+    # drawing the same wrong VRAM.
+    memory_divergences =
+      for {from, to} <- @regions,
+          address <- from..to,
+          oracle_byte = CartLoop.peek(rom, oracle_ram, address),
+          native_byte = :binary.at(result.memory, address),
+          oracle_byte != native_byte,
+          do: {address, oracle_byte, native_byte}
+
+    assert memory_divergences == []
+
+    result
+  end
+
+  # One scanline out of a frame, as a list of shades.
+  defp frame_row(pixels, y) do
+    pixels |> binary_part(y * 160, 160) |> :binary.bin_to_list()
+  end
+
+  # The two frames the two plausible integration bugs would produce. Both are built
+  # out of the same pieces `Screen.frame/4` composes -- `step_line/4` is public --
+  # so neither reimplements anything that could drift from the oracle.
+  #
+  # Each line drawn *before* its CPU slice: the renderer then sees the scroll
+  # registers the previous line left behind, which is the whole question of where
+  # the call belongs in the cadence.
+  defp pixels_rendered_early(state, rom, ram, frames) do
+    last_frame(state, rom, ram, frames, fn state, ram, ly, window ->
+      {line, window} = PPU.render_line(ram, ly, window)
+      {state, ram} = Screen.step_line(state, rom, ram, ly)
+      {line, state, ram, window}
+    end)
+  end
+
+  # The window's counter handed over as zero on every line instead of carried: the
+  # window would redraw its first row all the way down.
+  defp pixels_window_frozen(state, rom, ram, frames) do
+    last_frame(state, rom, ram, frames, fn state, ram, ly, window ->
+      {state, ram} = Screen.step_line(state, rom, ram, ly)
+      {line, _} = PPU.render_line(ram, ly, 0)
+      {line, state, ram, window}
+    end)
+  end
+
+  # `Screen.frame/4`'s loop with the visible line's step handed to `draw`, which
+  # decides the order and what the renderer is told. Only the last frame is drawn,
+  # as in `Screen.run/3`.
+  defp last_frame(state, rom, ram, frames, draw) do
+    {pixels, _state, _ram} =
+      Enum.reduce(1..frames, {<<>>, state, ram}, fn index, {_pixels, state, ram} ->
+        {pixels, state, ram, _window} =
+          Enum.reduce(0..(Machine.lines() - 1), {<<>>, state, ram, 0}, fn ly, acc ->
+            {pixels, state, ram, window} = acc
+
+            if index == frames and ly < Machine.visible() do
+              {line, state, ram, window} = draw.(state, ram, ly, window)
+              {pixels <> line, state, ram, window}
+            else
+              {state, ram} = Screen.step_line(state, rom, ram, ly)
+              {pixels, state, ram, window}
+            end
+          end)
+
+        {pixels, state, ram}
+      end)
+
+    pixels
+  end
+
+  # Tile 0 as a diagonal, and a tilemap that uses it everywhere. A diagonal has no
+  # symmetry in either axis, so a picture shifted by one line or one column cannot
+  # look like the right one. Seeded straight into VRAM on both sides.
+  defp diagonal_tile do
+    tile = for row <- 0..7, into: %{}, do: {0x8000 + row * 2, 0x80 >>> row}
+    high = for row <- 0..7, into: %{}, do: {0x8001 + row * 2, 0x80 >>> row}
+    map = for cell <- 0..0x3FF, into: %{}, do: {0x9800 + cell, 0x00}
+
+    tile |> Map.merge(high) |> Map.merge(map)
+  end
+
+  # Where two frames disagree, as {x, y, expected, actual} -- a pixel's coordinates
+  # say far more than its offset when the picture is wrong.
+  defp divergent_pixels(expected, actual) do
+    for i <- 0..(byte_size(expected) - 1),
+        want = :binary.at(expected, i),
+        got = :binary.at(actual, i),
+        want != got,
+        do: {rem(i, 160), div(i, 160), want, got}
+  end
+
+  # The marginal cost of one frame: twenty frames minus ten, over ten. The
+  # difference sheds hero's init, which no steady-state number should carry.
+  defp marginal(memory, state, opts) do
+    ten = Machine.run!(memory, state, 10, Keyword.put(opts, :icount, true))
+    twenty = Machine.run!(memory, state, 20, Keyword.put(opts, :icount, true))
+
+    %{ten: ten, twenty: twenty, steady: div(twenty.instret - ten.instret, 10)}
+  end
+
+  defp rate(per_frame), do: Float.round(per_frame * 60 / 1_000_000, 1)
+
+  defp hero, do: Screen.load(Path.join([__DIR__, "..", "games", "hero.gb"]))
+
   # ══ The shared boot state ════════════════════════════════════════════════════
 
   # The I/O registers the machine loop and the timer read, written out explicitly.
@@ -459,6 +740,11 @@ defmodule Atomboy.NativeMachineTest do
   # at the slowest rate. One of the two is wrong about a register nobody wrote;
   # writing it removes the question. `Screen` has the same habit with LCDC, whose
   # default it spells 0x91 in `step_line/4`.
+  # The eight the renderer reads are here for the same reason, and it is worth
+  # naming because their defaults are not zero: `Atomboy.PPU` spells BGP, OBP0 and
+  # OBP1 as 0xE4 when absent -- the identity palette -- where the open bus would
+  # give 0xFF, the palette that maps every colour to the darkest shade. A frame
+  # compared without seeding them differs in every pixel.
   defp seed do
     %{
       0xFF00 => 0xFF,
@@ -469,8 +755,15 @@ defmodule Atomboy.NativeMachineTest do
       0xFF0F => 0x00,
       0xFF40 => 0x91,
       0xFF41 => 0x00,
+      0xFF42 => 0x00,
+      0xFF43 => 0x00,
       0xFF44 => 0x00,
       0xFF45 => 0x00,
+      0xFF47 => 0xE4,
+      0xFF48 => 0xE4,
+      0xFF49 => 0xE4,
+      0xFF4A => 0x00,
+      0xFF4B => 0x00,
       0xFFFF => 0x00
     }
   end

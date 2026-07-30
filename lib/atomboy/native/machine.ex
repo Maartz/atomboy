@@ -35,12 +35,13 @@ defmodule Atomboy.Native.Machine do
     * DIV, TIMA, TMA and TAC exactly as `Atomboy.Timer.advance/2` applies them,
       including the overflow that reloads from TMA and requests IF bit 2.
 
+  Pixels are modelled too, on request -- see "The pixels" below.
+
   Not modelled, and each absence is a choice `Screen` already made or a
   deliberate limit of this stage: the STAT mode bits (0-1), because no game the
-  project runs reads them and `Screen` does not maintain them either; pixel
-  rendering, which is `Atomboy.PPU`'s business and one day the native PPU's;
-  double speed, since `KEY1` is a Game Boy Color register and this loop is DMG;
-  the GBC video DMAs (GDMA/HDMA) and the link cable, for the same reason.
+  project runs reads them and `Screen` does not maintain them either; double
+  speed, since `KEY1` is a Game Boy Color register and this loop is DMG; the GBC
+  video DMAs (GDMA/HDMA) and the link cable, for the same reason.
 
   ## Composing with the interpreter rather than copying it
 
@@ -89,10 +90,46 @@ defmodule Atomboy.Native.Machine do
   giving `Bus.write/2` a hook, which is a change to a file this stage does not
   own.
 
+  ## The pixels
+
+  With `render: true` the loop calls `Atomboy.Native.PPU` once per visible
+  scanline and a frame comes back with the memory. The call sits where
+  `Atomboy.Screen.frame/4` puts it -- after the line's CPU slice and after the
+  timer -- and that position is not free to choose: the scroll registers a game
+  writes during a line have to show in the pixels of the line it wrote them on,
+  which is how a raster effect is built. The renderer costs nothing to arrange,
+  which is its own doing: it saves every `s` register and `a1`-`a4`, so the whole
+  SM83 state survives a call made between two scanlines with nothing spilled here.
+
+  Two counters live across the lines of a frame and reset at the frame: the
+  window's internal line counter, which counts the lines the window actually
+  showed on rather than the scanlines, and the destination, which walks the
+  framebuffer from the top. Every frame overwrites the last, so what comes back is
+  the frame a panel would be showing.
+
+  The framebuffer -- 160 × 144 bytes, one shade per pixel -- sits in the image's
+  data, **outside** the 64 KB. Outside is the point rather than a convenience: a
+  DMG has no framebuffer anywhere in its address space, the panel is fed a line at
+  a time as the PPU produces it, and a buffer the game could address would be an
+  invention this emulator would then have to keep. It exists here only because the
+  pixels must survive until the run ends and cross a serial port; on the C6 it is
+  what the DMA to the real panel will read from.
+
+  Rendering is off by default, and the default earns its keep twice: a run that
+  only has to agree on memory does not pay 144 scanlines per frame, and the two
+  regimes measured apart are what turn one number into two. Measured on hero.gb
+  under `qemu -icount shift=0`, marginal cost per frame in steady state:
+
+      CPU and cadence      339,517 RV32 instructions
+      with the renderer    976,255       -- the PPU is 636,738 of them
+      code                 16,040 bytes, against the C6's 32 KB of icache
+
   ## The protocol
 
-  `Interp`'s, unchanged: state, frame count and 64 KB baked into the image; a
-  24-byte record followed by the final 64 KB coming back over the serial port.
+  `Interp`'s, extended by appending rather than by changing: state, frame count and
+  64 KB baked into the image; a 24-byte record followed by the final 64 KB coming
+  back over the serial port, and then the frame if one was drawn. A reader that
+  knows only the record and the memory finds both exactly where they were.
   The `cycles` field carries the total across every line of every frame, not the
   last line's, which is the only number a caller could want. The timer's
   sub-counters start at zero and are not returned, so an image runs whole frames
@@ -111,6 +148,7 @@ defmodule Atomboy.Native.Machine do
   alias Atomboy.Native.Emit
   alias Atomboy.Native.Image
   alias Atomboy.Native.Interp
+  alias Atomboy.Native.PPU
   alias Atomboy.Native.Qemu
   alias Atomboy.Native.Regs
   alias Atomboy.Native.RV32
@@ -149,15 +187,22 @@ defmodule Atomboy.Native.Machine do
   @routed [0xE0, 0xE2, 0xEA]
 
   # The machine's own state, in a word block the CPU slice cannot reach: the
-  # scanline, the frames left to run, the timer's two sub-counters and the cycle
-  # total. It lives in memory rather than in registers because the interpreter
-  # owns almost all of them, and the one that is left points here.
+  # scanline, the frames left to run, the timer's two sub-counters, the cycle
+  # total, and the two the renderer needs. It lives in memory rather than in
+  # registers because the interpreter owns almost all of them, and the one that is
+  # left points here.
   @ms_ly 0
   @ms_frames 4
   @ms_div 8
   @ms_tima 12
   @ms_total 16
-  @ms_size 20
+  @ms_window 20
+  @ms_pixels 24
+  @ms_size 28
+
+  # The framebuffer: one byte per pixel, one shade 0..3, as `Atomboy.PPU` returns
+  # them.
+  @frame_bytes PPU.width() * @visible
 
   @state_pointer :s11
 
@@ -173,35 +218,57 @@ defmodule Atomboy.Native.Machine do
   @spec visible() :: 144
   def visible, do: @visible
 
+  @doc "The bytes of one rendered frame -- 160 × 144, one shade per pixel."
+  @spec frame_bytes() :: 23040
+  def frame_bytes, do: @frame_bytes
+
   @doc """
   Assembles an image running `frames` complete frames from `state` over `memory`.
 
   `memory` is the flat 64 KB address space: ROM in the low half, the rest as the
   caller wants it read. The image runs `frames` × 154 scanlines and then reports.
+
+  Options:
+
+    * `:render` -- call `Atomboy.Native.PPU` on every visible scanline and send
+      the last frame's pixels back after the memory. Off by default, and the
+      default is not laziness: a run that only has to agree on memory should not
+      pay for 144 scanlines of rendering per frame, and keeping the two regimes
+      apart is what makes the two cost measurements mean anything. With rendering
+      off the PPU's routines are not even assembled into the image.
   """
-  @spec image(binary(), State.t(), pos_integer()) :: Asm.assembled()
-  def image(memory, %State{} = state, frames)
+  @spec image(binary(), State.t(), pos_integer(), keyword()) :: Asm.assembled()
+  def image(memory, %State{} = state, frames, opts \\ [])
       when byte_size(memory) == @memory and is_integer(frames) and frames > 0 do
+    render? = Keyword.get(opts, :render, false)
+
     Image.build(
       [
-        driver(),
+        driver(render?),
         scanline(),
-        line_done(),
+        line_done(render?),
         fetch(),
         slow_fetch(),
-        exits(),
+        exits(render?),
         mmio(),
         handlers(),
-        ALU.routines()
+        ALU.routines(),
+        if(render?, do: PPU.routines(), else: [])
       ],
-      data(memory, state, frames)
+      data(memory, state, frames, render?)
     )
   end
 
-  @typedoc "What the guest reports at the end of the last frame."
+  @typedoc """
+  What the guest reports at the end of the last frame.
+
+  `pixels` is the last frame rendered, or `nil` when the image ran without a
+  renderer.
+  """
   @type result :: %{
           state: State.t(),
           memory: binary(),
+          pixels: binary() | nil,
           cycles: non_neg_integer(),
           status: :ok | :unknown_opcode,
           opcode: 0..0xFF,
@@ -214,18 +281,20 @@ defmodule Atomboy.Native.Machine do
   Runs `frames` frames under qemu and decodes what came back.
 
   Same shape as `Atomboy.Native.Run.run/4`, one level up: the budget is a number
-  of frames, not of cycles, and the hardware advances in between.
+  of frames, not of cycles, and the hardware advances in between. `:render` goes
+  to `image/4`; everything else goes to `Atomboy.Native.Qemu.run/2`.
   """
   @spec run(binary(), State.t(), pos_integer(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(memory, %State{} = state, frames, opts \\ []) do
-    image = image(memory, state, frames)
+    render? = Keyword.get(opts, :render, false)
+    image = image(memory, state, frames, render: render?)
 
     case Qemu.run(image.code, opts) do
       %{status: :timeout, duration_us: us} ->
         {:error, {:timeout, us}}
 
       %{status: :ok, serial: serial, duration_us: us} ->
-        decode(serial, us, image.size)
+        decode(serial, us, image.size, render?)
     end
   end
 
@@ -243,7 +312,7 @@ defmodule Atomboy.Native.Machine do
   # `Interp`'s driver, plus the machine's own state: the pointer to the word
   # block, the frame count out of the header, and the sub-counters at zero.
 
-  defp driver do
+  defp driver(render?) do
     [
       Asm.label(:driver),
       Asm.la(Regs.dispatch(), :table_base),
@@ -275,7 +344,24 @@ defmodule Atomboy.Native.Machine do
       # which is why the measurement asks for it.
       RV32.csrrs(:s9, @instret, :zero),
       Asm.label(:frame_loop),
-      RV32.sw(:zero, @state_pointer, @ms_ly)
+      RV32.sw(:zero, @state_pointer, @ms_ly),
+
+      # Both renderer counters are per-frame, and both for the same reason: the
+      # frame is the unit `Atomboy.Screen.frame/4` resets them at. The window's
+      # internal line counter starts each frame at zero -- it counts the lines the
+      # window actually showed on, not the scanlines -- and the destination walks
+      # the framebuffer from the top. Every frame overwrites the previous one, so
+      # what comes back is the last frame drawn, which is what a panel would be
+      # showing.
+      if render? do
+        [
+          RV32.sw(:zero, @state_pointer, @ms_window),
+          Asm.la(:t0, :framebuffer),
+          RV32.sw(:t0, @state_pointer, @ms_pixels)
+        ]
+      else
+        []
+      end
     ]
   end
 
@@ -352,7 +438,7 @@ defmodule Atomboy.Native.Machine do
   # here is `Atomboy.Timer.advance/2` with the cycles the slice actually
   # consumed, overshoot included.
 
-  defp line_done do
+  defp line_done(render?) do
     [
       Asm.label(:line_done),
       RV32.lw(:t0, @state_pointer, @ms_total),
@@ -360,6 +446,7 @@ defmodule Atomboy.Native.Machine do
       RV32.sw(:t0, @state_pointer, @ms_total),
       divider(),
       counter(),
+      render(render?),
       Asm.label(:line_next),
       RV32.lw(:t0, @state_pointer, @ms_ly),
       RV32.addi(:t0, :t0, 1),
@@ -404,6 +491,12 @@ defmodule Atomboy.Native.Machine do
   #
   # `t2` points at TAC for the whole block: TIMA is two bytes below, TMA one, and
   # IF eight above.
+  #
+  # A disabled timer leaves through `line_render`, not `line_next`. That is not
+  # cosmetic: while the renderer sat behind `line_next`, this one branch skipped it
+  # on every line of every game that does not arm its timer -- which is most of
+  # them, hero.gb included. The label exists so the early exit cannot silently
+  # bypass a later stage of the line again.
   defp counter do
     [
       Asm.label(:tima_start),
@@ -411,7 +504,7 @@ defmodule Atomboy.Native.Machine do
       RV32.add(:t2, Regs.mem(), :t2),
       RV32.lbu(:t3, :t2, 0),
       RV32.andi(:t4, :t3, 0x04),
-      Asm.beqz(:t4, :line_next),
+      Asm.beqz(:t4, :line_render),
       RV32.andi(:t3, :t3, 0x03),
       RV32.slli(:t3, :t3, 2),
       Asm.la(:t4, :tima_periods),
@@ -437,6 +530,46 @@ defmodule Atomboy.Native.Machine do
       Asm.j(:tima_loop),
       Asm.label(:tima_done),
       RV32.sw(:t5, @state_pointer, @ms_tima)
+    ]
+  end
+
+  # ══ The pixels ═══════════════════════════════════════════════════════════════
+  #
+  # One scanline of `Atomboy.Native.PPU`, at the point in the line where
+  # `Atomboy.Screen.frame/4` calls `Atomboy.PPU.render_line/3`: **after** the CPU
+  # has run its 456 cycles and after the timer has caught up.
+  #
+  # That position is the whole fidelity question, and it is observable. A game that
+  # rewrites SCX or SCY during a line -- which is how a raster effect is built --
+  # must have those writes visible in the pixels of the line it wrote them on.
+  # Rendering before the slice would show the previous line's registers; the oracle
+  # renders after, so this renders after.
+  #
+  # The call itself costs nothing to arrange, which is the PPU's doing rather than
+  # ours: it saves every `s` register and `a1`-`a4`, so the whole SM83 state --
+  # HL, PC, the opcode, and the pointer to this block -- survives a call made
+  # between two scanlines with no spill on our side.
+  defp render(false), do: [Asm.label(:line_render)]
+
+  defp render(true) do
+    [
+      Asm.label(:line_render),
+      RV32.lw(:a0, @state_pointer, @ms_ly),
+      RV32.li(:t2, @visible),
+
+      # The vblank lines have no pixels. `bgeu` rather than a subtraction: LY is
+      # 0..153 and the renderer's contract is 0..143.
+      Asm.bgeu(:a0, :t2, :line_next),
+      RV32.lw(:t0, @state_pointer, @ms_window),
+      RV32.lw(:t1, @state_pointer, @ms_pixels),
+      Asm.call(PPU.label()),
+
+      # `a0` comes back carrying the window's counter, and `t1` is gone -- the
+      # destination is re-read to be advanced.
+      RV32.sw(:a0, @state_pointer, @ms_window),
+      RV32.lw(:t0, @state_pointer, @ms_pixels),
+      RV32.addi(:t0, :t0, PPU.width()),
+      RV32.sw(:t0, @state_pointer, @ms_pixels)
     ]
   end
 
@@ -617,7 +750,7 @@ defmodule Atomboy.Native.Machine do
 
   # ══ The exits ════════════════════════════════════════════════════════════════
 
-  defp exits do
+  defp exits(render?) do
     [
       Asm.label(:materialise),
       RV32.li(:t2, Interp.statuses().ok),
@@ -625,7 +758,7 @@ defmodule Atomboy.Native.Machine do
       Asm.label(:unknown_opcode),
       RV32.li(:t2, Interp.statuses().unknown_opcode),
       report(),
-      dump()
+      dump(render?)
     ]
   end
 
@@ -665,20 +798,36 @@ defmodule Atomboy.Native.Machine do
 
   defp byte_out(load), do: [load, Asm.call(:putc)]
 
-  defp dump do
+  # The 64 KB, then the pixels if there are any. Appending rather than
+  # interleaving keeps the protocol backward compatible: a reader that knows only
+  # the record and the memory finds them exactly where they were, and stops.
+  defp dump(render?) do
     [
       Asm.label(:dump),
-      RV32.mv(:t3, Regs.mem()),
-      RV32.li(:t4, @memory),
-      Asm.label(:dump_loop),
-      Asm.beqz(:t4, :dump_done),
+      region(:memory, Asm.la(:t3, :memory_gb), @memory),
+      if render? do
+        region(:pixels, Asm.la(:t3, :framebuffer), @frame_bytes)
+      else
+        []
+      end,
+      Asm.j(:poweroff)
+    ]
+  end
+
+  # One region out over the serial port. `putc` clobbers t0 and t1 only, so the
+  # cursor and the count live in t3 and t4.
+  defp region(name, load, length) do
+    [
+      load,
+      RV32.li(:t4, length),
+      Asm.label(:"dump_#{name}"),
+      Asm.beqz(:t4, :"dump_#{name}_done"),
       RV32.lbu(:a0, :t3, 0),
       Asm.call(:putc),
       RV32.addi(:t3, :t3, 1),
       RV32.addi(:t4, :t4, -1),
-      Asm.j(:dump_loop),
-      Asm.label(:dump_done),
-      Asm.j(:poweroff)
+      Asm.j(:"dump_#{name}"),
+      Asm.label(:"dump_#{name}_done")
     ]
   end
 
@@ -751,7 +900,7 @@ defmodule Atomboy.Native.Machine do
 
   # ══ The data ═════════════════════════════════════════════════════════════════
 
-  defp data(memory, state, frames) do
+  defp data(memory, state, frames, render?) do
     [
       {:align, 4},
       Asm.label(:table_base),
@@ -769,7 +918,25 @@ defmodule Atomboy.Native.Machine do
       for(period <- @periods, do: <<period::32-little>>),
       {:align, 4},
       Asm.label(:memory_gb),
-      memory
+      memory,
+
+      # The framebuffer sits after the emulated memory, in the image's own data --
+      # 23040 bytes of plain RAM outside the 64 KB the guest can address. Outside is
+      # the point: a DMG has no framebuffer anywhere in its address space, the panel
+      # is fed a line at a time as the PPU produces it, and a buffer the game could
+      # reach would be an invention. Here it exists only because the pixels have to
+      # survive until the run ends and cross a serial port; on the C6 this is where
+      # the DMA to the real panel will read from instead.
+      if render? do
+        [
+          PPU.data(),
+          {:align, 4},
+          Asm.label(:framebuffer),
+          {:space, @frame_bytes}
+        ]
+      else
+        []
+      end
     ]
   end
 
@@ -815,12 +982,14 @@ defmodule Atomboy.Native.Machine do
 
   # ══ The record, read back ════════════════════════════════════════════════════
 
-  defp decode(serial, duration_us, size) do
+  defp decode(serial, duration_us, size, render?) do
     magic = Interp.magic()
+    pixels = if render?, do: @frame_bytes, else: 0
 
     case serial do
       <<^magic, a, f, b, c, d, e, h, l, sp::16-little, pc::16-little, control, cycles::32-little,
-        status, opcode, instret::32-little, memory::binary-size(@memory)>> ->
+        status, opcode, instret::32-little, memory::binary-size(@memory),
+        frame::binary-size(pixels)>> ->
         {:ok,
          %{
            state: %State{
@@ -839,6 +1008,7 @@ defmodule Atomboy.Native.Machine do
              ime_pending: control >>> 2 &&& 1
            },
            memory: memory,
+           pixels: if(render?, do: frame, else: nil),
            cycles: cycles,
            status: status_name(status),
            opcode: opcode,
