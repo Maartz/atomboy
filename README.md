@@ -39,6 +39,48 @@ MBCs, link cable) is plain immutable Elixir on top of it.
 - **Single-file binaries** — Burrito wraps the app and the BEAM into one
   executable per platform. No Erlang required to play.
 
+## Potion — writing Game Boy games in Elixir
+
+<p align="center"><img src="docs/potion.gif" width="320" alt="A Potion-compiled square walking around under d-pad control"></p>
+
+Atomboy now runs in both directions. **Potion** is a language in the
+lineage of Andy Gavin's GOOL (the Lisp that Crash Bandicoot was written
+in): the surface is Elixir, the semantics are the console's, and the
+output is a real 32 KB cartridge — header, Nintendo logo, checksums —
+that runs in atomboy or on hardware via flashcart:
+
+```elixir
+defmodule Heros do
+  use Potion
+
+  defacteur :heros do
+    variables x: 80, y: 72
+
+    chaque_frame do
+      si appuye?(:droite), do: x = x + 1
+      si appuye?(:gauche), do: x = x - 1
+      si appuye?(:haut), do: y = y - 1
+      si appuye?(:bas), do: y = y + 1
+      sprite(0, x: x, y: y, tuile: 0)
+    end
+  end
+end
+```
+
+`mix run jeux/heros.exs` compiles that into `jeux/heros.gb` — the GIF
+above is that ROM, running in atomboy. Variables are WRAM cells,
+`x = x + 1` is three SM83 instructions that wrap at 255, and anything
+the console cannot do is refused at `mix compile` time with a message
+that explains what Potion knows. The assembler is derived from the same
+instruction table as the emulator's decoder, so the two can never
+disagree; the emulator is the compiler's test harness, down to
+pixel-exact assertions on the rendered frame.
+
+The machinery lives under `lib/potion/` — the reversed instruction
+table (`Potion.Assembleur`), the cartridge builder (`Potion.ROM`), a
+GOOL-style kernel with a vblank heartbeat, OAM DMA from HRAM and one
+actor slot (`Potion.Noyau`), and the macro compiler (`Potion.Compilo`).
+
 ## Installing
 
 On macOS, Homebrew has both the app and the CLI binary:

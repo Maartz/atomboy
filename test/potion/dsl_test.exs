@@ -210,6 +210,29 @@ defmodule Potion.DSLTest do
     end
   end
 
+  describe "le compilateur, sans macro" do
+    test "un `quote` et une allocation suffisent à obtenir un fragment" do
+      allocation = Potion.Compilo.alloue(x: 80)
+
+      fragment =
+        Potion.Compilo.compile(
+          quote do
+            si appuye?(:droite), do: x = x + 1
+          end,
+          allocation
+        )
+
+      # L'installation, la condition, l'incrément, le RET — sans `defmodule`,
+      # sans `use`, sans hôte. Le compilateur est une fonction sur des arbres,
+      # et c'est ce qui le rend débogable à la main.
+      assert {:ld, :a, {:mem, allocation.installe}} == hd(fragment)
+      assert {:etiquette, :potion_installe} in fragment
+      assert {:bit, 0, :a} in fragment
+      assert {:add, :a, 1} in fragment
+      assert List.last(fragment) == {:ret}
+    end
+  end
+
   describe "un littéral et une variable dans le même sprite" do
     test "les deux entrées d'OAM portent ce que le jeu a écrit" do
       {_pixels, state, ram} = deroule(Melange, 5)
