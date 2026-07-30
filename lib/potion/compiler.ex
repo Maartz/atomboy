@@ -47,6 +47,31 @@ defmodule Potion.Compiler do
   no register policy. The second will come back; the first will become a loop of
   additions the day the language knows how to write one.
 
+  ## The conditions
+
+  An `if` asks one of two things: a pad key, or a variable weighed against a
+  literal.
+
+      if pressed?(:right), do: x = x + 1
+      if y > 140, do: y = 0
+      if going_down == 1, do: y = y + 2, else: y = y - 2
+
+  The six comparisons are `==`, `!=`, `<`, `>`, `<=` and `>=`, with the variable
+  on the left and a byte on the right. Two variables cannot be compared for the
+  same reason `x = x + y` does not compile: `CP` reads memory only through HL,
+  and there is still no register policy.
+
+  All of them come down to `CP n`, a subtraction whose result is thrown away and
+  whose flags say everything: `Z` that the two were equal, `C` that the variable
+  was the smaller. Four comparisons are one jump over the body; `>` needs two,
+  since it rules out equality as well as the borrow; and `<=` is the only one
+  that jumps *into* the body, because "C or Z" cannot be spelled by jumping away
+  from it.
+
+  `else` is a second block and a jump over it. It is what makes a direction out
+  of a comparison -- a ball that falls and climbs back needs to choose between
+  two sentences, not merely to skip one.
+
   ## The generated labels
 
   All prefixed `potion_` and numbered. The kernel places `:actor` right before
@@ -252,22 +277,19 @@ defmodule Potion.Compiler do
     {load(expression, allocation, statement) ++ [{:ld, {:mem, address}, :a}], counter}
   end
 
-  # ── A condition on the pad ──────────────────────────────────────────────────
+  # ── A condition ─────────────────────────────────────────────────────────────
 
   defp statement({:if, _, [condition, blocks]} = statement, allocation, counter) do
-    bit = key!(condition, statement)
-    body = if_body!(blocks, statement)
+    {then_body, else_body} = if_bodies!(blocks, statement)
+
     done = :"potion_end_#{counter}"
-    {inner, counter} = block(body, allocation, counter + 1)
+    otherwise = if else_body == :none, do: done, else: :"potion_else_#{counter}"
 
-    elements =
-      [
-        {:ld, :a, {:mem, Runtime.pad()}},
-        {:bit, bit, :a},
-        {:jr, :z, {:label, done}}
-      ] ++ inner ++ [{:label, done}]
+    {test, counter} = condition!(condition, otherwise, allocation, statement, counter + 1)
+    {taken, counter} = block(then_body, allocation, counter)
+    {tail, counter} = else_tail(else_body, otherwise, done, allocation, counter)
 
-    {elements, counter}
+    {test ++ taken ++ tail, counter}
   end
 
   # ── An OAM entry ────────────────────────────────────────────────────────────
@@ -286,6 +308,101 @@ defmodule Potion.Compiler do
   end
 
   defp statement(other, _allocation, _counter), do: reject!(other)
+
+  # Without an `else`, the false branch already lands on the end label and there
+  # is nothing to emit. With one, the taken branch has to jump over it.
+  defp else_tail(:none, _otherwise, done, _allocation, counter) do
+    {[{:label, done}], counter}
+  end
+
+  defp else_tail(body, otherwise, done, allocation, counter) do
+    {elements, counter} = block(body, allocation, counter)
+
+    {[{:jr, {:label, done}}, {:label, otherwise}] ++ elements ++ [{:label, done}], counter}
+  end
+
+  # ── The conditions ──────────────────────────────────────────────────────────
+  #
+  # A condition emits its test plus the jumps that reach `otherwise` when it is
+  # **false**. Saying it that way rather than "jump when true" is what lets an
+  # `if` with and without an `else` share one shape: `otherwise` is the end label
+  # in the first case and the else label in the second, and nothing else changes.
+
+  defp condition!({:pressed?, _, [_key]} = condition, otherwise, _allocation, statement, counter) do
+    bit = key!(condition, statement)
+
+    {[
+       {:ld, :a, {:mem, Runtime.pad()}},
+       {:bit, bit, :a},
+       {:jr, :z, {:label, otherwise}}
+     ], counter}
+  end
+
+  defp condition!({op, _, [left, right]} = condition, otherwise, allocation, statement, counter)
+       when op in [:==, :!=, :<, :>, :<=, :>=] do
+    address = cell!(left, allocation, statement)
+    value = comparand!(right, condition, statement)
+    {jumps, counter} = skip_unless(op, otherwise, counter)
+
+    {[{:ld, :a, {:mem, address}}, {:cp, :a, value}] ++ jumps, counter}
+  end
+
+  defp condition!(condition, _otherwise, _allocation, statement, _counter) do
+    reject_condition!(condition, statement)
+  end
+
+  # `CP n` is a subtraction whose result is thrown away: Z says the two were
+  # equal, C says A was the smaller. Four of the six comparisons are therefore
+  # one jump; `>` needs two, since it must rule out both equality and the
+  # borrow; and `<=` is the only one that jumps *into* the body, because "C or
+  # Z" cannot be spelled by jumping away from it.
+  defp skip_unless(:==, otherwise, counter), do: {[{:jr, :nz, {:label, otherwise}}], counter}
+  defp skip_unless(:!=, otherwise, counter), do: {[{:jr, :z, {:label, otherwise}}], counter}
+  defp skip_unless(:<, otherwise, counter), do: {[{:jr, :nc, {:label, otherwise}}], counter}
+  defp skip_unless(:>=, otherwise, counter), do: {[{:jr, :c, {:label, otherwise}}], counter}
+
+  defp skip_unless(:>, otherwise, counter) do
+    {[{:jr, :c, {:label, otherwise}}, {:jr, :z, {:label, otherwise}}], counter}
+  end
+
+  defp skip_unless(:<=, otherwise, counter) do
+    below = :"potion_below_#{counter}"
+
+    {[
+       {:jr, :c, {:label, below}},
+       {:jr, :nz, {:label, otherwise}},
+       {:label, below}
+     ], counter + 1}
+  end
+
+  defp comparand!(value, _condition, _statement) when is_integer(value) and value in 0..255,
+    do: value
+
+  defp comparand!(value, condition, statement) when is_integer(value) do
+    raise CompileError, """
+    value outside a byte: #{value}, in #{one_line(statement)}
+
+        #{Macro.to_string(condition)}
+
+    A comparison weighs one byte against another, and a byte is 0 to 255. \
+    A game variable never leaves that range either -- it wraps.
+    """
+  end
+
+  defp comparand!(other, condition, statement) do
+    raise CompileError, """
+    comparison against something other than a number:
+
+        #{Macro.to_string(condition)}
+
+    Rejected AST: #{inspect(other)}
+
+    In #{one_line(statement)}, the right-hand side of a comparison is a literal \
+    between 0 and 255. Comparing two variables needs `CP` to read memory, which \
+    on the SM83 means going through HL -- the same register policy that \
+    `x = x + y` is waiting for.
+    """
+  end
 
   # One byte of OAM: the value, shifted by the hardware offset. On a literal the
   # shift happens here — the processor need not add what the compiler already
@@ -424,35 +541,40 @@ defmodule Potion.Compiler do
     end
   end
 
-  defp key!(condition, statement) do
+  defp reject_condition!(condition, statement) do
     raise CompileError, """
-    condition outside the v0 subset:
+    condition outside the subset:
 
         #{Macro.to_string(condition)}
 
     Rejected AST: #{inspect(condition)}
 
-    In #{one_line(statement)}, `if` only tests a pad key, in the form \
-    `if pressed?(:right), do: ...`. The v0 has no comparison; the pad is the \
-    only outside world an actor can question.
+    In #{one_line(statement)}, a condition is either a pad key --
+    `if pressed?(:right), do: ...` -- or a variable weighed against a literal:
+
+        if y > 140, do: y = 0
+        if lives == 0, do: ..., else: ...
+
+    The comparisons are ==, !=, <, >, <= and >=, with the variable on the left.
     """
   end
 
-  defp if_body!(blocks, statement) do
+  defp if_bodies!(blocks, statement) do
     case blocks do
       [do: body] ->
-        body
+        {body, :none}
+
+      [do: body, else: otherwise] ->
+        {body, otherwise}
 
       others when is_list(others) ->
         raise CompileError, """
-        branch the v0 does not compile: \
-        #{Enum.map_join(Keyword.keys(others) -- [:do], ", ", &inspect/1)}
+        branch that does not compile: \
+        #{Enum.map_join(Keyword.keys(others) -- [:do, :else], ", ", &inspect/1)}
 
             #{one_line(statement)}
 
-        A v0 `if` has only a `do:` — no `else:`. The opposite case is written \
-        with a second `if` on another key, until the language knows how to jump \
-        over two blocks.
+        An `if` carries a `do:` and, at most, an `else:`.
         """
 
       other ->

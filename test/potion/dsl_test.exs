@@ -84,6 +84,30 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A ball that falls, hits a floor and climbs back: the smallest game that
+  # cannot be written without comparisons. `going_down` is the direction, and
+  # the `else` is what makes it a direction rather than a one-way trip.
+  defmodule Bouncer do
+    @moduledoc false
+    use Potion
+
+    defactor :ball do
+      variables y: 60, going_down: 1
+
+      every_frame do
+        if going_down == 1 do
+          y = y + 2
+          if y > 100, do: going_down = 0
+        else
+          y = y - 2
+          if y < 20, do: going_down = 1
+        end
+
+        sprite(0, x: 80, y: y, tile: 0)
+      end
+    end
+  end
+
   describe "the game of the fixed surface" do
     test "the ROM boots and the sprite is a square in the middle of the screen" do
       {pixels, _state, _ram} = run_frames(Hero, 6, render: true)
@@ -265,6 +289,109 @@ defmodule Potion.DSLTest do
 
   # ══ The refusals, at compile time ════════════════════════════════════════════
 
+  describe "the flags a comparison reads" do
+    # `CP n` is a subtraction thrown away: Z if equal, C if A was the smaller.
+    # Every comparison is a choice of jumps over those two bits, and the choice
+    # is the whole semantics -- a played game does not always notice a wrong
+    # one. A ball stepping by two crosses `> 100` at 102 whether or not the
+    # equality is ruled out, so the boundary is stated here instead.
+    test "each comparison spells its own flag test" do
+      allocation = Potion.Compiler.allocate(x: 0, hit: 0)
+
+      conditions = fn operator ->
+        condition = {operator, [], [{:x, [], nil}, 5]}
+        body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+        body
+        |> Potion.Compiler.compile(allocation)
+        |> Enum.filter(fn
+          {:jr, _, {:label, :potion_installed}} -> false
+          {:jr, _, _} -> true
+          _ -> false
+        end)
+        |> Enum.map(&elem(&1, 1))
+      end
+
+      assert conditions.(:==) == [:nz]
+      assert conditions.(:!=) == [:z]
+      assert conditions.(:<) == [:nc]
+      assert conditions.(:>=) == [:c]
+
+      # Greater-than has to rule out equality as well as the borrow.
+      assert conditions.(:>) == [:c, :z]
+
+      # Less-or-equal is the only one that jumps *into* the body: "C or Z"
+      # cannot be said by jumping away from it.
+      assert conditions.(:<=) == [:c, :nz]
+    end
+
+    test "the comparison loads the variable it names" do
+      allocation = Potion.Compiler.allocate(x: 0, y: 0, hit: 0)
+      condition = {:>, [], [{:y, [], nil}, 140]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, {:mem, allocation.cells.y}} in elements
+      assert {:cp, :a, 140} in elements
+    end
+  end
+
+  describe "a game that compares" do
+    test "the ball falls, then turns round on its own" do
+      addresses = Bouncer.addresses()
+
+      # The actor runs from the third frame; 30 frames is 28 turns, enough to
+      # cover the 20 steps down to the floor and start back up.
+      {_pixels, _state, ram} = run_frames(Bouncer, 30)
+
+      assert Map.get(ram, addresses.going_down) == 0, "it should have bounced"
+      assert Map.get(ram, addresses.y) < 102
+    end
+
+    test "it never escapes the two walls it was given" do
+      rom = Bouncer.rom()
+      addresses = Bouncer.addresses()
+
+      # The first turns are dropped: the init leaves the page at zero, and a
+      # `y` that has not been laid down yet is not a position the game chose.
+      {_final, seen} =
+        Enum.reduce(1..120, {{Screen.boot_state(rom), Screen.boot_ram(rom)}, []}, fn n,
+                                                                                     {{state,
+                                                                                       ram},
+                                                                                      seen} ->
+          {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+          {{state, ram}, if(n > 4, do: [Map.get(ram, addresses.y) | seen], else: seen)}
+        end)
+
+      travelled = seen |> Enum.reject(&is_nil/1) |> Enum.uniq()
+
+      assert Enum.min(travelled) >= 18, "it went through the ceiling: #{Enum.min(travelled)}"
+      assert Enum.max(travelled) <= 102, "it went through the floor: #{Enum.max(travelled)}"
+
+      # A ball that never moved would also satisfy the two walls.
+      assert length(travelled) > 20, "it barely moved: #{inspect(travelled)}"
+    end
+
+    test "the sprite follows the variable, one turn behind" do
+      addresses = Bouncer.addresses()
+
+      # The DMA publishes the mirror at the vblank *after* the actor filled it,
+      # so the OAM always shows the previous turn's position. On a hero that
+      # only moves under your thumb the lag is invisible; on a ball that moves
+      # every frame it is the whole difference between right and nearly right.
+      {_pixels, state, ram} = run_frames(Bouncer, 29)
+      written = Map.get(ram, addresses.y)
+
+      {_state, ram} = frames(Bouncer, state, ram, 1)
+      [oam_y, oam_x, tile, flags] = oam(ram, 0)
+
+      assert oam_y == written + 16
+      assert oam_x == 80 + 8
+      assert {tile, flags} == {0, 0}
+    end
+  end
+
   describe "what the v0 refuses to compile" do
     test "an expression outside the subset" do
       message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
@@ -344,16 +471,30 @@ defmodule Potion.DSLTest do
       assert message =~ "is not a literal"
     end
 
-    test "an `if` with a branch the v0 does not compile" do
+    test "a comparison against something that is not a byte" do
       message =
         reject!(
-          "Rejected.Else",
-          "variables x: 1",
-          "if pressed?(:a), do: x = x + 1, else: x = x - 1"
+          "Rejected.Comparand",
+          "variables x: 1, y: 2",
+          "if x > y, do: x = x + 1"
         )
 
-      assert message =~ "branch the v0 does not compile"
-      assert message =~ "else"
+      assert message =~ "comparison against something other than a number"
+      assert message =~ "HL"
+    end
+
+    test "a comparison against a value outside a byte" do
+      message =
+        reject!("Rejected.TooBig", "variables x: 1", "if x > 300, do: x = x + 1")
+
+      assert message =~ "outside a byte"
+    end
+
+    test "a condition that is neither a key nor a comparison" do
+      message =
+        reject!("Rejected.Condition", "variables x: 1", "if x, do: x = x + 1")
+
+      assert message =~ "condition outside the subset"
     end
 
     test "an actor without every_frame" do
