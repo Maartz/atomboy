@@ -24,8 +24,9 @@ defmodule Atomboy.Native.Run do
           state: State.t(),
           memoire: binary(),
           cycles: non_neg_integer(),
-          statut: :ok | :opcode_inconnu | :etat_non_supporte,
+          statut: :ok | :opcode_inconnu,
           opcode: 0..0xFF,
+          instret: non_neg_integer(),
           duration_us: non_neg_integer(),
           taille: non_neg_integer()
         }
@@ -69,7 +70,7 @@ defmodule Atomboy.Native.Run do
 
     case serial do
       <<^magic, a, f, b, c, d, e, h, l, sp::16-little, pc::16-little, control, cycles::32-little,
-        statut, opcode, memoire::binary-size(@memoire)>> ->
+        statut, opcode, instret::32-little, memoire::binary-size(@memoire)>> ->
         {:ok,
          %{
            state: %State{
@@ -91,6 +92,7 @@ defmodule Atomboy.Native.Run do
            cycles: cycles,
            statut: statut(statut),
            opcode: opcode,
+           instret: instret,
            duration_us: duration_us,
            taille: taille
          }}

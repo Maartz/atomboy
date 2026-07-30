@@ -54,7 +54,8 @@ defmodule Atomboy.Native.Interp do
   @pending Regs.controle().pending
 
   @magic 0xA5
-  @taille_enregistrement 20
+  @taille_enregistrement 24
+  @instret 0xC02
   @memoire 0x10000
 
   # `etat_non_supporte` a disparu avec l'étape 8 : il n'existe plus d'état que
@@ -114,6 +115,10 @@ defmodule Atomboy.Native.Interp do
       RV32.lhu(Regs.pc(), :t2, 10),
       RV32.lbu(Regs.control(), :t2, 12),
       RV32.lw(Regs.budget(), :t2, 16),
+      # La ligne de base du compteur d'instructions retirées. Sous
+      # `qemu -icount shift=0` il est exact ; sans, il rend une valeur factice,
+      # et c'est pourquoi le banc impose l'option.
+      RV32.csrrs(:s9, @instret, :zero),
       Asm.j(:fetch)
     ]
   end
@@ -267,6 +272,9 @@ defmodule Atomboy.Native.Interp do
   defp rapport do
     [
       Asm.label(:rapport),
+      # Lu avant tout le reste : le rapport lui-même ne doit pas compter.
+      RV32.csrrs(:s10, @instret, :zero),
+      RV32.sub(:s10, :s10, :s9),
       octet(RV32.li(:a0, @magic)),
       octet(RV32.mv(:a0, Regs.a())),
       octet(RV32.mv(:a0, Regs.f())),
@@ -286,7 +294,11 @@ defmodule Atomboy.Native.Interp do
       octet(RV32.srli(:a0, Regs.cycles(), 16)),
       octet(RV32.srli(:a0, Regs.cycles(), 24)),
       octet(RV32.mv(:a0, :t2)),
-      octet(RV32.mv(:a0, Regs.opcode()))
+      octet(RV32.mv(:a0, Regs.opcode())),
+      octet(RV32.mv(:a0, :s10)),
+      octet(RV32.srli(:a0, :s10, 8)),
+      octet(RV32.srli(:a0, :s10, 16)),
+      octet(RV32.srli(:a0, :s10, 24))
     ]
   end
 
