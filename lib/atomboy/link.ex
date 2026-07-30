@@ -10,7 +10,7 @@ defmodule Atomboy.Link do
       <<0, octet>>   l'horloge du maître, son octet au bout
       <<1, octet>>   la réponse de l'esclave, son octet en retour
 
-  Un côté écoute (`--ecoute [port]`), l'autre appelle (`--lien hôte:port`).
+  Un côté écoute (`--listen [port]`), l'autre appelle (`--link hôte:port`).
   La résolution vit à la frontière de frame des deux boucles de jeu :
   latence d'un aller-retour ≈ une frame de chaque côté — le rythme d'un
   échange Pokémon, pas celui d'une course.
@@ -112,7 +112,7 @@ defmodule Atomboy.Link do
   def line(ram) do
     case Map.get(ram, :link) do
       %__MODULE__{} = link ->
-        ram = Map.update(ram, :link_ligne, 1, &(&1 + 1))
+        ram = Map.update(ram, :link_line, 1, &(&1 + 1))
 
         {ram, link} =
           case Map.get(ram, :link_op) do
@@ -328,9 +328,9 @@ defmodule Atomboy.Link do
   end
 
   defp serve(link, ram, byte) do
-    ligne = Map.get(ram, :link_ligne, 0)
+    ligne = Map.get(ram, :link_line, 0)
 
-    if ligne - Map.get(ram, :link_servi, -@cadence_lignes) < @cadence_lignes do
+    if ligne - Map.get(ram, :link_served, -@cadence_lignes) < @cadence_lignes do
       # Trop tôt après le service précédent : l'horloge patiente en
       # retenue, comme sur le fil réel où le transfert est encore en
       # train de cadencer ses bits.
@@ -341,7 +341,7 @@ defmodule Atomboy.Link do
       case :gen_tcp.send(link.socket, <<1, réponse>>) do
         :ok ->
           trace(link, "E ← #{hex(byte)} → #{hex(réponse)}")
-          {complete(ram, byte) |> Map.put(:link_servi, ligne), link}
+          {complete(ram, byte) |> Map.put(:link_served, ligne), link}
 
         {:error, _} ->
           unplugged(ram)

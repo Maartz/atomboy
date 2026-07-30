@@ -244,7 +244,7 @@ defmodule Atomboy.CPU.Unimplemented do
   defp hex4(v), do: v |> Integer.to_string(16) |> String.pad_leading(4, "0")
 end
 
-defmodule Atomboy.CPU.Deraille do
+defmodule Atomboy.CPU.Derailed do
   @moduledoc """
   Le PC est entré en VRAM — aucun jeu ne fait ça volontairement.
 

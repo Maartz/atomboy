@@ -7,83 +7,83 @@ defmodule Atomboy.MenuTest do
     menu = Menu.open(1, :dmg)
     assert menu.curseur == 0
 
-    {menu, []} = Menu.touche(menu, :down)
+    {menu, []} = Menu.press(menu, :down)
     assert menu.curseur == 1
 
-    {menu, []} = Menu.touche(menu, :up)
-    {menu, []} = Menu.touche(menu, :up)
+    {menu, []} = Menu.press(menu, :up)
+    {menu, []} = Menu.press(menu, :up)
     assert menu.curseur == 6
 
-    {menu, []} = Menu.touche(menu, :down)
+    {menu, []} = Menu.press(menu, :down)
     assert menu.curseur == 0
   end
 
   test "REPRENDRE ferme sans action ; B et Échap aussi" do
-    assert {nil, []} = Menu.touche(Menu.open(1, :dmg), :a)
-    assert {nil, []} = Menu.touche(Menu.open(1, :dmg), :b)
-    assert {nil, []} = Menu.touche(Menu.open(1, :dmg), :menu)
+    assert {nil, []} = Menu.press(Menu.open(1, :dmg), :a)
+    assert {nil, []} = Menu.press(Menu.open(1, :dmg), :b)
+    assert {nil, []} = Menu.press(Menu.open(1, :dmg), :menu)
   end
 
   test "SAUVER et CHARGER ferment avec leur action" do
     menu = Menu.open(1, :dmg)
-    {menu, []} = Menu.touche(menu, :down)
-    assert {nil, [:save_state]} = Menu.touche(menu, :a)
+    {menu, []} = Menu.press(menu, :down)
+    assert {nil, [:save_state]} = Menu.press(menu, :a)
 
     menu = Menu.open(1, :dmg)
-    {menu, []} = Menu.touche(menu, :down)
-    {menu, []} = Menu.touche(menu, :down)
-    assert {nil, [:load_state]} = Menu.touche(menu, :a)
+    {menu, []} = Menu.press(menu, :down)
+    {menu, []} = Menu.press(menu, :down)
+    assert {nil, [:load_state]} = Menu.press(menu, :a)
   end
 
   test "la case d'état se règle aux flèches et boucle 9 → 1" do
     menu = %{Menu.open(9, :dmg) | curseur: 3}
 
-    {menu, [{:slot, 1}]} = Menu.touche(menu, :right)
+    {menu, [{:slot, 1}]} = Menu.press(menu, :right)
     assert menu.slot == 1
 
-    {menu, [{:slot, 9}]} = Menu.touche(menu, :left)
+    {menu, [{:slot, 9}]} = Menu.press(menu, :left)
     assert menu.slot == 9
   end
 
   test "la palette bascule verte/grise" do
     menu = %{Menu.open(1, :dmg) | curseur: 4}
 
-    {menu, [{:palette, :gris}]} = Menu.touche(menu, :right)
-    {_menu, [{:palette, :dmg}]} = Menu.touche(menu, :right)
+    {menu, [{:palette, :gray}]} = Menu.press(menu, :right)
+    {_menu, [{:palette, :dmg}]} = Menu.press(menu, :right)
   end
 
   test "QUITTER rend l'action quit" do
     menu = %{Menu.open(1, :dmg) | curseur: 6}
-    assert {nil, [:quit]} = Menu.touche(menu, :a)
+    assert {nil, [:quit]} = Menu.press(menu, :a)
   end
 
   test "en couleur, pas de ligne PALETTE — QUITTER remonte d'un cran" do
     menu = Menu.open(1, :dmg, true)
 
-    {menu, []} = Menu.touche(menu, :up)
+    {menu, []} = Menu.press(menu, :up)
     assert menu.curseur == 5
 
-    assert {nil, [:quit]} = Menu.touche(menu, :a)
+    assert {nil, [:quit]} = Menu.press(menu, :a)
   end
 
   test "la page MIXER : volume par pas de dix, borné, voix commutables" do
     menu = %{Menu.open(1, :dmg) | curseur: 5}
-    {menu, []} = Menu.touche(menu, :a)
+    {menu, []} = Menu.press(menu, :a)
     assert menu.page == :mixer
 
     # VOLUME : gauche baisse, borné à zéro.
-    {menu, [{:mixer, %{volume: 90}}]} = Menu.touche(menu, :left)
-    menu = Enum.reduce(1..12, menu, fn _, m -> elem(Menu.touche(m, :left), 0) end)
+    {menu, [{:mixer, %{volume: 90}}]} = Menu.press(menu, :left)
+    menu = Enum.reduce(1..12, menu, fn _, m -> elem(Menu.press(m, :left), 0) end)
     assert menu.mixer.volume == 0
-    {menu, [{:mixer, %{volume: 10}}]} = Menu.touche(menu, :right)
+    {menu, [{:mixer, %{volume: 10}}]} = Menu.press(menu, :right)
 
     # PULSE 1 se coupe et se rouvre.
-    {menu, []} = Menu.touche(menu, :down)
-    {menu, [{:mixer, %{voix: {false, true, true, true}}}]} = Menu.touche(menu, :a)
-    {menu, [{:mixer, %{voix: {true, true, true, true}}}]} = Menu.touche(menu, :a)
+    {menu, []} = Menu.press(menu, :down)
+    {menu, [{:mixer, %{voices: {false, true, true, true}}}]} = Menu.press(menu, :a)
+    {menu, [{:mixer, %{voices: {true, true, true, true}}}]} = Menu.press(menu, :a)
 
     # B remonte à la racine ; RETOUR aussi.
-    {menu, []} = Menu.touche(menu, :b)
+    {menu, []} = Menu.press(menu, :b)
     assert menu.page == :principal
   end
 

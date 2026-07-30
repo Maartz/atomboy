@@ -2,7 +2,7 @@
 # Le build des exécutables atomboy, en une commande.
 #
 #     bin/build              tests puis binaires dans burrito_out/
-#     bin/build --vite       sans les tests
+#     bin/build --fast       skip the tests
 #     bin/build --install    + copie vers ~/.local/bin/atomboy
 #     bin/build --app        + Atomboy.app (coquille SwiftUI native)
 #     bin/build --menage     purge les caches d'extraction (jeu fermé !)
@@ -22,7 +22,7 @@ menage=false
 app=false
 for arg in "$@"; do
   case "$arg" in
-    --vite) vite=true ;;
+    --vite|--fast) vite=true ;;
     --install) install=true ;;
     --menage) menage=true ;;
     --app) app=true ;;

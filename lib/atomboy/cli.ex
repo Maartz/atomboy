@@ -9,7 +9,7 @@ defmodule Atomboy.CLI do
   sans lanceur ni variable d'environnement.
 
       atomboy zelda.gb
-      atomboy pokemon.gbc --palette gris --no-son
+      atomboy pokemon.gbc --palette gris --no-sound
 
   Les arguments arrivent par `:init.get_plain_arguments/0` — la voie qui ne
   dépend pas du module Burrito à l'exécution. Ne démarre qu'en prod : `mix
@@ -40,12 +40,12 @@ defmodule Atomboy.CLI do
   def main(args) do
     case parse(args) do
       {:ok, rom, opts} ->
-        {fenetre, opts} = Keyword.pop(opts, :fenetre, false)
-        {serveur, opts} = Keyword.pop(opts, :serveur, false)
+        {fenetre, opts} = Keyword.pop(opts, :window, false)
+        {serveur, opts} = Keyword.pop(opts, :server, false)
 
         runner =
           cond do
-            serveur -> Atomboy.Serveur
+            serveur -> Atomboy.Server
             fenetre -> Atomboy.Window
             true -> Atomboy.Play
           end
@@ -80,23 +80,39 @@ defmodule Atomboy.CLI do
   La ligne de commande commune à l'exécutable et à `mix atomboy.play` :
   une ROM, et les options de jeu.
   """
+  # Legacy aliases: the flags shipped in v0.3.0 were French. They stay
+  # accepted, silently mapped, so published docs and muscle memory keep
+  # working — but they are aliases, not the vocabulary.
+  @alias_legacy %{
+    "--fenetre" => "--window",
+    "--serveur" => "--server",
+    "--ecoute" => "--listen",
+    "--lien" => "--link",
+    "--sauvegarde" => "--save",
+    "--son" => "--sound",
+    "--no-son" => "--no-sound",
+    "--dump-toutes" => "--dump-every"
+  }
+
   @spec parse([String.t()]) :: {:ok, Path.t(), keyword()} | {:error, String.t()}
   def parse(args) do
+    args = Enum.map(args, &Map.get(@alias_legacy, &1, &1))
+
     {opts, argv} =
       OptionParser.parse!(port_par_defaut(args),
         strict: [
           hold: :integer,
           frames: :integer,
           dump: :string,
-          dump_toutes: :integer,
-          son: :boolean,
+          dump_every: :integer,
+          sound: :boolean,
           palette: :string,
-          fenetre: :boolean,
-          serveur: :boolean,
+          window: :boolean,
+          server: :boolean,
           dmg: :boolean,
-          ecoute: :integer,
-          lien: :string,
-          sauvegarde: :string,
+          listen: :integer,
+          link: :string,
+          save: :string,
           codes: :string
         ]
       )
@@ -109,17 +125,17 @@ defmodule Atomboy.CLI do
     e in OptionParser.ParseError -> {:error, Exception.message(e)}
   end
 
-  # « --ecoute » nu : le port par défaut s'intercale — la doc le promet.
-  defp port_par_defaut(["--ecoute" | rest]) do
+  # « --listen » nu : le port par défaut s'intercale — la doc le promet.
+  defp port_par_defaut(["--listen" | rest]) do
     case rest do
       [next | _] ->
         case Integer.parse(next) do
-          {_, ""} -> ["--ecoute" | port_par_defaut(rest)]
-          _ -> ["--ecoute", "#{Atomboy.Link.default_port()}" | port_par_defaut(rest)]
+          {_, ""} -> ["--listen" | port_par_defaut(rest)]
+          _ -> ["--listen", "#{Atomboy.Link.default_port()}" | port_par_defaut(rest)]
         end
 
       [] ->
-        ["--ecoute", "#{Atomboy.Link.default_port()}"]
+        ["--listen", "#{Atomboy.Link.default_port()}"]
     end
   end
 
@@ -130,8 +146,9 @@ defmodule Atomboy.CLI do
     case Keyword.get(opts, :palette) do
       nil -> {:ok, opts}
       "dmg" -> {:ok, Keyword.put(opts, :palette, :dmg)}
-      "gris" -> {:ok, Keyword.put(opts, :palette, :gris)}
-      autre -> {:error, "palette inconnue : #{autre} (dmg ou gris)"}
+      "gray" -> {:ok, Keyword.put(opts, :palette, :gray)}
+      "gris" -> {:ok, Keyword.put(opts, :palette, :gray)}
+      autre -> {:error, "palette inconnue : #{autre} (dmg or gray)"}
     end
   end
 
@@ -145,8 +162,8 @@ defmodule Atomboy.CLI do
 
   defp rom(_argv) do
     {:error,
-     "usage : atomboy <rom.gb> [--fenetre] [--dmg] [--ecoute [port]] " <>
-       "[--lien hôte:port] [--sauvegarde nom] [--hold N] [--frames N] " <>
-       "[--dump f.pgm] [--no-son] [--palette dmg|gris] [--codes 01VVLLHH,…]"}
+     "usage : atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
+       "[--link hôte:port] [--save nom] [--hold N] [--frames N] " <>
+       "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--codes 01VVLLHH,…]"}
   end
 end

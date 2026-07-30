@@ -1,9 +1,9 @@
-defmodule Atomboy.Serveur do
+defmodule Atomboy.Server do
   @moduledoc """
   Le mode serveur : atomboy comme moteur derrière une coquille native.
 
   La coquille (SwiftUI sur macOS, ou n'importe quoi qui sait lire un
-  tuyau) lance `atomboy rom.gb --serveur` et parle un protocole binaire
+  tuyau) lance `atomboy rom.gb --server` et parle un protocole binaire
   minimal :
 
   ## Sortie (stdout)
@@ -31,7 +31,7 @@ defmodule Atomboy.Serveur do
   écrite.
 
   Tout le reste est la machinerie habituelle : menu dans la frame, états,
-  mixer, câble link (`--ecoute`/`--lien` marchent aussi en serveur).
+  mixer, câble link (`--listen`/`--link` marchent aussi en serveur).
   """
 
   import Bitwise
@@ -74,7 +74,7 @@ defmodule Atomboy.Serveur do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
+    sav = Save.path(rom_path, Keyword.get(opts, :save))
 
     with {:ok, link} <- link_up(opts) do
       # stdout est un flux binaire : en Unicode (le défaut du BEAM), tout
@@ -120,8 +120,8 @@ defmodule Atomboy.Serveur do
 
   defp link_up(opts) do
     cond do
-      port = Keyword.get(opts, :ecoute) -> Link.listen(port)
-      lien = Keyword.get(opts, :lien) -> connect(lien)
+      port = Keyword.get(opts, :listen) -> Link.listen(port)
+      lien = Keyword.get(opts, :link) -> connect(lien)
       true -> {:ok, nil}
     end
   end
@@ -162,7 +162,7 @@ defmodule Atomboy.Serveur do
       try do
         Screen.frame(ctx.state, ctx.rom, ram, render?)
       rescue
-        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
+        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Derailed] ->
           Save.flush(ram, ctx.sav)
           reraise e, __STACKTRACE__
       end
@@ -267,7 +267,7 @@ defmodule Atomboy.Serveur do
         voix =
           {(masque &&& 1) != 0, (masque &&& 2) != 0, (masque &&& 4) != 0, (masque &&& 8) != 0}
 
-        drain(%{ctx | ram: mixer_maj(ctx.ram, :voix, voix)})
+        drain(%{ctx | ram: mixer_maj(ctx.ram, :voices, voix)})
 
       {:codes, chaîne} ->
         drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(chaîne))})
@@ -290,7 +290,7 @@ defmodule Atomboy.Serveur do
   defp appuie(ctx, _op, nil), do: ctx
 
   defp appuie(%{menu: menu} = ctx, ?+, key) when menu != nil do
-    {menu, actions} = Menu.touche(ctx.menu, key)
+    {menu, actions} = Menu.press(ctx.menu, key)
 
     case Enum.reduce(actions, %{ctx | menu: menu}, &menu_action/2) do
       :quit -> :quit
@@ -374,7 +374,7 @@ defmodule Atomboy.Serveur do
   end
 
   defp mixer_maj(ram, clé, valeur) do
-    mixer = Map.get(ram, :mixer, Menu.mixer_défaut())
+    mixer = Map.get(ram, :mixer, Menu.mixer_default())
     Map.put(ram, :mixer, Map.put(mixer, clé, valeur))
   end
 

@@ -78,7 +78,7 @@ defmodule Atomboy.Play do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
+    sav = Save.path(rom_path, Keyword.get(opts, :save))
     tty = pty_path()
 
     with :ok <- ensure_sole_reader(tty),
@@ -98,8 +98,8 @@ defmodule Atomboy.Play do
   # se voir. Sans option, pas de câble.
   defp link_up(opts) do
     cond do
-      port = Keyword.get(opts, :ecoute) -> Link.listen(port)
-      lien = Keyword.get(opts, :lien) -> connect(lien)
+      port = Keyword.get(opts, :listen) -> Link.listen(port)
+      lien = Keyword.get(opts, :link) -> connect(lien)
       true -> {:ok, nil}
     end
   end
@@ -135,7 +135,7 @@ defmodule Atomboy.Play do
 
       # Le son suit le clavier : présent en interactif, coupé dans les
       # essais redirigés — sauf demande explicite (son: true/false).
-      audio = if Keyword.get(opts, :son, tty != nil), do: Audio.open()
+      audio = if Keyword.get(opts, :sound, tty != nil), do: Audio.open()
 
       try do
         loop(%{
@@ -159,7 +159,7 @@ defmodule Atomboy.Play do
           max_frames: Keyword.get(opts, :frames, :infinity),
           hold_frames: Keyword.get(opts, :hold, @default_hold),
           dump: Keyword.get(opts, :dump),
-          dump_toutes: Keyword.get(opts, :dump_toutes),
+          dump_toutes: Keyword.get(opts, :dump_every),
           state_base: Path.rootname(sav),
           state_slot: 1,
           palette: Keyword.get(opts, :palette, :dmg),
@@ -326,7 +326,7 @@ defmodule Atomboy.Play do
       try do
         Screen.frame(ctx.state, ctx.rom, ram, render?)
       rescue
-        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
+        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Derailed] ->
           Save.flush(ram, ctx.sav)
           reraise e, __STACKTRACE__
       end
@@ -444,7 +444,7 @@ defmodule Atomboy.Play do
   defp apply_event({tag, key}, %{menu: menu} = ctx)
        when menu != nil and tag in [:key, :press, :repeat] and
               key in [:up, :down, :left, :right, :a, :b, :menu] do
-    {menu, actions} = Menu.touche(ctx.menu, key)
+    {menu, actions} = Menu.press(ctx.menu, key)
     Enum.reduce(actions, %{ctx | menu: menu}, &menu_action/2)
   end
 

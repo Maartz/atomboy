@@ -27,24 +27,24 @@ defmodule Mix.Tasks.Atomboy.Play do
 
   ## Options
 
-    * `--fenetre` — jouer dans une vraie fenêtre (wxWidgets) plutôt que dans
+    * `--window` — jouer dans une vraie fenêtre (wxWidgets) plutôt que dans
       le terminal : vrais événements clavier, pixels nets à l'échelle, aucun
       des prérequis du terminal (ni `bin/play`, ni taille minimale).
     * `--hold N` — frames de maintien par frappe (défaut 10), pour les
       terminaux sans protocole clavier kitty ; avec lui (Ghostty…), l'état
       des touches est réel et ce réglage ne sert plus.
     * `--frames N` — s'arrêter après N frames (essais sans clavier).
-    * `--son` / `--no-son` — forcer ou couper le son (défaut : actif en
+    * `--sound` / `--no-sound` — forcer ou couper le son (défaut : actif en
       interactif si ffplay est installé — `brew install ffmpeg`).
     * `--palette dmg|gris` — le vert de la dalle d'origine (défaut) ou les
       gris neutres.
     * `--dump f.pgm` — écrire la dernière frame en image à la sortie.
-    * `--sauvegarde nom` — un profil de sauvegarde : `.sav` et `.state`
+    * `--save nom` — un profil de sauvegarde : `.sav` et `.state`
       deviennent `rom.nom.sav`/`rom.nom.state`. Indispensable pour relier
       deux instances du même jeu sur la même machine — deux joueurs, deux
       parties. Et en jeu, les touches `1`-`9` choisissent la case d'état
       courante pour s/r — neuf instantanés par partie.
-    * `--ecoute [port]` / `--lien hôte:port` — le câble link en TCP : un
+    * `--listen [port]` / `--link hôte:port` — le câble link en TCP : un
       côté écoute (7373 par défaut), l'autre appelle, et les deux consoles
       échangent leurs octets série comme par le vrai câble — échanges
       Pokémon compris. ⇄ au statut.
@@ -71,12 +71,12 @@ defmodule Mix.Tasks.Atomboy.Play do
 
     case Atomboy.CLI.parse(args) do
       {:ok, rom, opts} ->
-        {fenetre, opts} = Keyword.pop(opts, :fenetre, false)
-        {serveur, opts} = Keyword.pop(opts, :serveur, false)
+        {fenetre, opts} = Keyword.pop(opts, :window, false)
+        {serveur, opts} = Keyword.pop(opts, :server, false)
 
         runner =
           cond do
-            serveur -> Atomboy.Serveur
+            serveur -> Atomboy.Server
             fenetre -> Atomboy.Window
             true -> Atomboy.Play
           end

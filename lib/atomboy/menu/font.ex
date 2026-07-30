@@ -1,4 +1,4 @@
-defmodule Atomboy.Menu.Police do
+defmodule Atomboy.Menu.Font do
   @moduledoc """
   La police du menu : 5×7 pixels par glyphe, dessinée à la main.
 

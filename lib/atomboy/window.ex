@@ -67,17 +67,17 @@ defmodule Atomboy.Window do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :sauvegarde))
+    sav = Save.path(rom_path, Keyword.get(opts, :save))
 
     link =
       cond do
-        port = Keyword.get(opts, :ecoute) ->
+        port = Keyword.get(opts, :listen) ->
           case Link.listen(port) do
             {:ok, l} -> l
-            {:error, m} -> throw({:lien, m})
+            {:error, m} -> throw({:link, m})
           end
 
-        lien = Keyword.get(opts, :lien) ->
+        lien = Keyword.get(opts, :link) ->
           {host, port} =
             case String.split(lien, ":") do
               [h, p] -> {h, String.to_integer(p)}
@@ -86,7 +86,7 @@ defmodule Atomboy.Window do
 
           case Link.connect(host, port) do
             {:ok, l} -> l
-            {:error, m} -> throw({:lien, m})
+            {:error, m} -> throw({:link, m})
           end
 
         true ->
@@ -107,7 +107,7 @@ defmodule Atomboy.Window do
     :wxFrame.show(frame_w)
     :wxWindow.setFocus(panel)
 
-    audio = if Keyword.get(opts, :son, true), do: Audio.open()
+    audio = if Keyword.get(opts, :sound, true), do: Audio.open()
 
     ctx = %{
       state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
@@ -152,7 +152,7 @@ defmodule Atomboy.Window do
 
     :ok
   catch
-    {:lien, message} -> {:error, message}
+    {:link, message} -> {:error, message}
   end
 
   # ── La boucle ───────────────────────────────────────────────────────────────
@@ -231,7 +231,7 @@ defmodule Atomboy.Window do
       try do
         Screen.frame(ctx.state, ctx.rom, ram, render?)
       rescue
-        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Deraille] ->
+        e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Derailed] ->
           Save.flush(ram, ctx.sav)
           reraise e, __STACKTRACE__
       end
@@ -304,7 +304,7 @@ defmodule Atomboy.Window do
       end
 
     if touche do
-      {menu, actions} = Menu.touche(ctx.menu, touche)
+      {menu, actions} = Menu.press(ctx.menu, touche)
 
       case Enum.reduce(actions, %{ctx | menu: menu}, &menu_action/2) do
         :quit -> :quit

@@ -1,4 +1,4 @@
-defmodule Atomboy.ServeurTest do
+defmodule Atomboy.ServerTest do
   use ExUnit.Case
 
   import ExUnit.CaptureIO
@@ -25,7 +25,7 @@ defmodule Atomboy.ServeurTest do
 
     flux =
       capture_io([encoding: :latin1], fn ->
-        assert :ok = Atomboy.Serveur.run(rom, frames: 3)
+        assert :ok = Atomboy.Server.run(rom, frames: 3)
       end)
 
     {frames, pcm} = découpe(flux, 0, 0)

@@ -96,7 +96,7 @@ Or grab a binary from the
 
 ## Playing
 
-On macOS, the nicest way is the native app — `bin/build --vite --app`
+On macOS, the nicest way is the native app — `bin/build --fast --app`
 produces `burrito_out/Atomboy.app`: a SwiftUI shell (full-bleed pixels
 under the window's rounded corners, a Liquid Glass hover HUD, sound
 through AVAudioEngine — no ffplay needed) driving the BEAM engine over a
@@ -108,7 +108,7 @@ Everywhere else (and for the terminal aficionados), the standalone binary:
 
 ```sh
 atomboy game.gb                 # terminal renderer
-atomboy game.gbc --fenetre      # native window (wxWidgets)
+atomboy game.gbc --window      # native window (wxWidgets)
 ```
 
 | Key | | Key | |
@@ -129,11 +129,11 @@ Useful options:
 
 | Option | |
 |---|---|
-| `--fenetre` | native window instead of the terminal |
-| `--palette gris` | neutral grays instead of the DMG green |
+| `--window` | native window instead of the terminal |
+| `--palette gray` | neutral grays instead of the DMG green |
 | `--dmg` | force original Game Boy mode for CGB-flagged ROMs |
-| `--sauvegarde <name>` | save profile — own `.sav`/`.state` per player |
-| `--son` / `--no-son` | force sound on/off |
+| `--save <name>` | save profile — own `.sav`/`.state` per player |
+| `--sound` / `--no-sound | force sound on/off |
 | `--codes 01FF16D1,…` | GameShark codes, applied every frame |
 
 Sound needs `ffplay` (ships with ffmpeg) on the PATH; without it the game
@@ -144,11 +144,11 @@ plays silently.
 One side listens, the other calls:
 
 ```sh
-atomboy argent.gbc --fenetre --ecoute            # waits on port 7373
-atomboy argent.gbc --fenetre --lien host:7373    # connects
+atomboy argent.gbc --window --listen            # waits on port 7373
+atomboy argent.gbc --window --link host:7373    # connects
 ```
 
-Use `--sauvegarde` on both sides if they share the same ROM file. Turbo is
+Use `--save` on both sides if they share the same ROM file. Turbo is
 unavailable while the cable is plugged — the protocol is a paced duet.
 
 ## Building
@@ -167,7 +167,7 @@ Natively (needs Elixir 1.18/OTP 26, `xz`, and zig 0.16.0 — installed via
 
 ```sh
 bin/build                # tests, then binaries in burrito_out/
-bin/build --vite         # skip the tests
+bin/build --fast         # skip the tests
 bin/build --install      # also copy to ~/.local/bin/atomboy
 bin/build --app          # also assemble Atomboy.app (macOS, needs swiftc)
 ```

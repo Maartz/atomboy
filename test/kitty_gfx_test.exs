@@ -40,7 +40,7 @@ defmodule Atomboy.KittyGfxTest do
     frame = :crypto.strong_rand_bytes(160 * 144) |> :binary.bin_to_list()
             |> Enum.map(&rem(&1, 4)) |> :binary.list_to_bin()
 
-    out = Screen.to_kitty(frame, :gris, 2, 30) |> IO.iodata_to_binary()
+    out = Screen.to_kitty(frame, :gray, 2, 30) |> IO.iodata_to_binary()
 
     Regex.scan(~r/;([A-Za-z0-9+\/=]*)\e\\/, out)
     |> Enum.each(fn [_, b64] -> assert byte_size(b64) <= 4096 end)

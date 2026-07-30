@@ -154,7 +154,7 @@ defmodule Atomboy.APU do
   defp config(ram) do
     {volume, {v1?, v2?, v3?, v4?}} =
       case Map.get(ram, :mixer) do
-        %{volume: v, voix: voix} -> {v, voix}
+        %{volume: v, voices: voix} -> {v, voix}
         _ -> {100, {true, true, true, true}}
       end
 

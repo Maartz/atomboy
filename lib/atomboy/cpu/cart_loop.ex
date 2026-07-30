@@ -169,7 +169,7 @@ defmodule Atomboy.CPU.CartLoop do
         bsl(hi, 8) ||| lo
       end
 
-    raise Atomboy.CPU.Deraille,
+    raise Atomboy.CPU.Derailed,
       pc: pc,
       sp: sp,
       bank: div(Map.get(ram, :rom_bank_base, 0x4000), 0x4000),

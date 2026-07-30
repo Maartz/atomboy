@@ -190,8 +190,8 @@ defmodule Atomboy.APUTest do
 
   test "le volume maître module l'amplitude — 0 fait silence" do
     {plein, _, _} = pulse2(@audible)
-    {moitié, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 50, voix: {true, true, true, true}}))
-    {muet, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 0, voix: {true, true, true, true}}))
+    {moitié, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 50, voices: {true, true, true, true}}))
+    {muet, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 0, voices: {true, true, true, true}}))
 
     max_plein = Enum.max(left_samples(plein))
     max_moitié = Enum.max(left_samples(moitié))
@@ -202,8 +202,8 @@ defmodule Atomboy.APUTest do
   end
 
   test "couper une voix la retire du mélange, les autres restent" do
-    {muet, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 100, voix: {true, false, true, true}}))
-    {intact, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 100, voix: {false, true, false, false}}))
+    {muet, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 100, voices: {true, false, true, true}}))
+    {intact, _, _} = pulse2(Map.put(@audible, :mixer, %{volume: 100, voices: {false, true, false, false}}))
 
     assert Enum.all?(left_samples(muet), &(&1 == 0))
     assert Enum.max(left_samples(intact)) > 0

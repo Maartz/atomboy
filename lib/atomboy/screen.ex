@@ -257,8 +257,8 @@ defmodule Atomboy.Screen do
   majoritaires sur une frame de jeu, coûtent un octet par cellule. C'est ce
   qui laisse un terminal suivre 60 frames par seconde.
   """
-  @spec to_text(PPU.frame(), :gris | :dmg) :: String.t()
-  def to_text(frame, palette \\ :gris)
+  @spec to_text(PPU.frame(), :gray | :dmg) :: String.t()
+  def to_text(frame, palette \\ :gray)
 
   # La frame couleur : demi-blocs en truecolor, via le RGB des palettes du jeu.
   def to_text(frame, palette) when byte_size(frame) == 2 * 160 * 144 do
@@ -319,7 +319,7 @@ defmodule Atomboy.Screen do
 
   # Les teintes précompilées en paramètres SGR : 256 couleurs pour les gris,
   # truecolor pour le vert de la dalle DMG d'origine.
-  defp colors(:gris), do: {"5;255", "5;250", "5;243", "5;236"}
+  defp colors(:gray), do: {"5;255", "5;250", "5;243", "5;236"}
 
   defp colors(:dmg) do
     {"2;155;188;15", "2;139;172;15", "2;48;98;48", "2;15;56;15"}
@@ -336,7 +336,7 @@ defmodule Atomboy.Screen do
   se pose par-dessus l'ancienne, qui n'est effacée qu'ensuite — pas de trou,
   pas de scintillement.
   """
-  @spec to_kitty(PPU.frame(), :gris | :dmg, pos_integer(), pos_integer()) :: iodata()
+  @spec to_kitty(PPU.frame(), :gray | :dmg, pos_integer(), pos_integer()) :: iodata()
   def to_kitty(frame, palette, id, rows) do
     payload = frame |> to_rgb(palette) |> :zlib.compress() |> Base.encode64()
 
@@ -363,7 +363,7 @@ defmodule Atomboy.Screen do
   par pixel) passe par la palette choisie ; une frame couleur (RGB555, deux
   octets par pixel) s'étend en RGB888, la palette du jeu faisant foi.
   """
-  @spec to_rgb(PPU.frame(), :gris | :dmg) :: binary()
+  @spec to_rgb(PPU.frame(), :gray | :dmg) :: binary()
   def to_rgb(frame, palette) when byte_size(frame) == 160 * 144 do
     rgb = rgb_palette(palette)
     for <<shade <- frame>>, into: <<>>, do: elem(rgb, shade)
@@ -386,7 +386,7 @@ defmodule Atomboy.Screen do
   defp rgb_palette(:dmg),
     do: {<<0x9B, 0xBC, 0x0F>>, <<0x8B, 0xAC, 0x0F>>, <<0x30, 0x62, 0x30>>, <<0x0F, 0x38, 0x0F>>}
 
-  defp rgb_palette(:gris),
+  defp rgb_palette(:gray),
     do: {<<0xFF, 0xFF, 0xFF>>, <<0xAA, 0xAA, 0xAA>>, <<0x55, 0x55, 0x55>>, <<0x00, 0x00, 0x00>>}
 
   @doc """
