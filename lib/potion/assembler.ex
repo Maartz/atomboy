@@ -1,4 +1,4 @@
-defmodule Potion.Assembleur do
+defmodule Potion.Assembler do
   @moduledoc """
   La table d'instructions du SM83, lue à l'envers.
 
@@ -44,14 +44,14 @@ defmodule Potion.Assembleur do
 
   Un programme est une liste. Trois sortes d'éléments :
 
-      {:etiquette, :boucle}      taille nulle ; nomme l'adresse courante
-      {:octets, <<1, 2, 3>>}     des octets bruts — données, tuiles
+      {:label, :main_loop}      taille nulle ; nomme l'adresse courante
+      {:bytes, <<1, 2, 3>>}     des octets bruts — données, tuiles
       {:ld, :a, {:mem, :hl}}     une instruction
 
   Une instruction est un tuple dont la tête est le mnémonique **exactement** tel
   que la table le nomme (`:ld`, `:ldh`, `:add_sp`, `:jr`, `:rst`, `:bit`…). Pour
   les formes conditionnelles la condition s'insère en premier : `{:jr, :nz,
-  {:etiquette, :fin}}`, `{:ret, :c}`.
+  {:label, :fin}}`, `{:ret, :c}`.
 
   Les opérandes :
 
@@ -61,10 +61,10 @@ defmodule Potion.Assembleur do
       {:mem, :hl}              l'octet à l'adresse HL
       {:mem, :bc | :de | :hl_inc | :hl_dec}
       {:mem, 0xC000}           l'octet à une adresse absolue
-      {:mem, {:etiquette, :n}} idem, l'adresse venant d'une étiquette
-      {:haut, 0x44}            la page haute : 0xFF00 + 0x44
-      {:haut, :c}              la page haute via C
-      {:etiquette, :n}         la cible d'un saut ou d'un appel
+      {:mem, {:label, :n}} idem, l'adresse venant d'une étiquette
+      {:high, 0x44}            la page haute : 0xFF00 + 0x44
+      {:high, :c}              la page haute via C
+      {:label, :n}         la cible d'un saut ou d'un appel
 
   L'accumulateur est **explicite** dans les opérations arithmétiques, comme dans
   la table : `{:add, :a, :b}`, `{:sub, :a, 0x10}`, `{:cp, :a, {:mem, :hl}}`. La
@@ -95,18 +95,18 @@ defmodule Potion.Assembleur do
   @type operande ::
           atom()
           | integer()
-          | {:mem, atom() | non_neg_integer() | {:etiquette, atom()}}
-          | {:haut, :c | non_neg_integer() | {:etiquette, atom()}}
-          | {:etiquette, atom()}
+          | {:mem, atom() | non_neg_integer() | {:label, atom()}}
+          | {:high, :c | non_neg_integer() | {:label, atom()}}
+          | {:label, atom()}
 
   @typedoc """
   Un élément de programme : une étiquette, des octets bruts, ou une instruction.
   """
-  @type element :: {:etiquette, atom()} | {:octets, binary()} | tuple()
+  @type element :: {:label, atom()} | {:bytes, binary()} | tuple()
 
   # 0x0150 : la première adresse libre après l'en-tête de cartouche. C'est là que
   # le point d'entrée saute, et donc l'origine par défaut d'un programme Potion.
-  @origine_defaut 0x0150
+  @origin_defaut 0x0150
 
   # L'index inversé, construit à la compilation depuis la table. Clé : la forme
   # de l'instruction telle que la table la décrit. Valeur : de quoi l'écrire.
@@ -135,16 +135,16 @@ defmodule Potion.Assembleur do
   @doc """
   Assemble un programme en octets.
 
-  `opts[:origine]` est l'adresse de la première instruction — nécessaire pour
+  `opts[:origin]` est l'adresse de la première instruction — nécessaire pour
   résoudre les étiquettes, qui nomment des adresses absolues et non des
   décalages. Par défaut 0x0150.
 
-      iex> Potion.Assembleur.assemble([{:ld, :a, 0x05}, {:add, :a, :b}])
+      iex> Potion.Assembler.assemble([{:ld, :a, 0x05}, {:add, :a, :b}])
       <<0x3E, 0x05, 0x80>>
   """
   @spec assemble([element()], keyword()) :: binary()
   def assemble(programme, opts \\ []) do
-    origine = Keyword.get(opts, :origine, @origine_defaut)
+    origine = Keyword.get(opts, :origin, @origin_defaut)
     {plan, etiquettes, taille} = mesurer(programme, origine)
     octets = plan |> Enum.map(&emettre(&1, etiquettes)) |> IO.iodata_to_binary()
 
@@ -163,9 +163,9 @@ defmodule Potion.Assembleur do
   compter les instructions à la main pour savoir où son point d'entrée est
   tombé. C'est ce dont le noyau aura besoin pour écrire l'en-tête de cartouche.
   """
-  @spec adresses([element()], keyword()) :: %{atom() => non_neg_integer()}
-  def adresses(programme, opts \\ []) do
-    origine = Keyword.get(opts, :origine, @origine_defaut)
+  @spec addresses([element()], keyword()) :: %{atom() => non_neg_integer()}
+  def addresses(programme, opts \\ []) do
+    origine = Keyword.get(opts, :origin, @origin_defaut)
     {_plan, etiquettes, _taille} = mesurer(programme, origine)
     etiquettes
   end
@@ -181,7 +181,7 @@ defmodule Potion.Assembleur do
     {Enum.reverse(plan), etiquettes, adresse - origine}
   end
 
-  defp mesurer_element({{:etiquette, nom}, indice}, {plan, etiquettes, adresse})
+  defp mesurer_element({{:label, nom}, indice}, {plan, etiquettes, adresse})
        when is_atom(nom) do
     case etiquettes do
       %{^nom => precedente} ->
@@ -197,18 +197,18 @@ defmodule Potion.Assembleur do
     end
   end
 
-  defp mesurer_element({{:octets, octets}, _indice}, {plan, etiquettes, adresse})
+  defp mesurer_element({{:bytes, octets}, _indice}, {plan, etiquettes, adresse})
        when is_binary(octets) do
-    {[{:octets, octets} | plan], etiquettes, adresse + byte_size(octets)}
+    {[{:bytes, octets} | plan], etiquettes, adresse + byte_size(octets)}
   end
 
-  defp mesurer_element({{:etiquette, autre}, indice}, _acc) do
+  defp mesurer_element({{:label, autre}, indice}, _acc) do
     raise ArgumentError,
           "étiquette mal formée à l'élément ##{indice} : le nom doit être un atome, " <>
             "reçu #{inspect(autre)}"
   end
 
-  defp mesurer_element({{:octets, autre}, indice}, _acc) do
+  defp mesurer_element({{:bytes, autre}, indice}, _acc) do
     raise ArgumentError,
           "octets mal formés à l'élément ##{indice} : attendu un binaire, " <>
             "reçu #{inspect(autre)}"
@@ -224,7 +224,7 @@ defmodule Potion.Assembleur do
     raise ArgumentError, """
     élément de programme inconnu à l'élément ##{indice} : #{inspect(autre)}
 
-    Un programme est une liste de `{:etiquette, nom}`, `{:octets, binaire}` et \
+    Un programme est une liste de `{:label, nom}`, `{:bytes, binaire}` et \
     d'instructions — ces dernières étant des tuples dont la tête est un mnémonique.
     """
   end
@@ -320,15 +320,15 @@ defmodule Potion.Assembleur do
   # Une étiquette est une adresse : 16 bits pour JP et CALL, 8 bits signés pour
   # le seul JR — l'index choisit, et `immediat/4` refuse le cas où un 8 bits
   # tomberait ailleurs que dans un saut relatif.
-  defp formes({:etiquette, nom}) when is_atom(nom), do: [{:imm, 16}, {:imm, 8}]
+  defp formes({:label, nom}) when is_atom(nom), do: [{:imm, 16}, {:imm, 8}]
 
   defp formes({:mem, :hl}), do: [:hl_ind]
   defp formes({:mem, paire}) when paire in [:bc, :de, :hl_inc, :hl_dec], do: [{:ind, paire}]
   defp formes({:mem, adresse}) when is_integer(adresse), do: [:a16_ind]
-  defp formes({:mem, {:etiquette, nom}}) when is_atom(nom), do: [:a16_ind]
-  defp formes({:haut, :c}), do: [:c_ind]
-  defp formes({:haut, octet}) when is_integer(octet), do: [:a8_ind]
-  defp formes({:haut, {:etiquette, nom}}) when is_atom(nom), do: [:a8_ind]
+  defp formes({:mem, {:label, nom}}) when is_atom(nom), do: [:a16_ind]
+  defp formes({:high, :c}), do: [:c_ind]
+  defp formes({:high, octet}) when is_integer(octet), do: [:a8_ind]
+  defp formes({:high, {:label, nom}}) when is_atom(nom), do: [:a8_ind]
   defp formes(_autre), do: []
 
   defp largeur({:imm, 8}), do: 1
@@ -339,7 +339,7 @@ defmodule Potion.Assembleur do
 
   # ══ Passe 2 : les octets ═════════════════════════════════════════════════════
 
-  defp emettre({:octets, octets}, _etiquettes), do: octets
+  defp emettre({:bytes, octets}, _etiquettes), do: octets
 
   defp emettre({:instruction, insn}, etiquettes) do
     entete =
@@ -361,7 +361,7 @@ defmodule Potion.Assembleur do
 
   # ── La valeur d'un immédiat ─────────────────────────────────────────────────
 
-  defp immediat({:imm, 8}, {:etiquette, nom}, insn, etiquettes) do
+  defp immediat({:imm, 8}, {:label, nom}, insn, etiquettes) do
     cible = resoudre_etiquette!(nom, insn, etiquettes)
 
     unless insn.mnemonique == :jr do
@@ -405,7 +405,7 @@ defmodule Potion.Assembleur do
     end
   end
 
-  defp immediat({:imm, 16}, {:etiquette, nom}, insn, etiquettes) do
+  defp immediat({:imm, 16}, {:label, nom}, insn, etiquettes) do
     nom |> resoudre_etiquette!(insn, etiquettes) |> plage!(0, 0xFFFF, "une adresse", insn)
   end
 
@@ -413,7 +413,7 @@ defmodule Potion.Assembleur do
     plage!(entier, 0, 0xFFFF, "un mot", insn)
   end
 
-  defp immediat(:a16_ind, {:mem, {:etiquette, nom}}, insn, etiquettes) do
+  defp immediat(:a16_ind, {:mem, {:label, nom}}, insn, etiquettes) do
     nom |> resoudre_etiquette!(insn, etiquettes) |> plage!(0, 0xFFFF, "une adresse", insn)
   end
 
@@ -423,7 +423,7 @@ defmodule Potion.Assembleur do
 
   # La page haute n'encode que l'octet bas : 0xFF00 + n. Une étiquette y est
   # acceptée si — et seulement si — elle est tombée dans cette page.
-  defp immediat(:a8_ind, {:haut, {:etiquette, nom}}, insn, etiquettes) do
+  defp immediat(:a8_ind, {:high, {:label, nom}}, insn, etiquettes) do
     cible = resoudre_etiquette!(nom, insn, etiquettes)
 
     if cible < 0xFF00 or cible > 0xFFFF do
@@ -439,7 +439,7 @@ defmodule Potion.Assembleur do
     cible &&& 0xFF
   end
 
-  defp immediat(:a8_ind, {:haut, octet}, insn, _etiquettes) do
+  defp immediat(:a8_ind, {:high, octet}, insn, _etiquettes) do
     plage!(octet, 0, 0xFF, "un décalage dans la page haute", insn)
   end
 
@@ -498,7 +498,7 @@ defmodule Potion.Assembleur do
         #{Enum.map_join(orphelins, "\n", &"  #{inspect(&1)} ne correspond à aucune forme d'opérande.")}
 
         Les formes reconnues sont : un registre (:a … :l), une paire (:bc, :de, \
-        :hl, :sp, :af), un entier, {:mem, …}, {:haut, …} et {:etiquette, nom}.
+        :hl, :sp, :af), un entier, {:mem, …}, {:high, …} et {:label, nom}.
         """
 
       mnemonique in @mnemoniques ->

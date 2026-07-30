@@ -16,11 +16,11 @@ defmodule Potion.ROMTest do
   alias Atomboy.Screen
   alias Potion.ROM
 
-  @boucle [{:etiquette, :ici}, {:jr, {:etiquette, :ici}}]
+  @boucle [{:label, :ici}, {:jr, {:label, :ici}}]
 
   describe "l'en-tête" do
     test "32 Ko exactement, entrée NOP + JP 0x150" do
-      rom = ROM.construit(@boucle)
+      rom = ROM.build(@boucle)
 
       assert byte_size(rom) == 0x8000
       assert binary_part(rom, 0x100, 4) == <<0x00, 0xC3, 0x50, 0x01>>
@@ -29,7 +29,7 @@ defmodule Potion.ROMTest do
     end
 
     test "le logo Nintendo est celui que la ROM de boot exige" do
-      rom = ROM.construit(@boucle)
+      rom = ROM.build(@boucle)
 
       # Les quatre premiers octets suffisent à reconnaître l'original — et le
       # test complet est la somme d'en-tête, qui couvre d'autres champs.
@@ -38,13 +38,13 @@ defmodule Potion.ROMTest do
     end
 
     test "le titre est passé en majuscules et rembourré de zéros" do
-      rom = ROM.construit(@boucle, titre: "pong")
+      rom = ROM.build(@boucle, title: "pong")
 
       assert binary_part(rom, 0x134, 16) == "PONG" <> :binary.copy(<<0>>, 12)
     end
 
     test "cartouche DMG, ROM seule : les drapeaux à zéro" do
-      rom = ROM.construit(@boucle)
+      rom = ROM.build(@boucle)
 
       # 0x143 : pas de couleur. 0x147 : pas de MBC. 0x148-0x149 : 32 Ko, pas
       # de RAM. C'est ce que Screen.boot_ram lira.
@@ -56,7 +56,7 @@ defmodule Potion.ROMTest do
     end
 
     test "la somme d'en-tête est celle que le boot vérifie" do
-      rom = ROM.construit(@boucle, titre: "VERIF")
+      rom = ROM.build(@boucle, title: "VERIF")
 
       attendu =
         rom
@@ -66,12 +66,12 @@ defmodule Potion.ROMTest do
 
       assert :binary.at(rom, 0x14D) == attendu
       # Elle dépend du titre : deux ROMs de titres différents diffèrent ici.
-      autre = ROM.construit(@boucle, titre: "AUTRE")
+      autre = ROM.build(@boucle, title: "AUTRE")
       refute :binary.at(autre, 0x14D) == :binary.at(rom, 0x14D)
     end
 
     test "la somme globale couvre tout sauf ses deux cases" do
-      rom = ROM.construit(@boucle)
+      rom = ROM.build(@boucle)
 
       sans_cases =
         binary_part(rom, 0, 0x14E) <> <<0, 0>> <> binary_part(rom, 0x150, 0x8000 - 0x150)
@@ -86,13 +86,13 @@ defmodule Potion.ROMTest do
   describe "le vecteur vblank" do
     test "l'étiquette devient un JP en 0x40" do
       programme = [
-        {:etiquette, :ici},
-        {:jr, {:etiquette, :ici}},
-        {:etiquette, :vbl},
+        {:label, :ici},
+        {:jr, {:label, :ici}},
+        {:label, :vbl},
         {:reti}
       ]
 
-      rom = ROM.construit(programme, vblank: :vbl)
+      rom = ROM.build(programme, vblank: :vbl)
 
       # :vbl est à 0x150 + 2 (le JR).
       assert binary_part(rom, 0x40, 3) == <<0xC3, 0x52, 0x01>>
@@ -100,13 +100,13 @@ defmodule Potion.ROMTest do
 
     test "une étiquette absente est refusée nommément" do
       erreur =
-        assert_raise ArgumentError, fn -> ROM.construit(@boucle, vblank: :fantome) end
+        assert_raise ArgumentError, fn -> ROM.build(@boucle, vblank: :fantome) end
 
       assert erreur.message =~ ":fantome"
     end
 
     test "sans option, le vecteur reste des zéros" do
-      rom = ROM.construit(@boucle)
+      rom = ROM.build(@boucle)
 
       assert binary_part(rom, 0x40, 3) == <<0, 0, 0>>
     end
@@ -114,14 +114,14 @@ defmodule Potion.ROMTest do
 
   describe "les refus" do
     test "un titre trop long ou accentué" do
-      assert_raise ArgumentError, fn -> ROM.construit(@boucle, titre: "SEIZECARACTERES!") end
-      assert_raise ArgumentError, fn -> ROM.construit(@boucle, titre: "POTITRÉ") end
+      assert_raise ArgumentError, fn -> ROM.build(@boucle, title: "SEIZECARACTERES!") end
+      assert_raise ArgumentError, fn -> ROM.build(@boucle, title: "POTITRÉ") end
     end
 
     test "un programme plus grand que la place" do
-      trop = [{:octets, :binary.copy(<<0>>, 0x8000 - 0x150 + 1)}]
+      trop = [{:bytes, :binary.copy(<<0>>, 0x8000 - 0x150 + 1)}]
 
-      erreur = assert_raise ArgumentError, fn -> ROM.construit(trop) end
+      erreur = assert_raise ArgumentError, fn -> ROM.build(trop) end
 
       assert erreur.message =~ "programme trop grand"
     end
@@ -129,7 +129,7 @@ defmodule Potion.ROMTest do
 
   describe "dans l'émulateur" do
     test "la ROM nue boote et tourne des frames entières sans lever" do
-      rom = ROM.construit(@boucle)
+      rom = ROM.build(@boucle)
       state = Screen.boot_state(rom)
       ram = Screen.boot_ram(rom)
 
@@ -148,11 +148,11 @@ defmodule Potion.ROMTest do
         {:ld, :a, 21},
         {:add, :a, :a},
         {:ld, {:mem, 0xC000}, :a},
-        {:etiquette, :fin},
-        {:jr, {:etiquette, :fin}}
+        {:label, :fin},
+        {:jr, {:label, :fin}}
       ]
 
-      rom = ROM.construit(programme, titre: "CALCUL")
+      rom = ROM.build(programme, title: "CALCUL")
       state = Screen.boot_state(rom)
       ram = Screen.boot_ram(rom)
 

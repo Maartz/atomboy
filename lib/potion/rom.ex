@@ -30,7 +30,7 @@ defmodule Potion.ROM do
       0x0147-0x0149   type 0x00 (ROM seule, sans MBC), 32 Ko, pas de RAM
       0x014D          la somme d'en-tête que le boot vérifie
       0x014E-0x014F   la somme globale
-      0x0150-0x7FFF   le programme, assemblé par `Potion.Assembleur`,
+      0x0150-0x7FFF   le programme, assemblé par `Potion.Assembler`,
                       puis du remplissage
 
   32 Ko sans MBC : le plus petit format qui existe, et `Atomboy.Screen`
@@ -40,7 +40,7 @@ defmodule Potion.ROM do
 
   import Bitwise
 
-  alias Potion.Assembleur
+  alias Potion.Assembler
 
   # Les 48 octets que la ROM de boot compare aux siens. Ils dessinent le mot
   # « Nintendo » — c'était le verrou juridique de la console : les graver dans
@@ -51,24 +51,24 @@ defmodule Potion.ROM do
           0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E>>
 
   @taille 0x8000
-  @origine 0x0150
-  @place @taille - @origine
+  @origin 0x0150
+  @place @taille - @origin
 
   @doc """
-  Construit une ROM de 32 Ko autour d'un programme `Potion.Assembleur`.
+  Construit une ROM de 32 Ko autour d'un programme `Potion.Assembler`.
 
   Options :
 
-    * `:titre` — le nom dans l'en-tête, quinze caractères ASCII au plus,
+    * `:title` — le nom dans l'en-tête, quinze caractères ASCII au plus,
       passé en majuscules. Par défaut `"POTION"`.
     * `:vblank` — le nom d'une étiquette du programme ; le vecteur 0x40
       devient un `JP` vers elle. Sans elle, une interruption vblank armée
       exécuterait des zéros — c'est-à-dire des `NOP` jusqu'à dérailler.
   """
-  @spec construit([Assembleur.element()], keyword()) :: binary()
-  def construit(programme, opts \\ []) do
-    titre = opts |> Keyword.get(:titre, "POTION") |> titre!()
-    code = Assembleur.assemble(programme, origine: @origine)
+  @spec build([Assembler.element()], keyword()) :: binary()
+  def build(programme, opts \\ []) do
+    titre = opts |> Keyword.get(:title, "POTION") |> titre!()
+    code = Assembler.assemble(programme, origin: @origin)
 
     if byte_size(code) > @place do
       raise ArgumentError,
@@ -80,7 +80,7 @@ defmodule Potion.ROM do
 
     corps =
       vecteurs <>
-        <<0x00, 0xC3, @origine::16-little>> <>
+        <<0x00, 0xC3, @origin::16-little>> <>
         @logo <>
         titre <>
         :binary.copy(<<0x00>>, 0x14D - 0x144)
@@ -97,7 +97,7 @@ defmodule Potion.ROM do
   defp vecteurs(_programme, nil), do: :binary.copy(<<0x00>>, 0x100)
 
   defp vecteurs(programme, etiquette) do
-    adresses = Assembleur.adresses(programme, origine: @origine)
+    adresses = Assembler.addresses(programme, origin: @origin)
 
     cible =
       case adresses do

@@ -1,10 +1,10 @@
-defmodule Potion.Compilo do
+defmodule Potion.Compiler do
   @moduledoc """
   Le compilateur du v0 : d'un AST Elixir restreint à un fragment SM83.
 
   Ce module ne connaît aucune macro. Il reçoit l'AST que `Potion` a capturé,
   une allocation de cellules, et rend une liste d'éléments au format de
-  `Potion.Assembleur`. C'est donc un compilateur qu'on peut appeler à la main,
+  `Potion.Assembler`. C'est donc un compilateur qu'on peut appeler à la main,
   dans une console, sur un morceau de `quote` — et c'est voulu : un compilateur
   qui ne s'atteindrait qu'à travers `defmodule` ne se déboguerait qu'à travers
   `defmodule`.
@@ -13,7 +13,7 @@ defmodule Potion.Compilo do
 
   Une variable du jeu est **une cellule de WRAM**, pas un registre et pas une
   liaison. Les cellules sont prises dans l'ordre de déclaration à partir de
-  `Potion.Noyau.etat()` :
+  `Potion.Runtime.actor_state()` :
 
       variables x: 80, y: 72
 
@@ -28,7 +28,7 @@ defmodule Potion.Compilo do
   elle-même, et le seul état sur lequel elle peut compter est le zéro que l'init
   a laissé dans la page. L'acteur lit le drapeau : à zéro, il pose les valeurs
   initiales et lève le drapeau ; ensuite il passe. C'est le pattern de l'acteur
-  écrit à la main dans `Potion.NoyauTest`, généré.
+  écrit à la main dans `Potion.RuntimeTest`, généré.
 
   ## L'arithmétique
 
@@ -53,27 +53,27 @@ defmodule Potion.Compilo do
 
   ## Les étiquettes engendrées
 
-  Toutes préfixées `potion_` et numérotées. Le noyau pose `:acteur` juste avant
+  Toutes préfixées `potion_` et numérotées. Le noyau pose `:actor` juste avant
   le fragment et n'y touche plus ; ce préfixe garde les deux espaces de noms
   disjoints, ce que l'assembleur vérifierait de toute façon — il refuse une
   étiquette dupliquée.
   """
 
-  alias Potion.Assembleur
-  alias Potion.ErreurCompilation
-  alias Potion.Noyau
+  alias Potion.Assembler
+  alias Potion.CompileError
+  alias Potion.Runtime
 
   @typedoc """
   Où vit l'état de l'acteur : une cellule par variable, plus le drapeau.
   """
   @type allocation :: %{
-          cellules: %{atom() => non_neg_integer()},
-          ordre: [atom()],
-          initiales: %{atom() => byte()},
-          installe: non_neg_integer()
+          cells: %{atom() => non_neg_integer()},
+          order: [atom()],
+          initial: %{atom() => byte()},
+          installed: non_neg_integer()
         }
 
-  # Les bits de la cellule du pad, tels que `Potion.Noyau.lire_pad/0` les range.
+  # Les bits de la cellule du pad, tels que `Potion.Runtime.read_pad/0` les range.
   # Cette liste est la seule traduction du langage vers le matériel qui ne soit
   # pas dérivée : le noyau documente les bits, on les nomme.
   @touches [right: 0, left: 1, up: 2, down: 3, a: 4, b: 5, select: 6, start: 7]
@@ -94,14 +94,14 @@ defmodule Potion.Compilo do
   serait un trou au milieu de la page de l'acteur, et le jour où le langage
   saura allouer autre chose que des octets, ce trou serait à contourner.
 
-      iex> Potion.Compilo.alloue(x: 80, y: 72).cellules
+      iex> Potion.Compiler.allocate(x: 80, y: 72).cells
       %{x: 0xC100, y: 0xC101}
 
-      iex> Potion.Compilo.alloue(x: 80, y: 72).installe
+      iex> Potion.Compiler.allocate(x: 80, y: 72).installed
       0xC102
   """
-  @spec alloue(keyword()) :: allocation()
-  def alloue(declarations) do
+  @spec allocate(keyword()) :: allocation()
+  def allocate(declarations) do
     liste = declarations!(declarations)
     noms = Keyword.keys(liste)
 
@@ -111,13 +111,13 @@ defmodule Potion.Compilo do
     cellules =
       noms
       |> Enum.with_index()
-      |> Map.new(fn {nom, rang} -> {nom, Noyau.etat() + rang} end)
+      |> Map.new(fn {nom, rang} -> {nom, Runtime.actor_state() + rang} end)
 
     %{
-      cellules: cellules,
-      ordre: noms,
-      initiales: Map.new(liste),
-      installe: Noyau.etat() + length(noms)
+      cells: cellules,
+      order: noms,
+      initial: Map.new(liste),
+      installed: Runtime.actor_state() + length(noms)
     }
   end
 
@@ -127,7 +127,7 @@ defmodule Potion.Compilo do
         :ok
 
       {nom, valeur} when is_atom(nom) ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         valeur initiale hors d'un octet, dans `variables` : #{inspect(nom)}
 
             #{Macro.to_string(valeur)}
@@ -141,7 +141,7 @@ defmodule Potion.Compilo do
         """
 
       autre ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         déclaration mal formée dans `variables` : #{inspect(autre)}
 
         `variables` attend une liste à mots-clés, chaque nom recevant un octet :
@@ -154,7 +154,7 @@ defmodule Potion.Compilo do
   end
 
   defp declarations!(autre) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     `variables` attend une liste à mots-clés, reçu :
 
         #{Macro.to_string(autre)}
@@ -172,7 +172,7 @@ defmodule Potion.Compilo do
         :ok
 
       repetes ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         variable déclarée deux fois : #{Enum.map_join(Enum.uniq(repetes), ", ", &inspect/1)}
 
             #{Macro.to_string(declarations)}
@@ -185,12 +185,12 @@ defmodule Potion.Compilo do
 
   defp capacite!(noms, declarations) do
     if length(noms) + 1 > @page_etat do
-      raise ErreurCompilation, """
+      raise CompileError, """
       trop de variables : #{length(noms)} déclarées, #{@page_etat - 1} au plus.
 
           #{Macro.to_string(declarations)}
 
-      Le noyau laisse à l'acteur la page 0x#{hexa(Noyau.etat())}-0x#{hexa(Noyau.etat() + @page_etat - 1)}, \
+      Le noyau laisse à l'acteur la page 0x#{hexa(Runtime.actor_state())}-0x#{hexa(Runtime.actor_state() + @page_etat - 1)}, \
       soit #{@page_etat} cellules dont une pour le drapeau « installé ».
       """
     end
@@ -202,10 +202,10 @@ defmodule Potion.Compilo do
   L'AST du corps de `every_frame` et une allocation, en un fragment d'acteur.
 
   Le fragment finit par `{:ret}` : c'est un `CALL` qui l'atteint, une fois par
-  frame, et `Potion.Noyau.programme/1` refuse un acteur qui ne rendrait pas la
+  frame, et `Potion.Runtime.program/1` refuse un acteur qui ne rendrait pas la
   main.
   """
-  @spec compile(Macro.t(), allocation()) :: [Assembleur.element()]
+  @spec compile(Macro.t(), allocation()) :: [Assembler.element()]
   def compile(corps, allocation) do
     {corps_compile, _compteur} = bloc(corps, allocation, 0)
     installation(allocation) ++ corps_compile ++ [{:ret}]
@@ -214,23 +214,23 @@ defmodule Potion.Compilo do
   # Le premier tour : poser les valeurs initiales, puis ne plus jamais y revenir.
   # Sans variable il n'y a rien à installer, et le drapeau reste une cellule
   # inerte — on n'émet pas six octets pour garder un état dont personne ne veut.
-  defp installation(%{ordre: []}), do: []
+  defp installation(%{order: []}), do: []
 
   defp installation(allocation) do
     [
-      {:ld, :a, {:mem, allocation.installe}},
+      {:ld, :a, {:mem, allocation.installed}},
       {:and, :a, :a},
-      {:jr, :nz, {:etiquette, :potion_installe}},
+      {:jr, :nz, {:label, :potion_installed}},
       {:ld, :a, 0x01},
-      {:ld, {:mem, allocation.installe}, :a}
+      {:ld, {:mem, allocation.installed}, :a}
     ] ++
-      Enum.flat_map(allocation.ordre, fn nom ->
+      Enum.flat_map(allocation.order, fn nom ->
         [
-          {:ld, :a, allocation.initiales[nom]},
-          {:ld, {:mem, allocation.cellules[nom]}, :a}
+          {:ld, :a, allocation.initial[nom]},
+          {:ld, {:mem, allocation.cells[nom]}, :a}
         ]
       end) ++
-      [{:etiquette, :potion_installe}]
+      [{:label, :potion_installed}]
   end
 
   # Un bloc : les énoncés à la file, le compteur d'étiquettes passant de l'un à
@@ -261,15 +261,15 @@ defmodule Potion.Compilo do
   defp enonce({:if, _, [condition, blocs]} = enonce, allocation, compteur) do
     bit = touche!(condition, enonce)
     corps = corps_du_si!(blocs, enonce)
-    fin = :"potion_fin_#{compteur}"
+    fin = :"potion_end_#{compteur}"
     {interieur, compteur} = bloc(corps, allocation, compteur + 1)
 
     elements =
       [
-        {:ld, :a, {:mem, Noyau.pad()}},
+        {:ld, :a, {:mem, Runtime.pad()}},
         {:bit, bit, :a},
-        {:jr, :z, {:etiquette, fin}}
-      ] ++ interieur ++ [{:etiquette, fin}]
+        {:jr, :z, {:label, fin}}
+      ] ++ interieur ++ [{:label, fin}]
 
     {elements, compteur}
   end
@@ -277,7 +277,7 @@ defmodule Potion.Compilo do
   # ── Une entrée d'OAM ────────────────────────────────────────────────────────
 
   defp enonce({:sprite, _, [indice, champs]} = enonce, allocation, compteur) do
-    base = Noyau.oam_miroir() + 4 * entree!(indice, enonce)
+    base = Runtime.oam_mirror() + 4 * entree!(indice, enonce)
     {x, y, tuile} = champs!(champs, enonce)
 
     elements =
@@ -311,7 +311,7 @@ defmodule Potion.Compilo do
   end
 
   defp valeur_de_sprite(autre, _decalage, _allocation, enonce) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     champ de `sprite` hors du sous-ensemble du v0 :
 
         #{Macro.to_string(autre)}
@@ -352,7 +352,7 @@ defmodule Potion.Compilo do
   defp octet!(valeur, _enonce) when is_integer(valeur) and valeur in 0..255, do: valeur
 
   defp octet!(autre, enonce) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     opérande hors du sous-ensemble du v0 :
 
         #{Macro.to_string(autre)}
@@ -373,12 +373,12 @@ defmodule Potion.Compilo do
   end
 
   defp cellule!(nom, allocation, enonce) when is_atom(nom) do
-    case allocation.cellules do
+    case allocation.cells do
       %{^nom => adresse} ->
         adresse
 
       _ ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         variable non déclarée : #{inspect(nom)}, dans #{souligne(enonce)}
 
         #{declarees(allocation)}
@@ -392,7 +392,7 @@ defmodule Potion.Compilo do
   end
 
   defp cellule!(autre, _allocation, enonce) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     cible d'affectation qui n'est pas une variable :
 
         #{Macro.to_string(autre)}
@@ -405,9 +405,9 @@ defmodule Potion.Compilo do
     """
   end
 
-  defp declarees(%{ordre: []}), do: "Ce jeu ne déclare aucune variable."
+  defp declarees(%{order: []}), do: "Ce jeu ne déclare aucune variable."
 
-  defp declarees(%{ordre: noms, cellules: cellules}) do
+  defp declarees(%{order: noms, cells: cellules}) do
     "Déclarées : " <>
       Enum.map_join(noms, ", ", fn nom -> "#{inspect(nom)} (0x#{hexa(cellules[nom])})" end)
   end
@@ -420,7 +420,7 @@ defmodule Potion.Compilo do
         bit
 
       :error ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         touche inconnue : #{inspect(touche)}, dans #{souligne(enonce)}
 
         Le pad d'une Game Boy en a huit, et le noyau les range dans un octet :
@@ -430,7 +430,7 @@ defmodule Potion.Compilo do
   end
 
   defp touche!(condition, enonce) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     condition hors du sous-ensemble du v0 :
 
         #{Macro.to_string(condition)}
@@ -449,7 +449,7 @@ defmodule Potion.Compilo do
         corps
 
       autres when is_list(autres) ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         branche que le v0 ne compile pas : \
         #{Enum.map_join(Keyword.keys(autres) -- [:do], ", ", &inspect/1)}
 
@@ -461,7 +461,7 @@ defmodule Potion.Compilo do
         """
 
       autre ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         `if` mal formé :
 
             #{Macro.to_string(autre)}
@@ -481,22 +481,22 @@ defmodule Potion.Compilo do
   end
 
   defp entree!(indice, enonce) when is_integer(indice) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     entrée d'OAM hors plage : #{indice}, dans #{souligne(enonce)}
 
     L'OAM d'une Game Boy compte #{@entrees_oam} entrées, numérotées de 0 à \
     #{@entrees_oam - 1} — quatre octets chacune, de \
-    0x#{hexa(Noyau.oam_miroir())} à \
-    0x#{hexa(Noyau.oam_miroir() + 4 * @entrees_oam - 1)} dans le miroir du noyau.
+    0x#{hexa(Runtime.oam_mirror())} à \
+    0x#{hexa(Runtime.oam_mirror() + 4 * @entrees_oam - 1)} dans le miroir du noyau.
 
     L'entrée #{indice} tomberait hors de cette plage, et le DMA ne la publierait \
     donc jamais : elle écraserait les cellules du noyau — la cellule du pad est \
-    à 0x#{hexa(Noyau.pad())} — ou l'état de l'acteur.
+    à 0x#{hexa(Runtime.pad())} — ou l'état de l'acteur.
     """
   end
 
   defp entree!(autre, enonce) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     numéro de sprite qui n'est pas un littéral :
 
         #{Macro.to_string(autre)}
@@ -527,7 +527,7 @@ defmodule Potion.Compilo do
   defp champs!(champs, enonce), do: champs_refuses!(champs, enonce)
 
   defp champs_refuses!(champs, enonce) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     champs de `sprite` mal formés :
 
         #{Macro.to_string(champs)}
@@ -543,7 +543,7 @@ defmodule Potion.Compilo do
   # ── Le refus général ────────────────────────────────────────────────────────
 
   defp refus!(enonce) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     énoncé hors du sous-ensemble du v0 :
 
         #{Macro.to_string(enonce)}

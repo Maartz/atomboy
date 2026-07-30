@@ -1,4 +1,4 @@
-defmodule Potion.Noyau do
+defmodule Potion.Runtime do
   @moduledoc """
   Le runtime SM83 de Potion, écrit comme donnée.
 
@@ -9,7 +9,7 @@ defmodule Potion.Noyau do
   l'acteur une fois par frame.
 
   Ce module n'émet aucun octet. Il retourne des **fragments de programme** au
-  format de `Potion.Assembleur` — des listes de tuples. Le noyau est donc une
+  format de `Potion.Assembler` — des listes de tuples. Le noyau est donc une
   valeur, qu'on peut concaténer, inspecter, découper, et dont une partie se
   fait assembler séparément pour être recopiée ailleurs en mémoire (la routine
   DMA, plus bas). Un noyau écrit en octets à la main n'aurait aucune de ces
@@ -79,7 +79,7 @@ defmodule Potion.Noyau do
   couche de fond n'est pas une Game Boy ; on remplit.
   """
 
-  alias Potion.Assembleur
+  alias Potion.Assembler
 
   # ── Les registres touchés ───────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ defmodule Potion.Noyau do
 
   # ── La carte mémoire ────────────────────────────────────────────────────────
 
-  @oam_miroir 0xC000
+  @oam_mirror 0xC000
   @pad 0xC0A0
   @drapeau 0xC0A1
   @etat 0xC100
@@ -121,27 +121,27 @@ defmodule Potion.Noyau do
   @doc """
   Le programme complet : l'init, le noyau, puis le code de l'acteur.
 
-  Prêt pour `Potion.ROM.construit(programme, vblank: :vblank)` — sans cette
+  Prêt pour `Potion.ROM.build(programme, vblank: :vblank)` — sans cette
   option le vecteur 0x40 reste des zéros et la première interruption servie
   exécuterait du remplissage.
 
   Le fragment `acteur` n'a pas à se nommer : le noyau pose l'étiquette
-  `:acteur` juste avant lui. Il doit en revanche finir par un `{:ret}` — c'est
+  `:actor` juste avant lui. Il doit en revanche finir par un `{:ret}` — c'est
   un `CALL` qui l'atteint, et un acteur qui déborde de son fragment continue
   dans les octets suivants, c'est-à-dire dans le remplissage de la cartouche.
   Le contrôle est fait ici, à l'assemblage, parce qu'à l'exécution le symptôme
   serait un opcode illégal à des milliers de cycles de sa cause.
   """
-  @spec programme([Assembleur.element()]) :: [Assembleur.element()]
-  def programme(acteur) when is_list(acteur) do
+  @spec program([Assembler.element()]) :: [Assembler.element()]
+  def program(acteur) when is_list(acteur) do
     verifie_acteur!(acteur)
 
     init() ++
       vblank() ++
-      lire_pad() ++
+      read_pad() ++
       boucle() ++
-      [{:etiquette, :dma_source}, {:octets, octets_dma()}] ++
-      [{:etiquette, :acteur}] ++ acteur
+      [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
+      [{:label, :actor}] ++ acteur
   end
 
   defp verifie_acteur!(acteur) do
@@ -163,20 +163,20 @@ defmodule Potion.Noyau do
   @doc """
   L'adresse de l'OAM miroir — l'entrée 0 commence là.
   """
-  @spec oam_miroir() :: 0xC000
-  def oam_miroir, do: @oam_miroir
+  @spec oam_mirror() :: 0xC000
+  def oam_mirror, do: @oam_mirror
 
   @doc "La cellule d'état du pad, recomposée à chaque frame par le noyau."
   @spec pad() :: 0xC0A0
   def pad, do: @pad
 
   @doc "Le drapeau « frame prête » : levé par le handler, consommé par la boucle."
-  @spec drapeau() :: 0xC0A1
-  def drapeau, do: @drapeau
+  @spec frame_flag() :: 0xC0A1
+  def frame_flag, do: @drapeau
 
   @doc "La première adresse laissée à l'acteur."
-  @spec etat() :: 0xC100
-  def etat, do: @etat
+  @spec actor_state() :: 0xC100
+  def actor_state, do: @etat
 
   @doc "L'adresse de la routine DMA en HRAM."
   @spec hram_dma() :: 0xFF80
@@ -193,10 +193,10 @@ defmodule Potion.Noyau do
   installer les tuiles et la carte de fond, recopier le DMA en HRAM, poser les
   palettes, et seulement alors rallumer l'écran et ouvrir les interruptions.
   """
-  @spec init() :: [Assembleur.element()]
+  @spec init() :: [Assembler.element()]
   def init do
     [
-      {:etiquette, :init},
+      {:label, :init},
       {:di},
       {:ld, :sp, @pile},
       # DIV remis à zéro : le seul compteur qui tourne depuis le boot, et le
@@ -204,7 +204,7 @@ defmodule Potion.Noyau do
       # connu — une frame dorée ne se compare pas à une machine qui a démarré
       # à un autre instant.
       {:xor, :a, :a},
-      {:ldh, {:haut, @div}, :a}
+      {:ldh, {:high, @div}, :a}
     ] ++
       attente_vblank() ++
       [
@@ -212,30 +212,30 @@ defmodule Potion.Noyau do
         # bout à l'autre. Le même zéro sert à recentrer le fond — SCX et SCY
         # sortent du boot à zéro sur DMG, mais rien ne l'y oblige.
         {:xor, :a, :a},
-        {:ldh, {:haut, @lcdc}, :a},
-        {:ldh, {:haut, @scy}, :a},
-        {:ldh, {:haut, @scx}, :a}
+        {:ldh, {:high, @lcdc}, :a},
+        {:ldh, {:high, @scy}, :a},
+        {:ldh, {:high, @scx}, :a}
       ] ++
-      efface(@vram, @vram_octets, :efface_vram) ++
-      efface(@oam_miroir, @wram_efface, :efface_wram) ++
+      efface(@vram, @vram_octets, :clear_vram) ++
+      efface(@oam_mirror, @wram_efface, :clear_wram) ++
       carte_de_fond() ++
       tuiles() ++
       copie_dma() ++
       [
         {:ld, :a, @palette},
-        {:ldh, {:haut, @bgp}, :a},
-        {:ldh, {:haut, @obp0}, :a},
+        {:ldh, {:high, @bgp}, :a},
+        {:ldh, {:high, @obp0}, :a},
         # IF nettoyé avant d'ouvrir : l'attente de vblank ci-dessus a laissé
         # le bit 0 levé. Sans ce coup de balai, le premier EI servirait une
         # frame fantôme et l'acteur tournerait deux fois pour une seule dalle.
         {:xor, :a, :a},
-        {:ldh, {:haut, @irq_if}, :a},
+        {:ldh, {:high, @irq_if}, :a},
         {:ld, :a, 0x01},
-        {:ldh, {:haut, @irq_ie}, :a},
+        {:ldh, {:high, @irq_ie}, :a},
         {:ld, :a, @lcdc_marche},
-        {:ldh, {:haut, @lcdc}, :a},
+        {:ldh, {:high, @lcdc}, :a},
         {:ei},
-        {:jp, {:etiquette, :boucle}}
+        {:jp, {:label, :main_loop}}
       ]
   end
 
@@ -244,10 +244,10 @@ defmodule Potion.Noyau do
   # matériel ne propose aucun « attendre » qui ne soit pas une boucle.
   defp attente_vblank do
     [
-      {:etiquette, :attente_vblank},
-      {:ldh, :a, {:haut, @ly}},
+      {:label, :wait_vblank},
+      {:ldh, :a, {:high, @ly}},
       {:cp, :a, 144},
-      {:jr, :c, {:etiquette, :attente_vblank}}
+      {:jr, :c, {:label, :wait_vblank}}
     ]
   end
 
@@ -264,12 +264,12 @@ defmodule Potion.Noyau do
       {:ld, :hl, base},
       {:xor, :a, :a},
       {:ld, :b, 0},
-      {:etiquette, etiquette}
+      {:label, etiquette}
     ] ++
       List.duplicate({:ld, {:mem, :hl_inc}, :a}, div(octets, 256)) ++
       [
         {:dec, :b},
-        {:jr, :nz, {:etiquette, etiquette}}
+        {:jr, :nz, {:label, etiquette}}
       ]
   end
 
@@ -281,10 +281,10 @@ defmodule Potion.Noyau do
     [
       {:ld, :hl, @fond},
       {:ld, :a, 0x01},
-      {:etiquette, :carte_fond},
+      {:label, :bg_map},
       {:ld, {:mem, :hl_inc}, :a},
       {:bit, 2, :h},
-      {:jr, :z, {:etiquette, :carte_fond}}
+      {:jr, :z, {:label, :bg_map}}
     ]
   end
 
@@ -296,10 +296,10 @@ defmodule Potion.Noyau do
       {:ld, :hl, @vram},
       {:ld, :a, 0xFF},
       {:ld, :b, 16},
-      {:etiquette, :tuile_pleine},
+      {:label, :solid_tile},
       {:ld, {:mem, :hl_inc}, :a},
       {:dec, :b},
-      {:jr, :nz, {:etiquette, :tuile_pleine}}
+      {:jr, :nz, {:label, :solid_tile}}
     ]
   end
 
@@ -309,15 +309,15 @@ defmodule Potion.Noyau do
   # peuvent pas diverger.
   defp copie_dma do
     [
-      {:ld, :hl, {:etiquette, :dma_source}},
+      {:ld, :hl, {:label, :dma_source}},
       {:ld, :c, @hram_dma - 0xFF00},
-      {:ld, :b, byte_size(octets_dma())},
-      {:etiquette, :copie_dma},
+      {:ld, :b, byte_size(dma_bytes())},
+      {:label, :copy_dma},
       {:ld, :a, {:mem, :hl_inc}},
-      {:ldh, {:haut, :c}, :a},
+      {:ldh, {:high, :c}, :a},
       {:inc, :c},
       {:dec, :b},
-      {:jr, :nz, {:etiquette, :copie_dma}}
+      {:jr, :nz, {:label, :copy_dma}}
     ]
   end
 
@@ -335,10 +335,10 @@ defmodule Potion.Noyau do
   ne peut rien voir avant le RETI — et celui-ci dit ce que le drapeau signifie
   vraiment : « une frame a commencé », pas « l'OAM est publiée ».
   """
-  @spec vblank() :: [Assembleur.element()]
+  @spec vblank() :: [Assembler.element()]
   def vblank do
     [
-      {:etiquette, :vblank},
+      {:label, :vblank},
       {:push, :af},
       {:push, :bc},
       {:push, :de},
@@ -362,15 +362,15 @@ defmodule Potion.Noyau do
   machine que le contrôleur met à recopier l'OAM. Il n'y a aucun registre à
   scruter — le matériel n'annonce pas la fin d'un DMA, il faut la compter.
   """
-  @spec routine_dma() :: [Assembleur.element()]
-  def routine_dma do
+  @spec dma_routine() :: [Assembler.element()]
+  def dma_routine do
     [
-      {:ld, :a, div(@oam_miroir, 0x100)},
-      {:ldh, {:haut, @dma}, :a},
+      {:ld, :a, div(@oam_mirror, 0x100)},
+      {:ldh, {:high, @dma}, :a},
       {:ld, :a, 40},
-      {:etiquette, :attente},
+      {:label, :wait},
       {:dec, :a},
-      {:jr, :nz, {:etiquette, :attente}},
+      {:jr, :nz, {:label, :wait}},
       {:ret}
     ]
   end
@@ -382,11 +382,11 @@ defmodule Potion.Noyau do
   désignent des adresses absolues, et l'assembler à 0x0150 donnerait un saut
   relatif correct par accident (JR compte une distance) mais toute évolution —
   un `JP`, une table — sortirait fausse. Assemblée à part, la routine a aussi
-  son propre espace d'étiquettes : son `:attente` ne peut pas collisionner avec
+  son propre espace d'étiquettes : son `:wait` ne peut pas collisionner avec
   celles du noyau.
   """
-  @spec octets_dma() :: binary()
-  def octets_dma, do: Assembleur.assemble(routine_dma(), origine: @hram_dma)
+  @spec dma_bytes() :: binary()
+  def dma_bytes, do: Assembler.assemble(dma_routine(), origin: @hram_dma)
 
   # ══ Le pad ═══════════════════════════════════════════════════════════════════
 
@@ -410,9 +410,9 @@ defmodule Potion.Noyau do
   changement de sélection, et la première lecture peut mentir. Elle ne coûte
   rien et un jour elle nous évitera un bug qu'on ne saurait pas nommer.
   """
-  @spec lire_pad() :: [Assembleur.element()]
-  def lire_pad do
-    [{:etiquette, :lire_pad}] ++
+  @spec read_pad() :: [Assembler.element()]
+  def read_pad do
+    [{:label, :read_pad}] ++
       nappe(0x20) ++
       [{:ld, :b, :a}] ++
       nappe(0x10) ++
@@ -424,7 +424,7 @@ defmodule Potion.Noyau do
         # celui qu'un lecteur extérieur (le combo de reset du matériel, par
         # exemple) attend entre deux frames.
         {:ld, :a, 0x30},
-        {:ldh, {:haut, @p1}, :a},
+        {:ldh, {:high, @p1}, :a},
         {:ret}
       ]
   end
@@ -432,9 +432,9 @@ defmodule Potion.Noyau do
   defp nappe(selection) do
     [
       {:ld, :a, selection},
-      {:ldh, {:haut, @p1}, :a},
-      {:ldh, :a, {:haut, @p1}},
-      {:ldh, :a, {:haut, @p1}},
+      {:ldh, {:high, @p1}, :a},
+      {:ldh, :a, {:high, @p1}},
+      {:ldh, :a, {:high, @p1}},
       {:cpl},
       {:and, :a, 0x0F}
     ]
@@ -451,20 +451,20 @@ defmodule Potion.Noyau do
   seul cycle. Une boucle qui scruterait LY marcherait aussi, et dériverait dès
   que l'acteur grossirait.
   """
-  @spec boucle() :: [Assembleur.element()]
+  @spec boucle() :: [Assembler.element()]
   def boucle do
     [
-      {:etiquette, :boucle},
+      {:label, :main_loop},
       {:halt},
       # Réveil : d'où vient-il ? Sans drapeau levé, ce n'était pas une frame.
       {:ld, :a, {:mem, @drapeau}},
       {:and, :a, :a},
-      {:jr, :z, {:etiquette, :boucle}},
+      {:jr, :z, {:label, :main_loop}},
       {:xor, :a, :a},
       {:ld, {:mem, @drapeau}, :a},
-      {:call, {:etiquette, :lire_pad}},
-      {:call, {:etiquette, :acteur}},
-      {:jr, {:etiquette, :boucle}}
+      {:call, {:label, :read_pad}},
+      {:call, {:label, :actor}},
+      {:jr, {:label, :main_loop}}
     ]
   end
 end

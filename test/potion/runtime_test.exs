@@ -1,10 +1,10 @@
-defmodule Potion.NoyauTest do
+defmodule Potion.RuntimeTest do
   @moduledoc """
   Le noyau v0, vérifié là où ça compte : dans l'émulateur, frames déroulées.
 
   Aucun test ne relit les octets que le noyau émet — un assembleur qui se
   relit lui-même ne prouve rien de plus que sa propre cohérence, et
-  `Potion.AssembleurTest` s'en charge déjà sur les 500 instructions. Ici, la
+  `Potion.AssemblerTest` s'en charge déjà sur les 500 instructions. Ici, la
   seule question est : la ROM tourne-t-elle, et fait-elle ce qu'un jeu attend
   d'un runtime ? L'écran s'allume, l'OAM se publie, un sprite apparaît à la
   bonne place, le pad le déplace, et l'acteur tourne exactement une fois par
@@ -28,7 +28,7 @@ defmodule Potion.NoyauTest do
 
   alias Atomboy.Joypad
   alias Atomboy.Screen
-  alias Potion.Noyau
+  alias Potion.Runtime
   alias Potion.ROM
 
   # L'état de l'acteur de test, dans la page que le noyau lui laisse.
@@ -44,23 +44,23 @@ defmodule Potion.NoyauTest do
 
   describe "le programme" do
     test "l'acteur est encadré par le noyau, et nommé par lui" do
-      adresses = Potion.Assembleur.adresses(Noyau.programme(acteur()), origine: 0x0150)
+      adresses = Potion.Assembler.addresses(Runtime.program(acteur()), origin: 0x0150)
 
       # Le point d'entrée de la cartouche tombe sur l'init.
       assert adresses.init == 0x0150
       # Les deux étiquettes que le reste du monde connaît.
       assert Map.has_key?(adresses, :vblank)
-      assert Map.has_key?(adresses, :acteur)
+      assert Map.has_key?(adresses, :actor)
       # L'acteur est le dernier venu : tout le noyau le précède.
-      assert adresses.acteur > adresses.boucle
+      assert adresses.actor > adresses.main_loop
       # Et l'état de l'acteur de test tient dans la page que le noyau promet.
-      assert @compteur == Noyau.etat()
+      assert @compteur == Runtime.actor_state()
     end
 
     test "un acteur sans RET est refusé à l'assemblage, pas à l'exécution" do
       erreur =
         assert_raise ArgumentError, fn ->
-          Noyau.programme([{:ld, :a, 0x01}, {:ld, {:mem, 0xC000}, :a}])
+          Runtime.program([{:ld, :a, 0x01}, {:ld, {:mem, 0xC000}, :a}])
         end
 
       assert erreur.message =~ "ne finit pas par un RET"
@@ -70,7 +70,7 @@ defmodule Potion.NoyauTest do
       # LD A, 0xC0 / LDH (0x46), A / LD A, 40 / DEC A / JR NZ, -3 / RET —
       # la routine canonique, dix octets, écrite par l'assembleur et non à la
       # main.
-      assert Noyau.octets_dma() == <<0x3E, 0xC0, 0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9>>
+      assert Runtime.dma_bytes() == <<0x3E, 0xC0, 0xE0, 0x46, 0x3E, 0x28, 0x3D, 0x20, 0xFD, 0xC9>>
     end
   end
 
@@ -106,11 +106,11 @@ defmodule Potion.NoyauTest do
       {_pixels, _state, ram} = deroule(6)
 
       copiee =
-        for i <- 0..(byte_size(Noyau.octets_dma()) - 1),
+        for i <- 0..(byte_size(Runtime.dma_bytes()) - 1),
             into: <<>>,
             do: <<Map.get(ram, 0xFF80 + i)>>
 
-      assert copiee == Noyau.octets_dma()
+      assert copiee == Runtime.dma_bytes()
     end
   end
 
@@ -118,7 +118,7 @@ defmodule Potion.NoyauTest do
     test "l'OAM réelle reflète le miroir après un vblank" do
       {_pixels, _state, ram} = deroule(6)
 
-      miroir = for i <- 0..3, do: Map.get(ram, Noyau.oam_miroir() + i)
+      miroir = for i <- 0..3, do: Map.get(ram, Runtime.oam_mirror() + i)
 
       assert miroir == [@depart_y + 16, @depart_x + 8, 0x00, 0x00]
       assert for(i <- 0..3, do: Map.get(ram, 0xFE00 + i)) == miroir
@@ -180,19 +180,19 @@ defmodule Potion.NoyauTest do
     test "l'octet d'état est à l'endroit : d-pad en bas, boutons en haut" do
       {_pixels, state, ram} = deroule(5)
 
-      assert Map.get(ram, Noyau.pad()) == 0x00
+      assert Map.get(ram, Runtime.pad()) == 0x00
 
       # Start est le bit 3 de la nappe des boutons, donc le bit 7 de l'octet
       # recomposé.
       {state, ram} = frames(state, Joypad.set(ram, 0x0F, 0x0F - 0x08), 2)
-      assert Map.get(ram, Noyau.pad()) == 0x80
+      assert Map.get(ram, Runtime.pad()) == 0x80
 
       # Haut et A ensemble : une touche par nappe, deux quartets.
       {state, ram} = frames(state, Joypad.set(ram, 0x0F - 0x04, 0x0F - 0x01), 2)
-      assert Map.get(ram, Noyau.pad()) == 0x14
+      assert Map.get(ram, Runtime.pad()) == 0x14
 
       {_state, ram} = frames(state, Joypad.set(ram, 0x0F, 0x0F), 2)
-      assert Map.get(ram, Noyau.pad()) == 0x00
+      assert Map.get(ram, Runtime.pad()) == 0x00
       # Le noyau repose les deux nappes : le registre relit tout relâché.
       assert Map.get(ram, 0xFF00) == 0xFF
     end
@@ -211,7 +211,7 @@ defmodule Potion.NoyauTest do
     test "le drapeau se lève au vblank et la boucle le consomme" do
       {_pixels, state, ram} = deroule(5)
 
-      assert Map.get(ram, Noyau.drapeau()) == 0x00
+      assert Map.get(ram, Runtime.frame_flag()) == 0x00
       compteur = Map.get(ram, @compteur)
 
       # Une frame déroulée à la scanline, pour surprendre le noyau au travail.
@@ -223,7 +223,7 @@ defmodule Potion.NoyauTest do
           Screen.step_line(state, rom(), ram, ly)
         end)
 
-      assert Map.get(ram, Noyau.drapeau()) == 0x01
+      assert Map.get(ram, Runtime.frame_flag()) == 0x01
       assert Map.get(ram, @compteur) == compteur
 
       # Le reste du vblank : la boucle se réveille, consomme le drapeau et
@@ -233,7 +233,7 @@ defmodule Potion.NoyauTest do
           Screen.step_line(state, rom(), ram, ly)
         end)
 
-      assert Map.get(ram, Noyau.drapeau()) == 0x00
+      assert Map.get(ram, Runtime.frame_flag()) == 0x00
       assert Map.get(ram, @compteur) == compteur + 1
     end
 
@@ -254,7 +254,7 @@ defmodule Potion.NoyauTest do
   # ══ Le harnais ═══════════════════════════════════════════════════════════════
 
   # La ROM du noyau et de l'acteur de test.
-  defp rom, do: ROM.construit(Noyau.programme(acteur()), vblank: :vblank, titre: "NOYAU")
+  defp rom, do: ROM.build(Runtime.program(acteur()), vblank: :vblank, title: "NOYAU")
 
   # `frames` frames depuis le boot ; la dernière rendue si demandé.
   defp deroule(nombre, opts \\ []) do
@@ -293,7 +293,7 @@ defmodule Potion.NoyauTest do
   # Il tient dans la page 0xC100 que le noyau lui laisse — et compte sur le
   # zéro que l'init y a posé pour savoir qu'il n'est pas encore installé.
   defp acteur do
-    oam = Noyau.oam_miroir()
+    oam = Runtime.oam_mirror()
 
     [
       {:ld, :a, {:mem, @compteur}},
@@ -301,23 +301,23 @@ defmodule Potion.NoyauTest do
       {:ld, {:mem, @compteur}, :a},
       {:ld, :a, {:mem, @installe}},
       {:and, :a, :a},
-      {:jr, :nz, {:etiquette, :acteur_maj}},
+      {:jr, :nz, {:label, :actor_maj}},
       {:ld, :a, 0x01},
       {:ld, {:mem, @installe}, :a},
       {:ld, :a, @depart_x},
       {:ld, {:mem, @sprite_x}, :a},
       {:ld, :a, @depart_y},
       {:ld, {:mem, @sprite_y}, :a},
-      {:etiquette, :acteur_maj},
-      {:ld, :a, {:mem, Noyau.pad()}},
+      {:label, :actor_maj},
+      {:ld, :a, {:mem, Runtime.pad()}},
       {:bit, 0, :a},
-      {:jr, :z, {:etiquette, :acteur_publie}},
+      {:jr, :z, {:label, :actor_publie}},
       {:ld, :a, {:mem, @sprite_x}},
       {:inc, :a},
       {:ld, {:mem, @sprite_x}, :a},
       # L'entrée 0 de l'OAM miroir : le décalage matériel est du ressort de
       # l'acteur, le noyau ne connaît que des octets d'OAM.
-      {:etiquette, :acteur_publie},
+      {:label, :actor_publie},
       {:ld, :a, {:mem, @sprite_y}},
       {:add, :a, 16},
       {:ld, {:mem, oam}, :a},

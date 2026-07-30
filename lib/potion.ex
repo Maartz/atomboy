@@ -1,4 +1,4 @@
-defmodule Potion.ErreurCompilation do
+defmodule Potion.CompileError do
   @moduledoc """
   Ce que le v0 ne sait pas compiler, dit à la compilation du module hôte.
 
@@ -36,8 +36,8 @@ defmodule Potion do
       end
 
       MonJeu.rom()        # la ROM, binaire, 32 768 octets
-      MonJeu.programme()  # le programme assembleur, pour le lire
-      MonJeu.adresses()   # où vivent x et y en WRAM
+      MonJeu.program()  # le programme assembleur, pour le lire
+      MonJeu.addresses()   # où vivent x et y en WRAM
 
   Ces onze lignes font un carré noir au milieu de l'écran, qui se déplace au
   pouce. Elles ne font rien d'autre — et c'est tout l'objet du v0 : que la
@@ -64,7 +64,7 @@ defmodule Potion do
   qui n'a pas cours.
 
   Ce qui ne se traduit pas se refuse, et se refuse **à la compilation** : `x = x
-  * 2` fait échouer `mix compile` avec une `Potion.ErreurCompilation` qui montre
+  * 2` fait échouer `mix compile` avec une `Potion.CompileError` qui montre
   l'AST rejeté et énumère ce que le v0 sait faire. Une ROM qui compile est une
   ROM dont chaque ligne existe en SM83.
 
@@ -97,7 +97,7 @@ defmodule Potion do
   de démarrage, le noyau l'appelle une fois par frame et c'est tout. Le
   compilateur alloue donc une cellule de plus — le drapeau « installé », que le
   jeu ne déclare pas et ne voit jamais — et fait reconnaître à la première frame
-  qu'elle est la première. `Potion.Compilo` détaille ce pattern.
+  qu'elle est la première. `Potion.Compiler` détaille ce pattern.
 
   Le v0 n'accepte **qu'un acteur par module** : l'ordonnanceur du noyau n'a
   qu'un slot, et un second `defactor` compilerait un jeu dont la moitié ne
@@ -127,18 +127,18 @@ defmodule Potion do
 
   ## Les modules
 
-    * `Potion.Compilo` — l'AST restreint vers le fragment assembleur, et tous
+    * `Potion.Compiler` — l'AST restreint vers le fragment assembleur, et tous
       les messages de refus.
-    * `Potion.Noyau` — le runtime : l'init, le vblank, le DMA, le pad, la
+    * `Potion.Runtime` — le runtime : l'init, le vblank, le DMA, le pad, la
       boucle qui appelle l'acteur.
-    * `Potion.Assembleur` — les tuples vers les octets.
+    * `Potion.Assembler` — les tuples vers les octets.
     * `Potion.ROM` — la cartouche de 32 Ko, en-tête et sommes comprises.
   """
 
-  alias Potion.Assembleur
-  alias Potion.Compilo
-  alias Potion.ErreurCompilation
-  alias Potion.Noyau
+  alias Potion.Assembler
+  alias Potion.Compiler
+  alias Potion.CompileError
+  alias Potion.Runtime
 
   # Quinze caractères, c'est ce que l'en-tête de cartouche loge.
   @titre_max 15
@@ -167,8 +167,8 @@ defmodule Potion do
     unique!(module, nom)
 
     {declarations, every_frame} = decoupe!(corps, nom)
-    allocation = Compilo.alloue(declarations)
-    fragment = Compilo.compile(every_frame, allocation)
+    allocation = Compiler.allocate(declarations)
+    fragment = Compiler.compile(every_frame, allocation)
     verifie!(fragment, nom)
 
     Module.put_attribute(module, :potion_acteur, nom)
@@ -177,21 +177,21 @@ defmodule Potion do
       @doc """
       Le programme assembleur complet — le noyau, puis l'acteur `#{inspect(unquote(nom))}`.
 
-      Au format de `Potion.Assembleur` : une liste de tuples, qu'on peut lire,
-      découper, ou passer à `Potion.Assembleur.adresses/2` pour savoir où tout
+      Au format de `Potion.Assembler` : une liste de tuples, qu'on peut lire,
+      découper, ou passer à `Potion.Assembler.adresses/2` pour savoir où tout
       est tombé.
       """
-      def programme do
-        Potion.Noyau.programme(unquote(Macro.escape(fragment)))
+      def program do
+        Potion.Runtime.program(unquote(Macro.escape(fragment)))
       end
 
       @doc """
       La ROM, 32 768 octets, prête à graver ou à donner à `Atomboy.Screen`.
       """
       def rom do
-        Potion.ROM.construit(programme(),
+        Potion.ROM.build(program(),
           vblank: :vblank,
-          titre: unquote(titre(module))
+          title: unquote(titre(module))
         )
       end
 
@@ -202,8 +202,8 @@ defmodule Potion do
       Les voici, pour qui veut les lire depuis l'extérieur — un émulateur, un
       test, un débogueur.
       """
-      def adresses do
-        unquote(Macro.escape(allocation.cellules))
+      def addresses do
+        unquote(Macro.escape(allocation.cells))
       end
     end
   end
@@ -240,7 +240,7 @@ defmodule Potion do
   defp nom!(nom, _module) when is_atom(nom), do: nom
 
   defp nom!(autre, module) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     nom d'acteur qui n'est pas un atome, dans #{inspect(module)} :
 
         #{Macro.to_string(autre)}
@@ -258,7 +258,7 @@ defmodule Potion do
         :ok
 
       premier ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         second acteur dans #{inspect(module)} : #{inspect(nom)}, après #{inspect(premier)}.
 
         L'ordonnanceur du v0 n'a qu'un slot — le noyau appelle un seul `CALL` par \
@@ -292,7 +292,7 @@ defmodule Potion do
           {declarations, {:corps, bloc}}
 
         autre ->
-          raise ErreurCompilation, """
+          raise CompileError, """
           énoncé inconnu dans `defactor #{inspect(nom)}` :
 
               #{Macro.to_string(autre)}
@@ -310,7 +310,7 @@ defmodule Potion do
     end)
     |> case do
       {_declarations, nil} ->
-        raise ErreurCompilation, """
+        raise CompileError, """
         acteur sans `every_frame` : #{inspect(nom)}
 
         Un acteur est du code appelé une fois par frame. Sans `every_frame`, le \
@@ -334,7 +334,7 @@ defmodule Potion do
   defp enonces(seul), do: [seul]
 
   defp doublon!(mot, nom) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     `#{mot}` écrit deux fois dans `defactor #{inspect(nom)}`.
 
     Un acteur a un seul état et un seul code de frame. Deux `#{mot}` ne diraient \
@@ -348,11 +348,11 @@ defmodule Potion do
   # compilé : un `if` dont le bloc dépasse la portée d'un JR se voit dans `mix
   # compile`, pas trois semaines plus tard sur une flashcart.
   defp verifie!(fragment, nom) do
-    Assembleur.assemble(Noyau.programme(fragment), origine: 0x0150)
+    Assembler.assemble(Runtime.program(fragment), origin: 0x0150)
     :ok
   rescue
     erreur in ArgumentError ->
-      reraise ErreurCompilation,
+      reraise CompileError,
               [
                 message: """
                 l'acteur #{inspect(nom)} ne s'assemble pas.
@@ -377,7 +377,7 @@ defmodule Potion do
   end
 
   defp hors_acteur!(mot, forme) do
-    raise ErreurCompilation, """
+    raise CompileError, """
     `#{mot}` employé hors d'un `defactor`.
 
     Cette forme n'est pas du code : c'est une partie de la déclaration d'un \

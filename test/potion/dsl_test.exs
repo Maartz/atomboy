@@ -15,7 +15,7 @@ defmodule Potion.DSLTest do
   volontaire : la vitrine du langage est aussi son test principal, et elle ne
   peut donc pas pourrir.
 
-  Le calendrier du démarrage est celui du noyau (voir `Potion.NoyauTest`) :
+  Le calendrier du démarrage est celui du noyau (voir `Potion.RuntimeTest`) :
   l'init prend deux frames, l'acteur tourne pour la première fois au vblank de
   la troisième, et le DMA publie son OAM à la suivante. On déroule cinq frames
   avant de regarder l'état, six avant de regarder l'écran.
@@ -25,9 +25,9 @@ defmodule Potion.DSLTest do
 
   alias Atomboy.Joypad
   alias Atomboy.Screen
-  alias Potion.Assembleur
+  alias Potion.Assembler
 
-  doctest Potion.Compilo
+  doctest Potion.Compiler
 
   # Les nappes du joypad, telles que `Atomboy.Joypad.set/3` les veut : un
   # quartet par nappe, à 1 = relâché. Le matériel est actif à zéro, et c'est le
@@ -100,7 +100,7 @@ defmodule Potion.DSLTest do
 
     test "Droite déplace le sprite, et l'OAM suit" do
       {_pixels, state, ram} = deroule(Hero, 5)
-      adresses = Hero.adresses()
+      adresses = Hero.addresses()
 
       {_state, ram} = frames(Hero, state, Joypad.set(ram, @droite, @relache), 4)
 
@@ -115,7 +115,7 @@ defmodule Potion.DSLTest do
 
     test "Gauche, Haut et Bas déplacent le sprite dans leur sens" do
       {_pixels, state, ram} = deroule(Hero, 5)
-      adresses = Hero.adresses()
+      adresses = Hero.addresses()
 
       {state, ram} = frames(Hero, state, Joypad.set(ram, @gauche, @relache), 3)
       assert position(ram, adresses) == {@depart_x - 3, @depart_y}
@@ -153,7 +153,7 @@ defmodule Potion.DSLTest do
   describe "les valeurs initiales" do
     test "les cellules allouées portent 80 et 72, sans que rien ne soit touché" do
       {_pixels, state, ram} = deroule(Hero, 5)
-      adresses = Hero.adresses()
+      adresses = Hero.addresses()
 
       assert Map.get(ram, adresses.x) == @depart_x
       assert Map.get(ram, adresses.y) == @depart_y
@@ -170,33 +170,33 @@ defmodule Potion.DSLTest do
     test "l'allocation est celle que le compilateur promet" do
       # Dans l'ordre de déclaration, à partir de la première adresse que le
       # noyau laisse à l'acteur.
-      assert Hero.adresses() == %{x: Potion.Noyau.etat(), y: Potion.Noyau.etat() + 1}
+      assert Hero.addresses() == %{x: Potion.Runtime.actor_state(), y: Potion.Runtime.actor_state() + 1}
 
       # Le drapeau vient après, et le jeu ne le voit pas : il n'est pas dans
       # `adresses/0`, mais il est bien à 0xC102 et il est levé.
       {_pixels, _state, ram} = deroule(Hero, 5)
-      assert Map.get(ram, Potion.Noyau.etat() + 2) == 0x01
+      assert Map.get(ram, Potion.Runtime.actor_state() + 2) == 0x01
     end
   end
 
   describe "le programme engendré" do
     test "il est inspectable, et le noyau y a nommé l'acteur" do
-      programme = Hero.programme()
+      programme = Hero.program()
 
       assert is_list(programme)
-      assert {:etiquette, :acteur} in programme
+      assert {:label, :actor} in programme
 
-      adresses = Assembleur.adresses(programme, origine: 0x0150)
+      adresses = Assembler.addresses(programme, origin: 0x0150)
 
       assert adresses.init == 0x0150
-      assert Map.has_key?(adresses, :acteur)
-      assert adresses.acteur > adresses.boucle
+      assert Map.has_key?(adresses, :actor)
+      assert adresses.actor > adresses.main_loop
 
       # Les étiquettes du compilateur, toutes préfixées : une par `if`, plus
       # celle de l'installation.
-      assert Map.has_key?(adresses, :potion_installe)
+      assert Map.has_key?(adresses, :potion_installed)
 
-      for n <- 0..3, do: assert(Map.has_key?(adresses, :"potion_fin_#{n}"))
+      for n <- 0..3, do: assert(Map.has_key?(adresses, :"potion_end_#{n}"))
 
       # Et le fragment finit par le RET que le noyau exige.
       assert List.last(programme) == {:ret}
@@ -212,10 +212,10 @@ defmodule Potion.DSLTest do
 
   describe "le compilateur, sans macro" do
     test "un `quote` et une allocation suffisent à obtenir un fragment" do
-      allocation = Potion.Compilo.alloue(x: 80)
+      allocation = Potion.Compiler.allocate(x: 80)
 
       fragment =
-        Potion.Compilo.compile(
+        Potion.Compiler.compile(
           quote do
             if pressed?(:right), do: x = x + 1
           end,
@@ -225,8 +225,8 @@ defmodule Potion.DSLTest do
       # L'installation, la condition, l'incrément, le RET — sans `defmodule`,
       # sans `use`, sans hôte. Le compilateur est une fonction sur des arbres,
       # et c'est ce qui le rend débogable à la main.
-      assert {:ld, :a, {:mem, allocation.installe}} == hd(fragment)
-      assert {:etiquette, :potion_installe} in fragment
+      assert {:ld, :a, {:mem, allocation.installed}} == hd(fragment)
+      assert {:label, :potion_installed} in fragment
       assert {:bit, 0, :a} in fragment
       assert {:add, :a, 1} in fragment
       assert List.last(fragment) == {:ret}
@@ -236,7 +236,7 @@ defmodule Potion.DSLTest do
   describe "un littéral et une variable dans le même sprite" do
     test "les deux entrées d'OAM portent ce que le jeu a écrit" do
       {_pixels, state, ram} = deroule(Melange, 5)
-      adresses = Melange.adresses()
+      adresses = Melange.addresses()
 
       # `largeur = 5` est une affectation sèche : elle écrase la valeur
       # initiale, à chaque frame.
@@ -447,7 +447,7 @@ defmodule Potion.DSLTest do
   # ── Compiler un jeu pour de vrai, et attendre qu'il soit refusé ─────────────
 
   # Le refus se joue à la compilation du module hôte : ces tests compilent donc
-  # du texte, comme `mix compile` le ferait. Un appel direct à `Potion.Compilo`
+  # du texte, comme `mix compile` le ferait. Un appel direct à `Potion.Compiler`
   # testerait la même exception, mais pas le chemin par lequel un programmeur la
   # rencontre — et c'est ce chemin qui est la promesse du langage.
   defp refuse!(module, declarations, enonce) do
@@ -468,7 +468,7 @@ defmodule Potion.DSLTest do
 
   defp compile_refusee!(source) do
     erreur =
-      assert_raise Potion.ErreurCompilation, fn ->
+      assert_raise Potion.CompileError, fn ->
         ExUnit.CaptureIO.capture_io(:stderr, fn -> Code.compile_string(source) end)
       end
 

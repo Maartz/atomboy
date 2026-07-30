@@ -67,7 +67,7 @@ defmodule Hero do
 end
 ```
 
-`mix run jeux/hero.exs` compiles that into `jeux/hero.gb` — the GIF
+`mix run games/hero.exs` compiles that into `games/hero.gb` — the GIF
 above is that ROM, running in atomboy. Variables are WRAM cells,
 `x = x + 1` is three SM83 instructions that wrap at 255, and anything
 the console cannot do is refused at `mix compile` time with a message
