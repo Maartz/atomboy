@@ -37,3 +37,4 @@ atomboy_mac
 atomboy_mac.tar
 __pycache__/
 .claude/
+.DS_Store
