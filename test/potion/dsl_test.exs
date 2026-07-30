@@ -309,6 +309,29 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A ball that turns around: `vx` is a direction, and reversing it is the whole
+  # of a bounce. This is the one game that would not compile without the sign --
+  # the same `x = x + vx` has to walk both ways depending on a byte.
+  defmodule Rebound do
+    @moduledoc false
+    use Potion
+
+    defactor :ball do
+      variables x: 100, vx: 1, facing: 0
+
+      every_frame do
+        x = x + vx
+
+        if x > 120, do: vx = -vx
+        if x < 20, do: vx = -vx
+
+        if negative?(vx), do: facing = 1, else: facing = 0
+
+        sprite(0, x: x, y: 72, tile: 0)
+      end
+    end
+  end
+
   # Two actors in one game: each with its own cells, its own sprite, its own
   # pace. `follower` reads a cell `leader` wrote earlier in the same frame --
   # which only means anything because the kernel calls the slots in declaration
@@ -516,6 +539,124 @@ defmodule Potion.DSLTest do
     end
   end
 
+  describe "the sign" do
+    test "the ball walks forward, turns around, and walks back" do
+      addresses = Rebound.addresses()
+
+      # Three turns of the actor, all forward.
+      {_pixels, _state, ram} = run_frames(Rebound, 5)
+      assert Map.get(ram, addresses.x) == 103
+      assert Map.get(ram, addresses.vx) == 1
+
+      # Past 120 the direction is reversed, and `x = x + vx` -- the very same
+      # sentence -- now walks the other way. 121 was the far point, and by the
+      # 25th frame the ball has come back two steps.
+      {_pixels, _state, ram} = run_frames(Rebound, 25)
+      assert Map.get(ram, addresses.x) == 119
+      assert Map.get(ram, addresses.vx) == 0xFF, "vx should hold -1 in two's complement"
+    end
+
+    test "and turns around again at the other end, without ever leaving the court" do
+      # 19 is reached at the 125th frame, and reversed on the spot.
+      {_pixels, _state, ram} = run_frames(Rebound, 130)
+      addresses = Rebound.addresses()
+
+      assert Map.get(ram, addresses.x) == 24
+      assert Map.get(ram, addresses.vx) == 1
+
+      # The invariant the two bounces exist for: the ball never wraps past the
+      # walls. An unsigned `x = x + vx` would have run x through 0 to 255 on the
+      # first step back.
+      {_pixels, _state, ram} = run_frames(Rebound, 130)
+
+      x = Map.get(ram, addresses.x)
+      assert x in 19..121, "the ball left the court at #{x}"
+    end
+
+    test "`negative?` follows the sign bit, frame by frame" do
+      addresses = Rebound.addresses()
+
+      {_pixels, _state, ram} = run_frames(Rebound, 5)
+      assert Map.get(ram, addresses.facing) == 0
+
+      {_pixels, _state, ram} = run_frames(Rebound, 25)
+      assert Map.get(ram, addresses.facing) == 1
+    end
+
+    test "a negative literal is folded into its byte, not computed" do
+      allocation = Potion.Compiler.allocate(vx: 0)
+      body = {:=, [], [{:vx, [], nil}, {:-, [], [1]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, 0xFF} in elements
+      refute {:cpl} in elements
+    end
+
+    test "negating a variable is a flip and a step" do
+      allocation = Potion.Compiler.allocate(vx: 0)
+      body = {:=, [], [{:vx, [], nil}, {:-, [], [{:vx, [], nil}]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:cpl} in elements
+      assert {:inc, :a} in elements
+    end
+
+    test "`negative?` is one bit test, and the jump is over the body" do
+      allocation = Potion.Compiler.allocate(vx: 0, hit: 0)
+      condition = {:negative?, [], [{:vx, [], nil}]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, {:mem, allocation.cells.vx}} in elements
+      assert {:bit, 7, :a} in elements
+      assert Enum.any?(elements, &match?({:jr, :z, {:label, _}}, &1))
+      refute Enum.any?(elements, &match?({:cp, :a, _}, &1))
+    end
+
+    test "both ends of the byte are reachable, and neither one past" do
+      # -128 and 255 are the same 256 values read two ways, and a game is
+      # allowed to name either end: 0x80 is the largest step backwards, 0xFF
+      # the largest forwards. The boundary is stated because it is the one
+      # place a range can be off by one and still look right everywhere else.
+      assert Potion.Compiler.allocate(vx: -128).initial == %{vx: 0x80}
+      assert Potion.Compiler.allocate(vx: 255).initial == %{vx: 0xFF}
+
+      allocation = Potion.Compiler.allocate(vx: 0)
+
+      for {written, byte} <- [{{:-, [], [128]}, 0x80}, {255, 0xFF}] do
+        body = {:=, [], [{:vx, [], nil}, written]}
+        assert {:ld, :a, byte} in Potion.Compiler.compile(body, allocation)
+      end
+
+      for outside <- [{:-, [], [129]}, 256] do
+        body = {:=, [], [{:vx, [], nil}, outside]}
+
+        assert_raise Potion.CompileError, ~r/outside a byte/, fn ->
+          Potion.Compiler.compile(body, allocation)
+        end
+      end
+
+      for outside <- [-129, 256] do
+        assert_raise Potion.CompileError, ~r/initial value outside a byte/, fn ->
+          Potion.Compiler.allocate(vx: outside)
+        end
+      end
+    end
+
+    test "equality takes a negative literal, since it orders nothing" do
+      allocation = Potion.Compiler.allocate(vx: 0, hit: 0)
+      condition = {:==, [], [{:vx, [], nil}, {:-, [], [1]}]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:cp, :a, 0xFF} in elements
+    end
+  end
+
   describe "several actors" do
     test "each one gets its own cells, side by side in the page" do
       addresses = Pair.addresses()
@@ -637,6 +778,77 @@ defmodule Potion.DSLTest do
   end
 
   describe "what the v0 refuses to compile" do
+    test "an ordering against a negative literal, which would never be taken" do
+      message =
+        reject!("Rejected.SignedOrdering", "variables vx: 1", "if vx < -1, do: vx = 1")
+
+      assert message =~ "ordering against a negative literal"
+      assert message =~ "negative?(vx)"
+      assert message =~ "never taken"
+    end
+
+    test "each of the four orderings refuses it, and neither equality does" do
+      for op <- ["<", ">", "<=", ">="] do
+        message =
+          reject!(
+            "Rejected.Ordering#{:erlang.phash2(op)}",
+            "variables vx: 1",
+            "if vx #{op} -1, do: vx = 1"
+          )
+
+        assert message =~ "ordering against a negative literal",
+               "`#{op}` let a negative literal through"
+      end
+
+      # `==` and `!=` compile, and the game they make is a real one: `vx` starts
+      # at -1, so the branch is taken on the first frame.
+      for op <- ["==", "!="] do
+        {[{module, _} | _], _stderr} =
+          ExUnit.CaptureIO.with_io(:stderr, fn ->
+            Code.compile_string("""
+            defmodule Accepted.Equality#{:erlang.phash2(op)} do
+              use Potion
+
+              defactor :sign do
+                variables vx: -1, hit: 0
+
+                every_frame do
+                  if vx #{op} -1, do: hit = 1
+                end
+              end
+            end
+            """)
+          end)
+
+        {_pixels, _state, ram} = run_frames(module, 5)
+
+        expected = if op == "==", do: 1, else: 0
+        assert Map.get(ram, module.addresses().hit) == expected
+      end
+    end
+
+    test "a literal below -128, which no byte holds either way" do
+      message = reject!("Rejected.TooNegative", "variables vx: 1", "vx = -129")
+
+      assert message =~ "outside a byte"
+      assert message =~ "-128 to 255"
+    end
+
+    test "an initial value below -128" do
+      message = reject!("Rejected.NegativeInitial", "variables vx: -129", "vx = 1")
+
+      assert message =~ "initial value outside a byte"
+      assert message =~ "-128 to 255"
+    end
+
+    test "`negative?` of something that is not a variable" do
+      message =
+        reject!("Rejected.SignOfLiteral", "variables vx: 1", "if negative?(3), do: vx = 1")
+
+      assert message =~ "condition outside the subset"
+      assert message =~ "negative?"
+    end
+
     test "an expression outside the subset" do
       message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
 

@@ -26,7 +26,9 @@ defmodule Potion do
           variables x: 80, y: 72
 
           every_frame do
-            if pressed?(:right), do: x = x + 1
+            if negative?(vx), do: vx = 1       is the sign bit set
+
+      if pressed?(:right), do: x = x + 1
             if pressed?(:left), do: x = x - 1
             if pressed?(:up), do: y = y - 1
             if pressed?(:down), do: y = y + 1
@@ -112,6 +114,9 @@ defmodule Potion do
 
       background(2, 1, digit: score)     a digit on the background layer
       background(0, 0, tile: 0)          any tile, by index
+
+      vx = -1                            a negative literal, two's complement
+      vx = -vx                           and the sentence a bounce is made of
 
       x = 5                              a constant into a cell
       x = y                              one cell into another

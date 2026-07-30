@@ -42,24 +42,45 @@ defmodule Potion.Compiler do
   it guards against it.
 
   Everything else is refused when the host module compiles. `x = x * 2` does not
-  compile because the SM83 has no multiplication; `x = x + y` does not compile
-  because memory-to-memory addition requires saving A or using HL, and the v0 has
-  no register policy. The second will come back; the first will become a loop of
+  compile because the SM83 has no multiplication; it will become a loop of
   additions the day the language knows how to write one.
+
+  ## The sign
+
+  A byte has no sign of its own; the notation does.
+
+      vx = -1        LD A, 255
+      x = x + vx     ADD A, (HL)      -- and x goes down by one
+      vx = -vx       CPL / INC A
+
+  `-1` is how a game writes the byte `0xFF` when it means *one step backwards*,
+  and nothing beyond the notation is needed to make it work: two's complement is
+  built so that adding 255 and subtracting 1 leave the same byte behind. The
+  arithmetic was already signed — it just had no way to be told so.
+
+  What does *not* come for free is ordering. `CP` is an unsigned subtraction and
+  the SM83 has no overflow flag, so `if vx < 0` cannot be spelled without
+  biasing both sides, and no byte is below zero unsigned: it would compile to
+  "never", quietly. So the four ordering comparisons refuse a negative literal,
+  and the sign gets its own question instead:
+
+      if negative?(vx), do: ...     BIT 7, A / JR Z
+
+  `==` and `!=` take one anyway — equality is equality of bytes, and `0xFF` is
+  `0xFF` under either reading.
 
   ## The conditions
 
-  An `if` asks one of two things: a pad key, or a variable weighed against a
-  literal.
+  An `if` asks one of three things: a pad key, the sign of a variable, or a
+  variable weighed against a byte.
 
       if pressed?(:right), do: x = x + 1
+      if negative?(vx), do: x = 0
       if y > 140, do: y = 0
       if going_down == 1, do: y = y + 2, else: y = y - 2
 
   The six comparisons are `==`, `!=`, `<`, `>`, `<=` and `>=`, with the variable
-  on the left and a byte on the right. Two variables cannot be compared for the
-  same reason `x = x + y` does not compile: `CP` reads memory only through HL,
-  and there is still no register policy.
+  on the left and, on the right, a literal or another variable.
 
   All of them come down to `CP n`, a subtraction whose result is thrown away and
   whose flags say everything: `Z` that the two were equal, `C` that the variable
@@ -121,6 +142,12 @@ defmodule Potion.Compiler do
 
       iex> Potion.Compiler.allocate(x: 80, y: 72).installed
       0xC102
+
+  An initial value may be written negative, and is laid down as the byte two's
+  complement makes of it — a ball that starts by going left says so:
+
+      iex> Potion.Compiler.allocate(vx: -1).initial
+      %{vx: 0xFF}
   """
   @spec allocate(keyword(), keyword()) :: allocation()
   def allocate(declarations, opts \\ []) do
@@ -154,23 +181,9 @@ defmodule Potion.Compiler do
   def next_free(allocation), do: allocation.installed + 1
 
   defp declarations!(declarations) when is_list(declarations) do
-    Enum.each(declarations, fn
-      {name, value} when is_atom(name) and is_integer(value) and value in 0..255 ->
-        :ok
-
+    Enum.map(declarations, fn
       {name, value} when is_atom(name) ->
-        raise CompileError, """
-        initial value outside a byte, in `variables`: #{inspect(name)}
-
-            #{Macro.to_string(value)}
-
-        Rejected AST: #{inspect(value)}
-
-        A Potion variable is a cell of WRAM: its initial value is an integer \
-        literal from 0 to 255. It is laid down as it stands on the first turn, \
-        with no computation — there is nobody to compute anything before the \
-        actor runs.
-        """
+        {name, initial!(name, value)}
 
       other ->
         raise CompileError, """
@@ -181,8 +194,6 @@ defmodule Potion.Compiler do
             variables x: 80, y: 72
         """
     end)
-
-    declarations
   end
 
   defp declarations!(other) do
@@ -196,6 +207,27 @@ defmodule Potion.Compiler do
     The form is `variables x: 80, y: 72` — a name, a byte, and one cell of WRAM \
     per name.
     """
+  end
+
+  defp initial!(name, value) do
+    case fold(value) do
+      {:ok, folded} when folded in -128..255 ->
+        two_complement(folded)
+
+      _ ->
+        raise CompileError, """
+        initial value outside a byte, in `variables`: #{inspect(name)}
+
+            #{Macro.to_string(value)}
+
+        Rejected AST: #{inspect(value)}
+
+        A Potion variable is a cell of WRAM: its initial value is an integer \
+        literal from -128 to 255. It is laid down as it stands on the first \
+        turn, with no computation — there is nobody to compute anything before \
+        the actor runs.
+        """
+    end
   end
 
   defp duplicates!(names, declarations) do
@@ -405,9 +437,28 @@ defmodule Potion.Compiler do
      ], counter}
   end
 
+  # Bit 7 *is* the sign, so the question the SM83 already answers is the one the
+  # language asks. `BIT 7, A` sets Z when the bit is clear -- that is, when the
+  # value is not negative -- and Z is exactly the jump away from the body.
+  defp condition!(
+         {:negative?, _, [{name, _, context}]},
+         otherwise,
+         allocation,
+         statement,
+         counter
+       )
+       when is_atom(name) and is_atom(context) do
+    {[
+       {:ld, :a, {:mem, cell!(name, allocation, statement)}},
+       {:bit, 7, :a},
+       {:jr, :z, {:label, otherwise}}
+     ], counter}
+  end
+
   defp condition!({op, _, [left, right]}, otherwise, allocation, statement, counter)
        when op in [:==, :!=, :<, :>, :<=, :>=] do
     address = cell!(left, allocation, statement)
+    if op in [:<, :>, :<=, :>=], do: unsigned!(right, statement)
     {setup, operand} = term(right, allocation, statement)
     {jumps, counter} = skip_unless(op, otherwise, allocation, counter)
 
@@ -416,6 +467,41 @@ defmodule Potion.Compiler do
 
   defp condition!(condition, _otherwise, _allocation, statement, _counter) do
     reject_condition!(condition, statement)
+  end
+
+  # An ordering against a negative literal is refused rather than emitted.
+  #
+  # `CP` is an unsigned subtraction, and the SM83 has no overflow flag: there is
+  # no ordering that reads 0xFF as -1 without biasing both sides by 0x80 first.
+  # Emitting that quietly would make `vx < 0` and `vx < 1` two different
+  # orderings of the same byte, and the plain reading -- unsigned -- would turn
+  # `vx < 0` into "never". So the v0 keeps one ordering, the console's, and hands
+  # the sign its own question.
+  #
+  # `==` and `!=` are let through: equality does not order anything, and 0xFF is
+  # 0xFF under either reading.
+  defp unsigned!(right, statement) do
+    case fold(right) do
+      {:ok, value} when value < 0 ->
+        raise CompileError, """
+        ordering against a negative literal: #{Macro.to_string(right)}
+
+            #{one_line(statement)}
+
+        A comparison in Potion is the console's: `CP` subtracts without a sign, \
+        and no byte is below zero that way -- this would compile to a branch \
+        never taken. What the hardware does answer, in one instruction, is \
+        whether the sign bit is set:
+
+            if negative?(vx), do: vx = 1
+
+        `==` and `!=` take a negative literal as they stand: 0xFF is 0xFF \
+        whichever way it is read.
+        """
+
+      _ ->
+        :ok
+    end
   end
 
   # `CP n` is a subtraction whose result is thrown away: Z says the two were
@@ -491,6 +577,22 @@ defmodule Potion.Compiler do
     [{:ld, :a, {:mem, cell!(name, allocation, statement)}}]
   end
 
+  defp load({:-, _, [literal]}, _allocation, statement) when is_integer(literal) do
+    [{:ld, :a, byte!(-literal, statement)}]
+  end
+
+  # `vx = -vx`, the sentence a bounce is made of. Two's complement is a flip and
+  # a step: CPL turns 1 into 0xFE, INC A makes it 0xFF. Zero is the one value
+  # that comes back unchanged, which is what "not moving, the other way" ought
+  # to mean.
+  #
+  # The clause is written on any expression, not on a variable, so `x = -(y + 1)`
+  # negates what the rest of the compiler just put in A -- there is nothing to
+  # special-case.
+  defp load({:-, _, [operand]}, allocation, statement) do
+    load(operand, allocation, statement) ++ [{:cpl}, {:inc, :a}]
+  end
+
   defp load({operator, _, [left, right]}, allocation, statement)
        when operator in [:+, :-] do
     {setup, operand} = term(right, allocation, statement)
@@ -517,16 +619,19 @@ defmodule Potion.Compiler do
   # the actor, and the vblank handler pushes all four pairs before touching
   # anything -- so an interrupt landing between the `LD HL` and the `ADD` hands
   # it back untouched.
-  defp term(value, _allocation, statement) when is_integer(value) do
-    {[], byte!(value, statement)}
-  end
-
   defp term({name, _, context}, allocation, statement)
        when is_atom(name) and is_atom(context) do
     {[{:ld, :hl, cell!(name, allocation, statement)}], {:mem, :hl}}
   end
 
   defp term(other, _allocation, statement) do
+    case fold(other) do
+      {:ok, _} -> {[], byte!(other, statement)}
+      :error -> term_rejected!(other, statement)
+    end
+  end
+
+  defp term_rejected!(other, statement) do
     raise CompileError, """
     operand outside the subset:
 
@@ -535,25 +640,44 @@ defmodule Potion.Compiler do
     Rejected AST: #{inspect(other)}
 
     In #{one_line(statement)}, this place takes a variable or an integer literal \
-    from 0 to 255 — `x = y + speed` as readily as `x = y + 3`. What it does not \
-    take is another computation: one operation per sentence, and a variable to \
-    hold the middle of a longer one.
+    from -128 to 255 — `x = y + speed` as readily as `x = y + 3`. What it does \
+    not take is another computation: one operation per sentence, and a variable \
+    to hold the middle of a longer one.
     """
   end
-
-  defp byte!(value, _statement) when is_integer(value) and value in 0..255, do: value
 
   defp byte!(other, statement) do
-    raise CompileError, """
-    value outside a byte: #{inspect(other)}
+    case fold(other) do
+      {:ok, value} when value in -128..255 ->
+        two_complement(value)
 
-        #{one_line(statement)}
+      _ ->
+        raise CompileError, """
+        value outside a byte: #{inspect(other)}
 
-    A Potion variable holds one byte, and so does every literal it meets: 0 to \
-    255. Past that the value would not fit where it is going, and the wrap would \
-    be the compiler's doing rather than the game's.
-    """
+            #{one_line(statement)}
+
+        A Potion variable holds one byte, and so does every literal it meets: \
+        -128 to 255, the same 256 values read two ways. Past that the value \
+        would not fit where it is going, and the wrap would be the compiler's \
+        doing rather than the game's.
+        """
+    end
   end
+
+  # ── The sign ────────────────────────────────────────────────────────────────
+  #
+  # Elixir does not fold a unary minus in a quoted block: `-1` arrives as
+  # `{:-, _, [1]}`, an operator applied to a literal. Folding it here is the one
+  # place the language reads an integer out of an AST, and every literal in the
+  # compiler goes through it -- which is why a negative works in `variables`, in
+  # an assignment and on the right of a `+` without three separate decisions.
+  defp fold(value) when is_integer(value), do: {:ok, value}
+  defp fold({:-, _, [value]}) when is_integer(value), do: {:ok, -value}
+  defp fold(_other), do: :error
+
+  defp two_complement(value) when value < 0, do: value + 0x100
+  defp two_complement(value), do: value
 
   # ── The cell of a variable ──────────────────────────────────────────────────
 
@@ -627,13 +751,17 @@ defmodule Potion.Compiler do
 
     Rejected AST: #{inspect(condition)}
 
-    In #{one_line(statement)}, a condition is either a pad key --
-    `if pressed?(:right), do: ...` -- or a variable weighed against a literal:
+    In #{one_line(statement)}, a condition is a pad key, the sign of a variable,
+    or a variable weighed against a byte:
 
+        if pressed?(:right), do: ...
+        if negative?(vx), do: ...
         if y > 140, do: y = 0
         if lives == 0, do: ..., else: ...
 
     The comparisons are ==, !=, <, >, <= and >=, with the variable on the left.
+    `negative?` takes a declared variable and nothing else -- it is one `BIT 7`,
+    and there is no address to read a literal's sign from.
     """
   end
 
@@ -752,8 +880,12 @@ defmodule Potion.Compiler do
         x = y              one cell into another
         x = x + 1          8-bit arithmetic, which wraps
         x = y - 3          the same, the other way
+        x = x + step       a second cell, reached through HL
+        vx = -1            a negative literal, in two's complement
+        vx = -vx           and the sentence that turns a ball around
 
         if pressed?(:right), do: x = x + 1
+        if negative?(vx), do: vx = 1
         if pressed?(:a) do
           x = x + 1
           y = y - 1
