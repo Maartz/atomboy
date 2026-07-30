@@ -261,17 +261,35 @@ void app_main(void) {
         .scl_speed_hz = 400000,
     };
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus, &device, &pad));
+
+    /* The PCF8574 is quasi-bidirectional: a pin can only be read as an input
+     * once it has been written high, because reading is really "see whether
+     * something is pulling my weak pull-up down". Power-on leaves the port at
+     * 0xFF, so this works by luck without the line below -- and one stray zero
+     * written to a pin would make that button mute for good. */
+    const uint8_t all_high = 0xFF;
+    ESP_ERROR_CHECK(i2c_master_transmit(pad, &all_high, 1, 50));
+
     ESP_LOGI(TAG, "pad: PCF8574 at 0x%02X -- press something", address);
   }
 
   uint8_t last = 0;
+  unsigned ticks = 0;
+
+  /* What the blob is told this frame. Contacts bounce -- the log showed a held
+   * A flickering off and back within two frames -- so a bit that goes on stays
+   * on for a couple of frames after the contact opens. Favouring the press over
+   * the release is the right way round for a game: a dropped input is felt, an
+   * input held one frame too long is not. */
+  uint8_t pressed = 0;
+  uint8_t linger[8] = {0};
 
   const atomboy_entry_t entry = (atomboy_entry_t)executable;
   int batches = 0;
 
   while (1) {
     const uint32_t before = esp_cpu_get_cycle_count();
-    const struct result *result = (const struct result *)entry(NULL);
+    const struct result *result = (const struct result *)entry((void *)(uintptr_t)pressed);
     const uint32_t emulated = esp_cpu_get_cycle_count() - before;
 
     if (result->status != 0) {
@@ -309,9 +327,36 @@ void app_main(void) {
      * wants only after it has been turned over. */
     if (pad != NULL) {
       uint8_t raw = 0xFF;
+      const esp_err_t read = i2c_master_receive(pad, &raw, 1, 20);
 
-      if (i2c_master_receive(pad, &raw, 1, 20) == ESP_OK) {
+      /* Say the raw byte out loud once a second whatever happens. Logging only
+       * on change cannot tell "nothing pressed" from "the read failed", and
+       * that ambiguity has already cost one debugging session on the panel.
+       * With no button wired the byte is 0xFF; a pin pulled to ground turns
+       * its bit off. */
+      if (++ticks % 60 == 0) {
+        if (read == ESP_OK) {
+          ESP_LOGI(TAG, "pad raw 0x%02X (0xFF is nothing held)", raw);
+        } else {
+          ESP_LOGE(TAG, "pad read failed: %s", esp_err_to_name(read));
+        }
+      }
+
+      if (read == ESP_OK) {
         const uint8_t held = (uint8_t)~raw;
+
+        pressed = 0;
+
+        for (int b = 0; b < 8; b++) {
+          if (held & (1 << b)) {
+            linger[b] = 3;
+          }
+
+          if (linger[b] > 0) {
+            linger[b]--;
+            pressed |= (uint8_t)(1 << b);
+          }
+        }
 
         if (held != last) {
           char line[64] = "";

@@ -618,7 +618,28 @@ defmodule Atomboy.Native.Machine do
       RV32.li(:t1, @joyp),
       Asm.bne(:a0, :t1, :mmio_div),
       RV32.andi(:t0, :t0, 0x30),
-      RV32.ori(:t0, :t0, 0xCF),
+      Asm.la(:t2, :pad_state),
+      RV32.lw(:t2, :t2, 0),
+      RV32.li(:t3, 0x0F),
+
+      # P14 clear selects the directions, P15 the buttons, and a game may select
+      # both at once -- the lines are then the two rows together, which is why
+      # this masks twice into one accumulator instead of choosing a branch.
+      RV32.andi(:t4, :t0, 0x10),
+      Asm.bnez(:t4, :pad_buttons),
+      RV32.andi(:t4, :t2, 0x0F),
+      RV32.xori(:t4, :t4, -1),
+      RV32.and_(:t3, :t3, :t4),
+      Asm.label(:pad_buttons),
+      RV32.andi(:t4, :t0, 0x20),
+      Asm.bnez(:t4, :pad_done),
+      RV32.srli(:t4, :t2, 4),
+      RV32.andi(:t4, :t4, 0x0F),
+      RV32.xori(:t4, :t4, -1),
+      RV32.and_(:t3, :t3, :t4),
+      Asm.label(:pad_done),
+      RV32.ori(:t0, :t0, 0xC0),
+      RV32.or_(:t0, :t0, :t3),
       Asm.j(:mmio_store),
 
       # 0xFF04: any write resets DIV and its sub-counter.
@@ -719,6 +740,11 @@ defmodule Atomboy.Native.Machine do
 
     Blob.build(
       [
+        # `a0` still holds what the caller passed and nothing has touched it:
+        # the frame's buttons, one bit each, in Potion's order. The seam reads
+        # this word every time the game strobes 0xFF00.
+        Asm.la(:t0, :pad_state),
+        RV32.sw(:a0, :t0, 0),
         driver(render?, rom, false),
         scanline(),
         line_done(render?),
@@ -804,6 +830,9 @@ defmodule Atomboy.Native.Machine do
       {:align, 4},
       Asm.label(:initial_state),
       Interp.header(state, frames, timer: timer),
+      {:align, 4},
+      Asm.label(:pad_state),
+      {:space, 4},
       Asm.label(:machine_state),
       {:space, @ms_size},
       Asm.label(:tima_periods),
