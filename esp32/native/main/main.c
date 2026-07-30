@@ -54,11 +54,19 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
 #define PANEL_W 240
 #define PANEL_H 320
 
-/* 10 MHz, and deliberately slow. These modules take 40 and often 80, but only
- * on a board where the traces are traces. On loose jumper wires 40 MHz is a
- * coin toss: the clock rings, the data is sampled wrong, the panel ignores
- * every command and stays in the white it powered up in -- which is exactly
- * what it did. Speed is the last thing to raise, not the first. */
+/* 80 MHz, and it took three attempts spread over two days to earn that.
+ *
+ * It started at 10, deliberately: on loose jumper wires 40 is a coin toss --
+ * the clock rings, the data is sampled wrong, and the panel ignores every
+ * command and stays in the white it powered up in, which is exactly what it
+ * did. Then 20, once the picture was trusted. 40 and 80 both hold on wiring
+ * that has since been done properly, and the difference is not cosmetic:
+ * 103,680 bytes a frame at 20 MHz is 41 ms, which capped the console at 40% of
+ * real time and left the music full of holes. At 80 it is 10 ms and the limit
+ * moved to the emulator, where it belongs.
+ *
+ * Speed is still the last thing to raise. It is simply worth raising once
+ * everything below it is known good. */
 #define SPI_HZ (80 * 1000 * 1000)
 
 #define GB_W 160
@@ -411,10 +419,25 @@ void app_main(void) {
    * the PMP split off -- the C6's HP SRAM answers to both buses at one address,
    * but ESP-IDF marks the data half non-executable unless told otherwise. */
   void *executable = heap_caps_aligned_alloc(4, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  uint16_t *pixels = heap_caps_malloc(OUT_PIXELS * 2, MALLOC_CAP_DMA);
+  /* Two of them, alternating, and the second one is not a luxury.
+   *
+   * `esp_lcd_panel_draw_bitmap` hands the buffer to DMA and returns, so with one
+   * buffer the next frame's palette pass writes into the bytes the panel is
+   * still reading. The screen showed it exactly as the arithmetic predicts: a
+   * hard vertical seam where the writer overtook the reader, the picture split
+   * and offset either side of it. Not tearing in the content sense -- half of
+   * one frame and half of the next, geometrically displaced.
+   *
+   * With two, the panel reads one while the emulator fills the other, and a
+   * buffer is not touched again until the frame after next has come and gone.
+   * 207 KB of the C6's 512, which is affordable and was not free: it is why the
+   * cartridge cannot also live in RAM. */
+  uint16_t *pixels[2] = {heap_caps_malloc(OUT_PIXELS * 2, MALLOC_CAP_DMA),
+                         heap_caps_malloc(OUT_PIXELS * 2, MALLOC_CAP_DMA)};
 
-  if (executable == NULL || pixels == NULL) {
-    ESP_LOGE(TAG, "out of memory: %u bytes of code, %u of pixels", (unsigned)size, OUT_PIXELS * 2);
+  if (executable == NULL || pixels[0] == NULL || pixels[1] == NULL) {
+    ESP_LOGE(TAG, "out of memory: %u bytes of code, %u of pixels", (unsigned)size,
+             OUT_PIXELS * 2 * 2);
     return;
   }
 
@@ -425,7 +448,7 @@ void app_main(void) {
   __asm__ volatile("fence.i" ::: "memory");
 
   esp_lcd_panel_handle_t panel = panel_open();
-  panel_prove(panel, pixels);
+  panel_prove(panel, pixels[0]);
 
   i2c_master_bus_config_t i2c_bus = {
       .i2c_port = -1,
@@ -485,6 +508,9 @@ void app_main(void) {
    * that a listener hears as stutter. */
   uint64_t produced = 0;
   const int64_t audio_t0 = esp_timer_get_time();
+
+  /* Which buffer the emulator may write. The other one belongs to the panel. */
+  int page = 0;
 
   audio_resume(audio);
 
@@ -552,9 +578,11 @@ void app_main(void) {
     /* Scale and colour in one pass. The 2/3 division is integer and lands on
      * the pattern 0,0,1,1,2,3,3,4,4,5 -- two source pixels stretched into
      * three, forever. */
+    uint16_t *const frame = pixels[page];
+
     for (int y = 0; y < OUT_H; y++) {
       const uint8_t *row = shades + (y * 2 / 3) * GB_W;
-      uint16_t *out = pixels + y * OUT_W;
+      uint16_t *out = frame + y * OUT_W;
 
       for (int x = 0; x < OUT_W; x++) {
         out[x] = palette[row[x * 2 / 3] & 3];
@@ -616,7 +644,8 @@ void app_main(void) {
     const uint32_t drawn = esp_cpu_get_cycle_count() - before;
 
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y, ORIGIN_X + OUT_W,
-                                              ORIGIN_Y + OUT_H, pixels));
+                                              ORIGIN_Y + OUT_H, frame));
+    page ^= 1;
 
     const int64_t elapsed = esp_timer_get_time() - audio_t0;
 
