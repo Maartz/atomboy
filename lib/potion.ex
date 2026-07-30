@@ -22,15 +22,15 @@ defmodule Potion do
       defmodule MonJeu do
         use Potion
 
-        defacteur :heros do
+        defactor :hero do
           variables x: 80, y: 72
 
-          chaque_frame do
-            si appuye?(:droite), do: x = x + 1
-            si appuye?(:gauche), do: x = x - 1
-            si appuye?(:haut), do: y = y - 1
-            si appuye?(:bas), do: y = y + 1
-            sprite(0, x: x, y: y, tuile: 0)
+          every_frame do
+            if pressed?(:right), do: x = x + 1
+            if pressed?(:left), do: x = x - 1
+            if pressed?(:up), do: y = y - 1
+            if pressed?(:down), do: y = y + 1
+            sprite(0, x: x, y: y, tile: 0)
           end
         end
       end
@@ -84,11 +84,11 @@ defmodule Potion do
 
   ## L'acteur
 
-  Un `defacteur` déclare trois choses, dont deux sont facultatives :
+  Un `defactor` déclare trois choses, dont deux sont facultatives :
 
-      defacteur :heros do
+      defactor :hero do
         variables x: 80, y: 72     # les cellules de WRAM, et leurs valeurs de départ
-        chaque_frame do            # le code appelé une fois par frame, par le noyau
+        every_frame do            # le code appelé une fois par frame, par le noyau
           …
         end
       end
@@ -100,7 +100,7 @@ defmodule Potion do
   qu'elle est la première. `Potion.Compilo` détaille ce pattern.
 
   Le v0 n'accepte **qu'un acteur par module** : l'ordonnanceur du noyau n'a
-  qu'un slot, et un second `defacteur` compilerait un jeu dont la moitié ne
+  qu'un slot, et un second `defactor` compilerait un jeu dont la moitié ne
   tournerait jamais. Le jour où l'ordonnanceur en aura plusieurs, la macro les
   acceptera sans que la surface change.
 
@@ -111,13 +111,13 @@ defmodule Potion do
       x = x + 1                          huit bits, qui enroulent
       x = y - 3
 
-      si appuye?(touche), do: …          :droite :gauche :haut :bas :a :b :select :start
-      si appuye?(:a) do                  un bloc, plusieurs énoncés
+      if pressed?(touche), do: …          :right :left :up :down :a :b :select :start
+      if pressed?(:a) do                  un bloc, plusieurs énoncés
         x = x + 1
         y = y - 1
       end
 
-      sprite(n, x: …, y: …, tuile: …)    l'entrée n de l'OAM miroir, n littéral de 0 à 39
+      sprite(n, x: …, y: …, tile: …)    l'entrée n de l'OAM miroir, n littéral de 0 à 39
 
   `sprite` écrit dans l'OAM miroir du noyau — jamais dans l'OAM réelle, qui
   n'est écrivable que pendant le vblank. Les décalages du matériel (Y+16, X+8)
@@ -144,11 +144,11 @@ defmodule Potion do
   @titre_max 15
 
   @doc """
-  Ouvre le langage dans le module hôte : `defacteur` et ses deux mots.
+  Ouvre le langage dans le module hôte : `defactor` et ses deux mots.
   """
   defmacro __using__(_opts) do
     quote do
-      import Potion, only: [defacteur: 2, variables: 1, chaque_frame: 1]
+      import Potion, only: [defactor: 2, variables: 1, every_frame: 1]
     end
   end
 
@@ -156,19 +156,19 @@ defmodule Potion do
   Déclare l'acteur du module, et lui donne `rom/0`, `programme/0`, `adresses/0`.
 
   Tout le travail se fait ici, pendant l'expansion : le corps est lu comme un
-  arbre, les variables sont allouées, le corps de `chaque_frame` est compilé, et
+  arbre, les variables sont allouées, le corps de `every_frame` est compilé, et
   le programme complet est assemblé une fois pour vérifier qu'il tient. Ce qui
   survit à tout cela est une liste de tuples gravée dans le module — les
   fonctions engendrées ne compilent plus rien, elles rendent une valeur.
   """
-  defmacro defacteur(nom, do: corps) do
+  defmacro defactor(nom, do: corps) do
     module = __CALLER__.module
     nom = nom!(nom, module)
     unique!(module, nom)
 
-    {declarations, chaque_frame} = decoupe!(corps, nom)
+    {declarations, every_frame} = decoupe!(corps, nom)
     allocation = Compilo.alloue(declarations)
-    fragment = Compilo.compile(chaque_frame, allocation)
+    fragment = Compilo.compile(every_frame, allocation)
     verifie!(fragment, nom)
 
     Module.put_attribute(module, :potion_acteur, nom)
@@ -213,8 +213,8 @@ defmodule Potion do
 
       variables x: 80, y: 72
 
-  Ne s'emploie qu'à l'intérieur d'un `defacteur`, où elle n'est pas exécutée
-  mais lue : `defacteur` prend l'arbre tel quel et le passe au compilateur.
+  Ne s'emploie qu'à l'intérieur d'un `defactor`, où elle n'est pas exécutée
+  mais lue : `defactor` prend l'arbre tel quel et le passe au compilateur.
   """
   defmacro variables(declarations) do
     hors_acteur!("variables", Macro.to_string({:variables, [], [declarations]}))
@@ -223,16 +223,16 @@ defmodule Potion do
   @doc """
   Le code appelé une fois par frame, par la boucle du noyau.
 
-      chaque_frame do
-        si appuye?(:droite), do: x = x + 1
-        sprite(0, x: x, y: y, tuile: 0)
+      every_frame do
+        if pressed?(:right), do: x = x + 1
+        sprite(0, x: x, y: y, tile: 0)
       end
 
-  Ne s'emploie qu'à l'intérieur d'un `defacteur`. Voir `Potion` pour ce que le
+  Ne s'emploie qu'à l'intérieur d'un `defactor`. Voir `Potion` pour ce que le
   v0 accepte dedans.
   """
-  defmacro chaque_frame(_blocs) do
-    hors_acteur!("chaque_frame", "chaque_frame do … end")
+  defmacro every_frame(_blocs) do
+    hors_acteur!("every_frame", "every_frame do … end")
   end
 
   # ══ La lecture de l'arbre de l'acteur ════════════════════════════════════════
@@ -247,7 +247,7 @@ defmodule Potion do
 
     AST refusé : #{inspect(autre)}
 
-    La forme est `defacteur :heros do … end`. Le nom est écrit sur place, comme \
+    La forme est `defactor :hero do … end`. Le nom est écrit sur place, comme \
     celui d'une fonction — il ne se calcule pas.
     """
   end
@@ -271,29 +271,29 @@ defmodule Potion do
     end
   end
 
-  # Le corps d'un `defacteur` : au plus un `variables`, exactement un
-  # `chaque_frame`, et rien d'autre. Les deux ne sont pas expansés — ce sont des
+  # Le corps d'un `defactor` : au plus un `variables`, exactement un
+  # `every_frame`, et rien d'autre. Les deux ne sont pas expansés — ce sont des
   # formes que cette fonction reconnaît, pas du code qui tourne.
   defp decoupe!(corps, nom) do
     corps
     |> enonces()
-    |> Enum.reduce({nil, nil}, fn enonce, {declarations, chaque_frame} ->
+    |> Enum.reduce({nil, nil}, fn enonce, {declarations, every_frame} ->
       case enonce do
         {:variables, _, _} when declarations != nil ->
           doublon!("variables", nom)
 
-        {:chaque_frame, _, _} when chaque_frame != nil ->
-          doublon!("chaque_frame", nom)
+        {:every_frame, _, _} when every_frame != nil ->
+          doublon!("every_frame", nom)
 
         {:variables, _, [decl]} ->
-          {decl, chaque_frame}
+          {decl, every_frame}
 
-        {:chaque_frame, _, [[do: bloc]]} ->
+        {:every_frame, _, [[do: bloc]]} ->
           {declarations, {:corps, bloc}}
 
         autre ->
           raise ErreurCompilation, """
-          énoncé inconnu dans `defacteur #{inspect(nom)}` :
+          énoncé inconnu dans `defactor #{inspect(nom)}` :
 
               #{Macro.to_string(autre)}
 
@@ -302,24 +302,24 @@ defmodule Potion do
           Le corps d'un acteur ne contient que deux formes :
 
               variables x: 80, y: 72
-              chaque_frame do … end
+              every_frame do … end
 
-          Le code du jeu va dans `chaque_frame` ; c'est lui que le noyau appelle.
+          Le code du jeu va dans `every_frame` ; c'est lui que le noyau appelle.
           """
       end
     end)
     |> case do
       {_declarations, nil} ->
         raise ErreurCompilation, """
-        acteur sans `chaque_frame` : #{inspect(nom)}
+        acteur sans `every_frame` : #{inspect(nom)}
 
-        Un acteur est du code appelé une fois par frame. Sans `chaque_frame`, le \
+        Un acteur est du code appelé une fois par frame. Sans `every_frame`, le \
         noyau appellerait un `RET` soixante fois par seconde et l'écran resterait \
         vide.
 
-            defacteur #{inspect(nom)} do
-              chaque_frame do
-                sprite(0, x: 80, y: 72, tuile: 0)
+            defactor #{inspect(nom)} do
+              every_frame do
+                sprite(0, x: 80, y: 72, tile: 0)
               end
             end
         """
@@ -335,7 +335,7 @@ defmodule Potion do
 
   defp doublon!(mot, nom) do
     raise ErreurCompilation, """
-    `#{mot}` écrit deux fois dans `defacteur #{inspect(nom)}`.
+    `#{mot}` écrit deux fois dans `defactor #{inspect(nom)}`.
 
     Un acteur a un seul état et un seul code de frame. Deux `#{mot}` ne diraient \
     pas lequel compte — et le v0 préfère refuser que choisir à votre place.
@@ -345,7 +345,7 @@ defmodule Potion do
   # L'assemblage à blanc : le fragment est-il un programme ? Le noyau vérifie le
   # RET final, l'assembleur les étiquettes et les portées de saut. Le faire ici
   # plutôt qu'au premier appel de `rom/0` est tout le bénéfice d'un langage
-  # compilé : un `si` dont le bloc dépasse la portée d'un JR se voit dans `mix
+  # compilé : un `if` dont le bloc dépasse la portée d'un JR se voit dans `mix
   # compile`, pas trois semaines plus tard sur une flashcart.
   defp verifie!(fragment, nom) do
     Assembleur.assemble(Noyau.programme(fragment), origine: 0x0150)
@@ -361,7 +361,7 @@ defmodule Potion do
 
                 Le corps a été compilé, mais le fragment qui en sort n'est pas un \
                 programme valide. Si le message parle d'un saut hors de portée, \
-                c'est un bloc `si` trop gros : JR ne saute qu'à 127 octets, et le \
+                c'est un bloc `if` trop gros : JR ne saute qu'à 127 octets, et le \
                 v0 ne connaît que JR.
                 """
               ],
@@ -378,12 +378,12 @@ defmodule Potion do
 
   defp hors_acteur!(mot, forme) do
     raise ErreurCompilation, """
-    `#{mot}` employé hors d'un `defacteur`.
+    `#{mot}` employé hors d'un `defactor`.
 
     Cette forme n'est pas du code : c'est une partie de la déclaration d'un \
-    acteur, que `defacteur` lit dans son arbre. Elle n'a de sens qu'ici :
+    acteur, que `defactor` lit dans son arbre. Elle n'a de sens qu'ici :
 
-        defacteur :heros do
+        defactor :hero do
           #{forme}
         end
     """

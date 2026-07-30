@@ -11,7 +11,7 @@ defmodule Potion.DSLTest do
   testés en compilant vraiment des modules — `Code.compile_string`, pas un appel
   direct au compilo — parce que c'est là que le programmeur les rencontrera.
 
-  Le jeu `Heros` est mot pour mot celui du moduledoc de `Potion`. C'est
+  Le jeu `Hero` est mot pour mot celui du moduledoc de `Potion`. C'est
   volontaire : la vitrine du langage est aussi son test principal, et elle ne
   peut donc pas pourrir.
 
@@ -43,50 +43,50 @@ defmodule Potion.DSLTest do
 
   # ── Le jeu de la surface fixée ──────────────────────────────────────────────
 
-  defmodule Heros do
+  defmodule Hero do
     @moduledoc false
     use Potion
 
-    defacteur :heros do
+    defactor :hero do
       variables x: 80, y: 72
 
-      chaque_frame do
-        si appuye?(:droite), do: x = x + 1
-        si appuye?(:gauche), do: x = x - 1
-        si appuye?(:haut), do: y = y - 1
-        si appuye?(:bas), do: y = y + 1
-        sprite(0, x: x, y: y, tuile: 0)
+      every_frame do
+        if pressed?(:right), do: x = x + 1
+        if pressed?(:left), do: x = x - 1
+        if pressed?(:up), do: y = y - 1
+        if pressed?(:down), do: y = y + 1
+        sprite(0, x: x, y: y, tile: 0)
       end
     end
   end
 
   # Un second jeu, pour les formes que le héros n'exerce pas : une affectation
   # sèche, un littéral et une variable mélangés dans un même `sprite`, une
-  # entrée d'OAM autre que la première, et un bloc `si` à plusieurs énoncés.
+  # entrée d'OAM autre que la première, et un bloc `if` à plusieurs énoncés.
   defmodule Melange do
     @moduledoc false
     use Potion
 
-    defacteur :melange do
+    defactor :melange do
       variables largeur: 10, hauteur: 20
 
-      chaque_frame do
+      every_frame do
         largeur = 5
 
-        si appuye?(:a) do
+        if pressed?(:a) do
           largeur = largeur + 1
           hauteur = hauteur + 2
         end
 
-        sprite(1, x: largeur, y: 40, tuile: 3)
-        sprite(2, x: 100, y: hauteur, tuile: 0)
+        sprite(1, x: largeur, y: 40, tile: 3)
+        sprite(2, x: 100, y: hauteur, tile: 0)
       end
     end
   end
 
   describe "le jeu de la surface fixée" do
     test "la ROM boote et le sprite est un carré au centre de l'écran" do
-      {pixels, _state, _ram} = deroule(Heros, 6, render: true)
+      {pixels, _state, _ram} = deroule(Hero, 6, render: true)
 
       assert byte_size(pixels) == 160 * 144
 
@@ -99,10 +99,10 @@ defmodule Potion.DSLTest do
     end
 
     test "Droite déplace le sprite, et l'OAM suit" do
-      {_pixels, state, ram} = deroule(Heros, 5)
-      adresses = Heros.adresses()
+      {_pixels, state, ram} = deroule(Hero, 5)
+      adresses = Hero.adresses()
 
-      {_state, ram} = frames(Heros, state, Joypad.set(ram, @droite, @relache), 4)
+      {_state, ram} = frames(Hero, state, Joypad.set(ram, @droite, @relache), 4)
 
       assert Map.get(ram, adresses.x) == @depart_x + 4
       assert Map.get(ram, adresses.y) == @depart_y
@@ -114,37 +114,37 @@ defmodule Potion.DSLTest do
     end
 
     test "Gauche, Haut et Bas déplacent le sprite dans leur sens" do
-      {_pixels, state, ram} = deroule(Heros, 5)
-      adresses = Heros.adresses()
+      {_pixels, state, ram} = deroule(Hero, 5)
+      adresses = Hero.adresses()
 
-      {state, ram} = frames(Heros, state, Joypad.set(ram, @gauche, @relache), 3)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @gauche, @relache), 3)
       assert position(ram, adresses) == {@depart_x - 3, @depart_y}
 
-      {state, ram} = frames(Heros, state, Joypad.set(ram, @haut, @relache), 5)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @haut, @relache), 5)
       assert position(ram, adresses) == {@depart_x - 3, @depart_y - 5}
 
-      {state, ram} = frames(Heros, state, Joypad.set(ram, @bas, @relache), 2)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @bas, @relache), 2)
       assert position(ram, adresses) == {@depart_x - 3, @depart_y - 3}
 
-      # Relâché, plus rien ne bouge : chaque `si` est un JR par-dessus son bloc,
+      # Relâché, plus rien ne bouge : chaque `if` est un JR par-dessus son bloc,
       # pas un état retenu.
-      {_state, ram} = frames(Heros, state, Joypad.set(ram, @relache, @relache), 4)
+      {_state, ram} = frames(Hero, state, Joypad.set(ram, @relache, @relache), 4)
       assert position(ram, adresses) == {@depart_x - 3, @depart_y - 3}
     end
 
     test "le sprite déplacé est là où le pad l'a mis, à l'écran" do
-      {_pixels, state, ram} = deroule(Heros, 5)
+      {_pixels, state, ram} = deroule(Hero, 5)
 
-      {state, ram} = frames(Heros, state, Joypad.set(ram, @droite, @relache), 6)
-      {state, ram} = frames(Heros, state, Joypad.set(ram, @bas, @relache), 3)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @droite, @relache), 6)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @bas, @relache), 3)
 
       # Touches relâchées, une frame de battement : ce que l'écran montre est en
       # retard de deux vblanks sur l'acteur — le DMA publie au vblank ce que
       # l'acteur avait écrit au vblank précédent, et les lignes visibles d'une
       # frame précèdent son vblank. Sur un sprite immobile ça ne se voit pas ;
       # sur un sprite qui vient de bouger, il faut laisser le tuyau se vider.
-      {state, ram} = frames(Heros, state, Joypad.set(ram, @relache, @relache), 1)
-      {pixels, _state, _ram} = Screen.frame(state, Heros.rom(), ram, true)
+      {state, ram} = frames(Hero, state, Joypad.set(ram, @relache, @relache), 1)
+      {pixels, _state, _ram} = Screen.frame(state, Hero.rom(), ram, true)
 
       assert non_blancs(pixels) == boite(@depart_x + 6, @depart_y + 3)
     end
@@ -152,8 +152,8 @@ defmodule Potion.DSLTest do
 
   describe "les valeurs initiales" do
     test "les cellules allouées portent 80 et 72, sans que rien ne soit touché" do
-      {_pixels, state, ram} = deroule(Heros, 5)
-      adresses = Heros.adresses()
+      {_pixels, state, ram} = deroule(Hero, 5)
+      adresses = Hero.adresses()
 
       assert Map.get(ram, adresses.x) == @depart_x
       assert Map.get(ram, adresses.y) == @depart_y
@@ -161,7 +161,7 @@ defmodule Potion.DSLTest do
       # Et elles y restent : le drapeau « installé » a été levé au premier tour,
       # donc les valeurs de départ ne sont pas reposées à chaque frame — sans
       # quoi aucun jeu ne pourrait bouger.
-      {_state, ram} = frames(Heros, state, ram, 10)
+      {_state, ram} = frames(Hero, state, ram, 10)
 
       assert Map.get(ram, adresses.x) == @depart_x
       assert Map.get(ram, adresses.y) == @depart_y
@@ -170,18 +170,18 @@ defmodule Potion.DSLTest do
     test "l'allocation est celle que le compilateur promet" do
       # Dans l'ordre de déclaration, à partir de la première adresse que le
       # noyau laisse à l'acteur.
-      assert Heros.adresses() == %{x: Potion.Noyau.etat(), y: Potion.Noyau.etat() + 1}
+      assert Hero.adresses() == %{x: Potion.Noyau.etat(), y: Potion.Noyau.etat() + 1}
 
       # Le drapeau vient après, et le jeu ne le voit pas : il n'est pas dans
       # `adresses/0`, mais il est bien à 0xC102 et il est levé.
-      {_pixels, _state, ram} = deroule(Heros, 5)
+      {_pixels, _state, ram} = deroule(Hero, 5)
       assert Map.get(ram, Potion.Noyau.etat() + 2) == 0x01
     end
   end
 
   describe "le programme engendré" do
     test "il est inspectable, et le noyau y a nommé l'acteur" do
-      programme = Heros.programme()
+      programme = Hero.programme()
 
       assert is_list(programme)
       assert {:etiquette, :acteur} in programme
@@ -192,7 +192,7 @@ defmodule Potion.DSLTest do
       assert Map.has_key?(adresses, :acteur)
       assert adresses.acteur > adresses.boucle
 
-      # Les étiquettes du compilateur, toutes préfixées : une par `si`, plus
+      # Les étiquettes du compilateur, toutes préfixées : une par `if`, plus
       # celle de l'installation.
       assert Map.has_key?(adresses, :potion_installe)
 
@@ -203,10 +203,10 @@ defmodule Potion.DSLTest do
     end
 
     test "la ROM fait 32 Ko et porte le nom du module" do
-      rom = Heros.rom()
+      rom = Hero.rom()
 
       assert byte_size(rom) == 0x8000
-      assert binary_part(rom, 0x134, 5) == "HEROS"
+      assert binary_part(rom, 0x134, 5) == "HERO" <> <<0>>
     end
   end
 
@@ -217,7 +217,7 @@ defmodule Potion.DSLTest do
       fragment =
         Potion.Compilo.compile(
           quote do
-            si appuye?(:droite), do: x = x + 1
+            if pressed?(:right), do: x = x + 1
           end,
           allocation
         )
@@ -252,7 +252,7 @@ defmodule Potion.DSLTest do
       # Et l'entrée 0, que ce jeu n'écrit pas, est restée le zéro de l'init.
       assert oam(ram, 0) == [0, 0, 0, 0]
 
-      # Un bloc `si` à deux énoncés : les deux passent, ou aucun.
+      # Un bloc `if` à deux énoncés : les deux passent, ou aucun.
       {_state, ram} = frames(Melange, state, Joypad.set(ram, @relache, @relache - 0x01), 3)
 
       assert Map.get(ram, adresses.largeur) == 6
@@ -280,7 +280,7 @@ defmodule Potion.DSLTest do
 
     test "une touche inconnue" do
       message =
-        refuse!("Refus.Touche", "variables x: 1", "si appuye?(:turbo), do: x = x + 1")
+        refuse!("Refus.Touche", "variables x: 1", "if pressed?(:turbo), do: x = x + 1")
 
       assert message =~ "touche inconnue : :turbo"
       assert message =~ ":select"
@@ -296,7 +296,7 @@ defmodule Potion.DSLTest do
 
     test "une variable non déclarée dans un sprite" do
       message =
-        refuse!("Refus.SpriteFantome", "variables x: 1", "sprite(0, x: x, y: z, tuile: 0)")
+        refuse!("Refus.SpriteFantome", "variables x: 1", "sprite(0, x: x, y: z, tile: 0)")
 
       assert message =~ "variable non déclarée : :z"
     end
@@ -306,15 +306,15 @@ defmodule Potion.DSLTest do
       defmodule Refus.DeuxActeurs do
         use Potion
 
-        defacteur :premier do
-          chaque_frame do
-            sprite(0, x: 10, y: 10, tuile: 0)
+        defactor :premier do
+          every_frame do
+            sprite(0, x: 10, y: 10, tile: 0)
           end
         end
 
-        defacteur :second do
-          chaque_frame do
-            sprite(1, x: 20, y: 20, tuile: 0)
+        defactor :second do
+          every_frame do
+            sprite(1, x: 20, y: 20, tile: 0)
           end
         end
       end
@@ -328,7 +328,7 @@ defmodule Potion.DSLTest do
     end
 
     test "un numéro de sprite hors des quarante entrées de l'OAM" do
-      message = refuse!("Refus.Oam", "variables x: 1", "sprite(40, x: x, y: 10, tuile: 0)")
+      message = refuse!("Refus.Oam", "variables x: 1", "sprite(40, x: x, y: 10, tile: 0)")
 
       assert message =~ "entrée d'OAM hors plage : 40"
       assert message =~ "0 à 39"
@@ -336,35 +336,35 @@ defmodule Potion.DSLTest do
 
     test "un numéro de sprite qui n'est pas un littéral" do
       message =
-        refuse!("Refus.OamVariable", "variables n: 1", "sprite(n, x: 10, y: 10, tuile: 0)")
+        refuse!("Refus.OamVariable", "variables n: 1", "sprite(n, x: 10, y: 10, tile: 0)")
 
       assert message =~ "n'est pas un littéral"
     end
 
-    test "un `si` avec une branche que le v0 ne compile pas" do
+    test "un `if` avec une branche que le v0 ne compile pas" do
       message =
         refuse!(
           "Refus.Sinon",
           "variables x: 1",
-          "si appuye?(:a), do: x = x + 1, sinon: x = x - 1"
+          "if pressed?(:a), do: x = x + 1, sinon: x = x - 1"
         )
 
       assert message =~ "branche que le v0 ne compile pas"
       assert message =~ "sinon"
     end
 
-    test "un acteur sans chaque_frame" do
+    test "un acteur sans every_frame" do
       source = """
       defmodule Refus.SansFrame do
         use Potion
 
-        defacteur :inerte do
+        defactor :inerte do
           variables x: 1
         end
       end
       """
 
-      assert compile_refusee!(source) =~ "acteur sans `chaque_frame`"
+      assert compile_refusee!(source) =~ "acteur sans `every_frame`"
     end
 
     test "une valeur initiale qui ne tient pas dans un octet" do
@@ -378,11 +378,11 @@ defmodule Potion.DSLTest do
       defmodule Refus.Enonce do
         use Potion
 
-        defacteur :bavard do
+        defactor :bavard do
           IO.puts("bonjour")
 
-          chaque_frame do
-            sprite(0, x: 10, y: 10, tuile: 0)
+          every_frame do
+            sprite(0, x: 10, y: 10, tile: 0)
           end
         end
       end
@@ -391,7 +391,7 @@ defmodule Potion.DSLTest do
       assert compile_refusee!(source) =~ "énoncé inconnu"
     end
 
-    test "`variables` employé hors d'un defacteur" do
+    test "`variables` employé hors d'un defactor" do
       source = """
       defmodule Refus.Egare do
         use Potion
@@ -399,7 +399,7 @@ defmodule Potion.DSLTest do
       end
       """
 
-      assert compile_refusee!(source) =~ "hors d'un `defacteur`"
+      assert compile_refusee!(source) =~ "hors d'un `defactor`"
     end
   end
 
@@ -455,10 +455,10 @@ defmodule Potion.DSLTest do
     defmodule #{module} do
       use Potion
 
-      defacteur :fautif do
+      defactor :fautif do
         #{declarations}
 
-        chaque_frame do
+        every_frame do
           #{enonce}
         end
       end

@@ -76,7 +76,7 @@ defmodule Potion.Compilo do
   # Les bits de la cellule du pad, tels que `Potion.Noyau.lire_pad/0` les range.
   # Cette liste est la seule traduction du langage vers le matériel qui ne soit
   # pas dérivée : le noyau documente les bits, on les nomme.
-  @touches [droite: 0, gauche: 1, haut: 2, bas: 3, a: 4, b: 5, select: 6, start: 7]
+  @touches [right: 0, left: 1, up: 2, down: 3, a: 4, b: 5, select: 6, start: 7]
 
   # L'OAM en compte quarante, et le DMA les publie toutes.
   @entrees_oam 40
@@ -199,7 +199,7 @@ defmodule Potion.Compilo do
   # ══ La compilation ═══════════════════════════════════════════════════════════
 
   @doc """
-  L'AST du corps de `chaque_frame` et une allocation, en un fragment d'acteur.
+  L'AST du corps de `every_frame` et une allocation, en un fragment d'acteur.
 
   Le fragment finit par `{:ret}` : c'est un `CALL` qui l'atteint, une fois par
   frame, et `Potion.Noyau.programme/1` refuse un acteur qui ne rendrait pas la
@@ -234,7 +234,7 @@ defmodule Potion.Compilo do
   end
 
   # Un bloc : les énoncés à la file, le compteur d'étiquettes passant de l'un à
-  # l'autre. Il ressort du bloc parce que deux `si` frères ne peuvent pas
+  # l'autre. Il ressort du bloc parce que deux `if` frères ne peuvent pas
   # partager une étiquette de fin.
   defp bloc(corps, allocation, compteur) do
     corps
@@ -258,7 +258,7 @@ defmodule Potion.Compilo do
 
   # ── Une condition sur le pad ────────────────────────────────────────────────
 
-  defp enonce({:si, _, [condition, blocs]} = enonce, allocation, compteur) do
+  defp enonce({:if, _, [condition, blocs]} = enonce, allocation, compteur) do
     bit = touche!(condition, enonce)
     corps = corps_du_si!(blocs, enonce)
     fin = :"potion_fin_#{compteur}"
@@ -318,7 +318,7 @@ defmodule Potion.Compilo do
 
     AST refusé : #{inspect(autre)}
 
-    Dans #{souligne(enonce)}, `x:`, `y:` et `tuile:` prennent une variable \
+    Dans #{souligne(enonce)}, `x:`, `y:` et `tile:` prennent une variable \
     déclarée ou un littéral de 0 à 255. Un calcul se fait avant, dans une \
     variable.
     """
@@ -412,9 +412,9 @@ defmodule Potion.Compilo do
       Enum.map_join(noms, ", ", fn nom -> "#{inspect(nom)} (0x#{hexa(cellules[nom])})" end)
   end
 
-  # ── La touche d'un `si` ─────────────────────────────────────────────────────
+  # ── La touche d'un `if` ─────────────────────────────────────────────────────
 
-  defp touche!({:appuye?, _, [touche]}, enonce) when is_atom(touche) do
+  defp touche!({:pressed?, _, [touche]}, enonce) when is_atom(touche) do
     case Keyword.fetch(@touches, touche) do
       {:ok, bit} ->
         bit
@@ -437,8 +437,8 @@ defmodule Potion.Compilo do
 
     AST refusé : #{inspect(condition)}
 
-    Dans #{souligne(enonce)}, `si` ne teste qu'une touche du pad, sous la forme \
-    `si appuye?(:droite), do: ...`. Le v0 n'a pas de comparaison ; le pad est le \
+    Dans #{souligne(enonce)}, `if` ne teste qu'une touche du pad, sous la forme \
+    `if pressed?(:right), do: ...`. Le v0 n'a pas de comparaison ; le pad est le \
     seul monde extérieur qu'un acteur puisse interroger.
     """
   end
@@ -455,20 +455,20 @@ defmodule Potion.Compilo do
 
             #{souligne(enonce)}
 
-        Un `si` du v0 n'a qu'un `do:` — ni `sinon:`, ni `else:`. Le contraire \
-        s'écrit avec un second `si` sur une autre touche, en attendant que le \
+        Un `if` du v0 n'a qu'un `do:` — pas de `else:`. Le contraire \
+        s'écrit avec un second `if` sur une autre touche, en attendant que le \
         langage sache sauter par-dessus deux blocs.
         """
 
       autre ->
         raise ErreurCompilation, """
-        `si` mal formé :
+        `if` mal formé :
 
             #{Macro.to_string(autre)}
 
         AST refusé : #{inspect(autre)}
 
-        La forme est `si appuye?(:droite), do: x = x + 1`, ou la même avec un \
+        La forme est `if pressed?(:right), do: x = x + 1`, ou la même avec un \
         bloc `do ... end`.
         """
     end
@@ -511,14 +511,14 @@ defmodule Potion.Compilo do
     """
   end
 
-  @champs [:x, :y, :tuile]
+  @champs [:x, :y, :tile]
 
   defp champs!(champs, enonce) when is_list(champs) do
     with true <- Keyword.keyword?(champs),
          [] <- Enum.sort(Keyword.keys(champs)) -- Enum.sort(@champs),
          [] <- Enum.sort(@champs) -- Enum.sort(Keyword.keys(champs)),
          [] <- Keyword.keys(champs) -- Enum.uniq(Keyword.keys(champs)) do
-      {champs[:x], champs[:y], champs[:tuile]}
+      {champs[:x], champs[:y], champs[:tile]}
     else
       _ -> champs_refuses!(champs, enonce)
     end
@@ -534,7 +534,7 @@ defmodule Potion.Compilo do
 
     AST refusé : #{inspect(champs)}
 
-    Dans #{souligne(enonce)}, `sprite` attend exactement `x:`, `y:` et `tuile:` \
+    Dans #{souligne(enonce)}, `sprite` attend exactement `x:`, `y:` et `tile:` \
     — chacun une fois. Les attributs sont mis à zéro par le compilateur : le v0 \
     n'a qu'une palette d'objets, et ni miroir ni priorité.
     """
@@ -550,20 +550,20 @@ defmodule Potion.Compilo do
 
     AST refusé : #{inspect(enonce)}
 
-    Dans `chaque_frame`, le v0 compile exactement ceci :
+    Dans `every_frame`, le v0 compile exactement ceci :
 
         x = 5              une constante dans une cellule
         x = y              une cellule dans une autre
         x = x + 1          arithmétique 8 bits qui enroule
         x = y - 3          la même, dans l'autre sens
 
-        si appuye?(:droite), do: x = x + 1
-        si appuye?(:a) do
+        if pressed?(:right), do: x = x + 1
+        if pressed?(:a) do
           x = x + 1
           y = y - 1
         end
 
-        sprite(0, x: x, y: y, tuile: 0)
+        sprite(0, x: x, y: y, tile: 0)
 
     La surface est de l'Elixir ; la sémantique est celle de la console. Ce qui \
     ne se traduit pas en quelques instructions SM83 ne se compile pas — pas \
@@ -571,7 +571,7 @@ defmodule Potion.Compilo do
     """
   end
 
-  # L'énoncé fautif, ramené à une ligne : dans un `si` déplié sur cinq lignes,
+  # L'énoncé fautif, ramené à une ligne : dans un `if` déplié sur cinq lignes,
   # le message tiendrait la moitié de l'écran.
   defp souligne(enonce) do
     enonce

@@ -50,24 +50,24 @@ output is a real 32 KB cartridge — header, Nintendo logo, checksums —
 that runs in atomboy or on hardware via flashcart:
 
 ```elixir
-defmodule Heros do
+defmodule Hero do
   use Potion
 
-  defacteur :heros do
+  defactor :hero do
     variables x: 80, y: 72
 
-    chaque_frame do
-      si appuye?(:droite), do: x = x + 1
-      si appuye?(:gauche), do: x = x - 1
-      si appuye?(:haut), do: y = y - 1
-      si appuye?(:bas), do: y = y + 1
-      sprite(0, x: x, y: y, tuile: 0)
+    every_frame do
+      if pressed?(:right), do: x = x + 1
+      if pressed?(:left), do: x = x - 1
+      if pressed?(:up), do: y = y - 1
+      if pressed?(:down), do: y = y + 1
+      sprite(0, x: x, y: y, tile: 0)
     end
   end
 end
 ```
 
-`mix run jeux/heros.exs` compiles that into `jeux/heros.gb` — the GIF
+`mix run jeux/hero.exs` compiles that into `jeux/hero.gb` — the GIF
 above is that ROM, running in atomboy. Variables are WRAM cells,
 `x = x + 1` is three SM83 instructions that wrap at 255, and anything
 the console cannot do is refused at `mix compile` time with a message
