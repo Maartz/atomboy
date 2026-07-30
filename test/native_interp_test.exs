@@ -29,7 +29,7 @@ defmodule Atomboy.NativeInterpTest do
   @seeds 1..8
 
   describe "la couverture" do
-    test "les étapes 1, 3 et 4 couvrent les familles émises" do
+    test "les étapes 1 et 3 à 5 couvrent les familles émises" do
       couverts = MapSet.new(Emit.couverture())
 
       assert {nil, 0x00} in couverts, "NOP"
@@ -54,19 +54,29 @@ defmodule Atomboy.NativeInterpTest do
       assert {nil, 0xF2} in couverts, "LDH A, (C)"
       assert {nil, 0xEA} in couverts, "LD (a16), A"
 
+      assert {nil, 0x01} in couverts, "LD BC, d16"
+      assert {nil, 0x03} in couverts, "INC BC"
+      assert {nil, 0x09} in couverts, "ADD HL, BC"
+      assert {nil, 0xC5} in couverts, "PUSH BC"
+      assert {nil, 0xF1} in couverts, "POP AF"
+      assert {nil, 0xE8} in couverts, "ADD SP, r8"
+      assert {nil, 0xF8} in couverts, "LD HL, SP+r8"
+      assert {nil, 0xF9} in couverts, "LD SP, HL"
+      assert {nil, 0x08} in couverts, "LD (a16), SP"
+      assert {nil, 0xFF} in couverts, "RST 38H"
+
       # 0x76 est HALT, pas un LD : le trou dans le bloc x=1.
       refute {nil, 0x76} in couverts, "HALT n'est pas un LD"
-      # Le 16 bits, la pile et les sauts attendent les étapes 5 et 6.
-      refute {nil, 0x01} in couverts, "LD BC, d16"
-      refute {nil, 0x03} in couverts, "INC BC"
-      refute {nil, 0xC5} in couverts, "PUSH BC"
+      # Le contrôle de flux et le bloc CB attendent les étapes 6 et 7.
       refute {nil, 0x18} in couverts, "JR e8"
-      refute {nil, 0x08} in couverts, "LD (a16), SP"
+      refute {nil, 0xC3} in couverts, "JP a16"
+      refute {nil, 0xCD} in couverts, "CALL a16"
+      refute {nil, 0xC9} in couverts, "RET"
+      refute {nil, 0xCB} in couverts, "le préfixe CB"
 
-      # 143 (étapes 1 et 3) + 7 LD r,(HL) + 7 LD (HL),r + 1 LD (HL),d8
-      # + 8 ALU A,(HL) + 2 INC/DEC (HL) + 8 indirections par paire
-      # + 4 page haute + 2 adressage absolu.
-      assert MapSet.size(couverts) == 182
+      # 182 (étapes 1, 3 et 4) + 4 LD rr,d16 + 4 ADD HL,rr + 8 INC/DEC rr
+      # + 1 LD SP,HL + 2 ADD SP,r8 + 1 LD (a16),SP + 8 PUSH/POP + 8 RST.
+      assert MapSet.size(couverts) == 218
     end
 
     test "la correspondance mnémonique → primitive suit celle de Gen" do
@@ -120,6 +130,53 @@ defmodule Atomboy.NativeInterpTest do
 
       assert resultat.statut == :etat_non_supporte,
              "les interruptions arrivent à l'étape 8 — d'ici là, l'invité doit refuser"
+    end
+
+    test "POP AF jette les quatre bits bas du registre de drapeaux" do
+      # Le seul endroit d'où une valeur arbitraire peut entrer dans F. Les
+      # quatre bits bas n'existent pas sur le matériel, et `POP AF` doit les
+      # perdre.
+      #
+      # Ce test est ici parce que l'équivalence croisée ne l'attrape pas : dans
+      # un programme aléatoire, la première opération d'ALU venue réécrit F
+      # entièrement, donc la pollution s'efface avant d'être observée. Vérifié
+      # par mutation — retirer le masque laisse les huit graines vertes.
+      memoire = programme(%{0x100 => 0xF1, 0x200 => 0xFF, 0x201 => 0x12})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200}, 12)
+
+      assert resultat.statut == :ok
+      assert resultat.state.a == 0x12
+      assert resultat.state.f == 0xF0, "F vaut #{resultat.state.f}, les bits bas ont survécu"
+      assert resultat.state.sp == 0x202
+    end
+
+    test "PUSH puis POP rendent la paire intacte, octet bas en premier" do
+      # PUSH BC puis POP DE : DE doit valoir BC, et la pile porter l'octet bas
+      # à l'adresse basse — l'ordre qu'attend le matériel.
+      memoire = programme(%{0x100 => 0xC5, 0x101 => 0xD1})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200, b: 0xBE, c: 0xEF}, 28)
+
+      assert resultat.statut == :ok
+      assert {resultat.state.d, resultat.state.e} == {0xBE, 0xEF}
+      assert resultat.state.sp == 0x200
+      assert :binary.at(resultat.memoire, 0x1FE) == 0xEF, "octet bas à l'adresse basse"
+      assert :binary.at(resultat.memoire, 0x1FF) == 0xBE
+    end
+
+    test "RST empile l'adresse de retour et saute à sa cible" do
+      # RST 28H : l'opcode fait un octet, donc l'adresse empilée est celle qui
+      # le suit.
+      memoire = programme(%{0x100 => 0xEF})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200}, 16)
+
+      assert resultat.statut == :ok
+      assert resultat.state.pc == 0x28
+      assert resultat.state.sp == 0x1FE
+      assert :binary.at(resultat.memoire, 0x1FE) == 0x01
+      assert :binary.at(resultat.memoire, 0x1FF) == 0x01
     end
 
     test "PC reboucle à 0xFFFF sans déborder" do
@@ -188,14 +245,24 @@ defmodule Atomboy.NativeInterpTest do
 
   # ══ Génération ═══════════════════════════════════════════════════════════════
 
-  # Un octet par adresse, tiré de ce que le natif sait émettre. Aucun n'étant un
-  # saut, PC parcourt l'espace linéairement et reboucle — chaque tirage est un
-  # programme valide de bout en bout.
+  # Une mémoire de 64 Ko remplie de HALT — un opcode que le natif n'émet pas —
+  # avec quelques octets posés là où on les veut. Le remplissage sert de garde :
+  # si l'exécution déborde du programme voulu, elle s'arrête et le dit, au lieu
+  # de courir dans du bruit.
+  defp programme(octets) do
+    for addr <- 0..0xFFFF, into: <<>>, do: <<Map.get(octets, addr, 0x76)>>
+  end
+
+  # Un octet par adresse, tiré de ce que le natif sait émettre — chaque tirage
+  # est donc un programme valide de bout en bout, qui s'auto-modifie, empile,
+  # dépile, et depuis `RST` saute pour de bon.
   #
-  # Depuis que les écritures mémoire existent, ces programmes s'auto-modifient :
-  # sur les huit graines, six finissent par fabriquer un opcode hors couverture
-  # devant PC et deux vont au bout des 5 000 pas. C'est le cas le plus dur que
-  # le harnais puisse produire, et c'est gratuit.
+  # La proportion d'octets couverts décide de la durée : à 182 opcodes émis, six
+  # graines sur huit finissaient par fabriquer un opcode inconnu devant PC ; à
+  # 218, les huit vont au bout des 5 000 pas. La branche `fautif` du test reste
+  # donc en place sans être empruntée aujourd'hui — elle le sera de nouveau au
+  # premier opcode retiré ou ajouté, et le mécanisme lui-même est couvert par un
+  # test dédié plus haut.
   defp programme_aleatoire do
     opcodes = for {nil, op} <- Emit.couverture(), do: op
 

@@ -369,10 +369,15 @@ defmodule Atomboy.Native.Banc do
     lire_ecarts(serial, balayages, [])
   end
 
-  defp lire_ecarts(<<@fin, _compte, _reste::binary>>, _balayages, acc), do: {:ok, Enum.reverse(acc)}
+  defp lire_ecarts(<<@fin, _compte, _reste::binary>>, _balayages, acc),
+    do: {:ok, Enum.reverse(acc)}
 
-  defp lire_ecarts(<<@magic_ecart, index, cas::16-little, obtenu::16-little, drapeaux, attendu::16-little,
-                     drapeaux_attendus, reste::binary>>, balayages, acc) do
+  defp lire_ecarts(
+         <<@magic_ecart, index, cas::16-little, obtenu::16-little, drapeaux, attendu::16-little,
+           drapeaux_attendus, reste::binary>>,
+         balayages,
+         acc
+       ) do
     balayage = Enum.at(balayages, index)
 
     ecart = %{
@@ -387,7 +392,8 @@ defmodule Atomboy.Native.Banc do
   end
 
   defp lire_ecarts(autre, _balayages, _acc) do
-    {:error, {:flux_illisible, byte_size(autre), binary_part(autre, 0, min(32, byte_size(autre)))}}
+    {:error,
+     {:flux_illisible, byte_size(autre), binary_part(autre, 0, min(32, byte_size(autre)))}}
   end
 
   @doc "La taille d'un enregistrement d'écart, pour les tests du protocole."

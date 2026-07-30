@@ -43,6 +43,62 @@ defmodule Atomboy.Native.Bus do
   end
 
   @doc """
+  Lit le mot de deux octets à `adresse`, petit-boutien, dans `dest`.
+
+  L'octet haut est à `adresse + 1` **replié sur 16 bits** : une pile posée à
+  `0xFFFF` reprend son octet haut à l'adresse 0, et le matériel fait exactement
+  cela. Écrase `t1`, `t2` et `t3` ; `dest` ne doit être aucun des trois.
+  """
+  @spec lire16(RV32.reg(), RV32.reg()) :: [Asm.item()]
+  def lire16(adresse, dest) do
+    [
+      RV32.add(:t1, Regs.mem(), adresse),
+      RV32.lbu(dest, :t1, 0),
+      suivante(adresse),
+      RV32.add(:t1, Regs.mem(), :t3),
+      RV32.lbu(:t2, :t1, 0),
+      RV32.slli(:t2, :t2, 8),
+      RV32.or_(dest, dest, :t2)
+    ]
+  end
+
+  @doc """
+  Écrit `source` sur deux octets à `adresse`, octet bas d'abord.
+
+  Même repli à 16 bits que `lire16/2`, et `adresse` en ressort intacte — ce qui
+  compte pour `PUSH`, dont l'adresse est SP lui-même.
+  """
+  @spec ecrire16(RV32.reg(), RV32.reg()) :: [Asm.item()]
+  def ecrire16(adresse, source) do
+    [
+      RV32.add(:t1, Regs.mem(), adresse),
+      RV32.sb(source, :t1, 0),
+      suivante(adresse),
+      RV32.add(:t1, Regs.mem(), :t3),
+      RV32.srli(:t2, source, 8),
+      RV32.sb(:t2, :t1, 0)
+    ]
+  end
+
+  defp suivante(adresse) do
+    [
+      RV32.addi(:t3, adresse, 1),
+      RV32.and_(:t3, :t3, Regs.mask16())
+    ]
+  end
+
+  @doc """
+  Déplace SP de `delta`, replié sur 16 bits — le geste commun à la pile.
+  """
+  @spec deplacer_pile(integer()) :: [Asm.item()]
+  def deplacer_pile(delta) do
+    [
+      RV32.addi(Regs.sp(), Regs.sp(), delta),
+      RV32.and_(Regs.sp(), Regs.sp(), Regs.mask16())
+    ]
+  end
+
+  @doc """
   Compose dans `dest` l'adresse désignée par une paire indirecte.
 
   Pour `HL` c'est une copie, et c'est là que le choix d'empaqueter HL dans un

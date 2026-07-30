@@ -119,6 +119,47 @@ defmodule Atomboy.Native.Regs do
 
   def write8({:reg, name}, src), do: [RV32.mv(direct!(name), src)]
 
+  # ══ Les paires ═══════════════════════════════════════════════════════════════
+
+  @doc """
+  Lit une paire 16 bits dans `dest`.
+
+  `HL` et `SP` sont déjà des registres 16 bits : la lecture est une copie, que
+  l'appelant peut élider s'il sait où il met les pieds. `BC`, `DE` et `AF` se
+  recomposent, ce qui est le prix de les garder séparés — payé sur les formes
+  par paires, qui sont les rares.
+  """
+  @spec read16({:pair, atom()}, RV32.reg()) :: [binary()]
+  def read16({:pair, :hl}, dest), do: [RV32.mv(dest, hl())]
+  def read16({:pair, :sp}, dest), do: [RV32.mv(dest, sp())]
+  def read16({:pair, :bc}, dest), do: composer(b(), c(), dest)
+  def read16({:pair, :de}, dest), do: composer(d(), e(), dest)
+  def read16({:pair, :af}, dest), do: composer(a(), f(), dest)
+
+  @doc """
+  Écrit `src` dans une paire 16 bits. `src` doit déjà tenir sur seize bits.
+
+  Le cas `AF` porte le masque `0xF0` sur F : les quatre bits bas du registre de
+  drapeaux n'existent pas sur le matériel, et `POP AF` est le seul endroit d'où
+  une valeur arbitraire pourrait y entrer. C'est aussi ce que fait
+  `Atomboy.CPU.Gen` (gen.ex:1441) — le masque est ici plutôt que chez l'appelant
+  parce que `AF` ne s'écrit nulle part ailleurs.
+  """
+  @spec write16({:pair, atom()}, RV32.reg()) :: [binary()]
+  def write16({:pair, :hl}, src), do: [RV32.mv(hl(), src)]
+  def write16({:pair, :sp}, src), do: [RV32.mv(sp(), src)]
+  def write16({:pair, :bc}, src), do: decomposer(b(), c(), src, 0xFF)
+  def write16({:pair, :de}, src), do: decomposer(d(), e(), src, 0xFF)
+  def write16({:pair, :af}, src), do: decomposer(a(), f(), src, 0xF0)
+
+  defp composer(haut, bas, dest) do
+    [RV32.slli(dest, haut, 8), RV32.or_(dest, dest, bas)]
+  end
+
+  defp decomposer(haut, bas, src, masque) do
+    [RV32.srli(haut, src, 8), RV32.andi(bas, src, masque)]
+  end
+
   defp direct!(name) do
     case Keyword.fetch(@map, name) do
       {:ok, register} ->

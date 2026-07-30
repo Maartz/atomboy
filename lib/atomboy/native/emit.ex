@@ -23,11 +23,16 @@ defmodule Atomboy.Native.Emit do
 
   ## Ce qui est couvert aujourd'hui
 
-  Les étapes 1 et 3 : `NOP`, les 49 `LD r, r'`, les 56 `ALU A, r` sur registre,
-  les 8 formes immédiates, `INC r`/`DEC r`, la colonne z=7 de l'accumulateur, et
-  `LD r, d8`. Tout ce qui touche `(HL)` ou la mémoire au-delà du fetch attend
-  l'étape 4. Le reste de la table tombe dans `:non_supporté` et le dispatch y
-  envoie `opcode_inconnu`.
+  218 des 500 instructions, en trois vagues : les transferts entre registres et
+  l'arithmétique 8 bits, puis tout ce qui touche le bus — la colonne `(HL)`, les
+  indirections par paire, la page haute, l'adressage absolu — puis le 16 bits,
+  la pile et `RST`.
+
+  Ce qui manque est du contrôle de flux : `JR`, `JP`, `CALL`, `RET`, leurs
+  formes conditionnelles, le bloc `CB` tout entier, et les instructions qui
+  parlent aux interruptions. Elles tombent dans `:non_supporté`, et le dispatch
+  y envoie `opcode_inconnu` — un interpréteur partiel doit dire lequel, pas
+  rendre un résultat faux.
   """
 
   alias Atomboy.CPU.Insn
@@ -184,6 +189,68 @@ defmodule Atomboy.Native.Emit do
 
   def body(%Insn{mnemonic: :ld, operands: [:a16_ind, {:reg, :a}], cycles: cycles}) do
     lire_immediat16(:t0) ++ Bus.ecrire(:t0, Regs.a()) ++ fin(cycles)
+  end
+
+  # ── Seize bits et pile ──────────────────────────────────────────────────────
+
+  def body(%Insn{mnemonic: :ld, operands: [{:pair, _} = paire, {:imm, 16}], cycles: cycles}) do
+    lire_immediat16(:t0) ++ Regs.write16(paire, :t0) ++ fin(cycles)
+  end
+
+  # LD SP, HL — la seule copie de paire à paire du jeu d'instructions.
+  def body(%Insn{mnemonic: :ld, operands: [{:pair, _} = dst, {:pair, _} = src], cycles: cycles}) do
+    Regs.read16(src, :t0) ++ Regs.write16(dst, :t0) ++ fin(cycles)
+  end
+
+  # INC rr et DEC rr — **aucun drapeau touché**, contrairement à leurs homonymes
+  # 8 bits. C'est le matériel qui veut ça, et c'est pourquoi ils ne passent pas
+  # par l'ALU.
+  def body(%Insn{mnemonic: m, operands: [{:pair, _} = paire], cycles: cycles})
+      when m in [:inc, :dec] do
+    Regs.read16(paire, :t0) ++
+      [
+        RV32.addi(:t0, :t0, if(m == :inc, do: 1, else: -1)),
+        RV32.and_(:t0, :t0, Regs.mask16())
+      ] ++ Regs.write16(paire, :t0) ++ fin(cycles)
+  end
+
+  # ADD HL, rr — HL vit déjà dans le registre que la routine attend.
+  def body(%Insn{mnemonic: :add, operands: [{:pair, :hl}, {:pair, _} = src], cycles: cycles}) do
+    Regs.read16(src, :a0) ++ [Asm.call(ALU.etiquette(:add16))] ++ fin(cycles)
+  end
+
+  # ADD SP, r8 et LD HL, SP+r8 — même arithmétique, deux destinations.
+  def body(%Insn{mnemonic: :add_sp, operands: [{:pair, dst}, {:imm, 8}], cycles: cycles}) do
+    Regs.read16({:pair, :sp}, :a0) ++
+      lire_immediat(:a1) ++
+      [Asm.call(ALU.etiquette(:add_sp))] ++
+      Regs.write16({:pair, dst}, :a0) ++ fin(cycles)
+  end
+
+  # LD (a16), SP — l'unique écriture 16 bits directe du jeu d'instructions.
+  def body(%Insn{mnemonic: :ld, operands: [:a16_ind, {:pair, :sp}], cycles: cycles}) do
+    lire_immediat16(:t0) ++ Bus.ecrire16(:t0, Regs.sp()) ++ fin(cycles)
+  end
+
+  # PUSH — SP recule de deux, puis le mot s'écrit à la nouvelle adresse.
+  def body(%Insn{mnemonic: :push, operands: [{:pair, _} = paire], cycles: cycles}) do
+    Regs.read16(paire, :t0) ++
+      Bus.deplacer_pile(-2) ++
+      Bus.ecrire16(Regs.sp(), :t0) ++ fin(cycles)
+  end
+
+  def body(%Insn{mnemonic: :pop, operands: [{:pair, _} = paire], cycles: cycles}) do
+    Bus.lire16(Regs.sp(), :t0) ++
+      Bus.deplacer_pile(2) ++
+      Regs.write16(paire, :t0) ++ fin(cycles)
+  end
+
+  # RST — un appel dont la cible est cuite dans l'opcode. PC a déjà avancé
+  # d'un cran au fetch, donc c'est bien l'adresse de retour qui part sur la pile.
+  def body(%Insn{mnemonic: :rst, operands: [{:rst, cible}], cycles: cycles}) do
+    Bus.deplacer_pile(-2) ++
+      Bus.ecrire16(Regs.sp(), Regs.pc()) ++
+      RV32.li(Regs.pc(), cible) ++ fin(cycles)
   end
 
   def body(%Insn{}), do: :non_supporté
