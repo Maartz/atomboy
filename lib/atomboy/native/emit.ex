@@ -23,16 +23,17 @@ defmodule Atomboy.Native.Emit do
 
   ## Ce qui est couvert aujourd'hui
 
-  218 des 500 instructions, en trois vagues : les transferts entre registres et
+  239 des 500 instructions, en quatre vagues : les transferts entre registres et
   l'arithmétique 8 bits, puis tout ce qui touche le bus — la colonne `(HL)`, les
   indirections par paire, la page haute, l'adressage absolu — puis le 16 bits,
-  la pile et `RST`.
+  la pile et `RST`, et enfin le contrôle de flux avec ses formes
+  conditionnelles.
 
-  Ce qui manque est du contrôle de flux : `JR`, `JP`, `CALL`, `RET`, leurs
-  formes conditionnelles, le bloc `CB` tout entier, et les instructions qui
-  parlent aux interruptions. Elles tombent dans `:non_supporté`, et le dispatch
-  y envoie `opcode_inconnu` — un interpréteur partiel doit dire lequel, pas
-  rendre un résultat faux.
+  Ce qui manque : le bloc `CB` tout entier, et les instructions qui parlent aux
+  interruptions — `EI`, `DI`, `HALT`, et `RETI`, qui est un `RET` posant IME et
+  attend donc que l'invité sache exécuter un état où IME est armé. Elles tombent
+  dans `:non_supporté`, et le dispatch y envoie `opcode_inconnu` — un
+  interpréteur partiel doit dire lequel, pas rendre un résultat faux.
   """
 
   alias Atomboy.CPU.Insn
@@ -253,7 +254,85 @@ defmodule Atomboy.Native.Emit do
       RV32.li(Regs.pc(), cible) ++ fin(cycles)
   end
 
+  # ── Le contrôle de flux ─────────────────────────────────────────────────────
+  #
+  # Toutes ces familles partagent une forme : lire les opérandes — ce que le
+  # processeur fait dans les deux cas —, puis, si la condition tient, agir sur
+  # PC. Le coût en cycles diffère entre les deux branches, et c'est la table qui
+  # le porte (`cycles` et `cycles_untaken`).
+
+  # JR — offset signé d'un octet, relatif au PC qui suit l'opérande. Le calcul
+  # du signe est sans branche : retrancher 256 quand le bit 7 est levé. C'est le
+  # même geste que dans `Gen` (gen.ex:100), pour la même raison.
+  def body(%Insn{mnemonic: :jr, operands: [{:imm, 8}]} = insn) do
+    conditionnel(insn, lire_immediat(:t0), [
+      RV32.srli(:t2, :t0, 7),
+      RV32.slli(:t2, :t2, 8),
+      RV32.sub(:t2, :t0, :t2),
+      RV32.add(Regs.pc(), Regs.pc(), :t2),
+      RV32.and_(Regs.pc(), Regs.pc(), Regs.mask16())
+    ])
+  end
+
+  def body(%Insn{mnemonic: :jp, operands: [{:imm, 16}]} = insn) do
+    conditionnel(insn, lire_immediat16(:t0), [RV32.mv(Regs.pc(), :t0)])
+  end
+
+  # JP HL — souvent écrit « JP (HL) », mais il n'y a aucun accès mémoire : PC
+  # reçoit la paire, c'est tout. Une instruction, et le seul saut calculé du jeu.
+  def body(%Insn{mnemonic: :jp, operands: [{:pair, :hl}], cycles: cycles}) do
+    [RV32.mv(Regs.pc(), Regs.hl())] ++ fin(cycles)
+  end
+
+  # CALL — l'adresse empilée est celle qui suit les deux octets d'opérande, donc
+  # PC est déjà à sa valeur finale quand il part sur la pile.
+  def body(%Insn{mnemonic: :call, operands: [{:imm, 16}]} = insn) do
+    conditionnel(
+      insn,
+      lire_immediat16(:t0),
+      Bus.deplacer_pile(-2) ++
+        Bus.ecrire16(Regs.sp(), Regs.pc()) ++
+        [RV32.mv(Regs.pc(), :t0)]
+    )
+  end
+
+  def body(%Insn{mnemonic: :ret} = insn) do
+    conditionnel(
+      insn,
+      [],
+      Bus.lire16(Regs.sp(), :t0) ++
+        Bus.deplacer_pile(2) ++
+        [RV32.mv(Regs.pc(), :t0)]
+    )
+  end
+
   def body(%Insn{}), do: :non_supporté
+
+  # Le squelette commun : le prélude s'exécute toujours, l'action seulement si
+  # la condition tient. La branche non prise saute vers `fetch` avant
+  # l'étiquette, donc les deux chemins ne se croisent jamais.
+  defp conditionnel(%Insn{condition: nil} = insn, prelude, action) do
+    prelude ++ action ++ fin(insn.cycles)
+  end
+
+  defp conditionnel(%Insn{} = insn, prelude, action) do
+    pris = :"pris_#{Integer.to_string(insn.opcode, 16)}"
+
+    prelude ++
+      saut_si(insn.condition, pris) ++
+      fin(insn.cycles_untaken) ++
+      [Asm.label(pris)] ++ action ++ fin(insn.cycles)
+  end
+
+  # Z est le bit 7, C le bit 4 ; `NZ` et `NC` branchent sur l'absence.
+  @condition %{nz: {0x80, :absent}, z: {0x80, :present}, nc: {0x10, :absent}, c: {0x10, :present}}
+
+  defp saut_si(condition, etiquette) do
+    {masque, sens} = Map.fetch!(@condition, condition)
+    branchement = if sens == :absent, do: &Asm.beqz/2, else: &Asm.bnez/2
+
+    [RV32.andi(:t1, Regs.f(), masque), branchement.(:t1, etiquette)]
+  end
 
   @doc """
   Charge l'octet immédiat qui suit l'opcode, et avance PC.

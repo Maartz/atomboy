@@ -29,7 +29,7 @@ defmodule Atomboy.NativeInterpTest do
   @seeds 1..8
 
   describe "la couverture" do
-    test "les étapes 1 et 3 à 5 couvrent les familles émises" do
+    test "les étapes 1 et 3 à 6 couvrent les familles émises" do
       couverts = MapSet.new(Emit.couverture())
 
       assert {nil, 0x00} in couverts, "NOP"
@@ -65,18 +65,28 @@ defmodule Atomboy.NativeInterpTest do
       assert {nil, 0x08} in couverts, "LD (a16), SP"
       assert {nil, 0xFF} in couverts, "RST 38H"
 
+      assert {nil, 0x18} in couverts, "JR e8"
+      assert {nil, 0x20} in couverts, "JR NZ, e8"
+      assert {nil, 0xC3} in couverts, "JP a16"
+      assert {nil, 0xE9} in couverts, "JP HL"
+      assert {nil, 0xCA} in couverts, "JP Z, a16"
+      assert {nil, 0xCD} in couverts, "CALL a16"
+      assert {nil, 0xD4} in couverts, "CALL NC, a16"
+      assert {nil, 0xC9} in couverts, "RET"
+      assert {nil, 0xD8} in couverts, "RET C"
+
       # 0x76 est HALT, pas un LD : le trou dans le bloc x=1.
       refute {nil, 0x76} in couverts, "HALT n'est pas un LD"
-      # Le contrôle de flux et le bloc CB attendent les étapes 6 et 7.
-      refute {nil, 0x18} in couverts, "JR e8"
-      refute {nil, 0xC3} in couverts, "JP a16"
-      refute {nil, 0xCD} in couverts, "CALL a16"
-      refute {nil, 0xC9} in couverts, "RET"
+      # Tout ce qui parle aux interruptions attend l'étape 8, RETI compris —
+      # il pose IME, et l'invité refuse encore tout état où IME est armé.
+      refute {nil, 0xD9} in couverts, "RETI"
+      refute {nil, 0xF3} in couverts, "DI"
+      refute {nil, 0xFB} in couverts, "EI"
       refute {nil, 0xCB} in couverts, "le préfixe CB"
 
-      # 182 (étapes 1, 3 et 4) + 4 LD rr,d16 + 4 ADD HL,rr + 8 INC/DEC rr
-      # + 1 LD SP,HL + 2 ADD SP,r8 + 1 LD (a16),SP + 8 PUSH/POP + 8 RST.
-      assert MapSet.size(couverts) == 218
+      # 218 (étapes 1 et 3 à 5) + 5 JR + 2 JP + 4 JP cc + 1 CALL + 4 CALL cc
+      # + 1 RET + 4 RET cc.
+      assert MapSet.size(couverts) == 239
     end
 
     test "la correspondance mnémonique → primitive suit celle de Gen" do
@@ -177,6 +187,59 @@ defmodule Atomboy.NativeInterpTest do
       assert resultat.state.sp == 0x1FE
       assert :binary.at(resultat.memoire, 0x1FE) == 0x01
       assert :binary.at(resultat.memoire, 0x1FF) == 0x01
+    end
+
+    test "un branchement non pris consomme son opérande et coûte moins cher" do
+      # JR NZ, +4 avec Z posé : l'offset est lu — donc PC avance de deux — mais
+      # le saut n'a pas lieu, et l'instruction coûte 8 T au lieu de 12.
+      memoire = programme(%{0x100 => 0x20, 0x101 => 0x04})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100, f: 0x80}, 8)
+
+      assert resultat.statut == :ok
+      assert resultat.state.pc == 0x102, "l'opérande doit être consommé même sans saut"
+      assert resultat.cycles == 8
+    end
+
+    test "le même branchement, pris, saute et coûte plus cher" do
+      memoire = programme(%{0x100 => 0x20, 0x101 => 0x04})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100, f: 0x00}, 12)
+
+      assert resultat.statut == :ok
+      assert resultat.state.pc == 0x106, "la cible est relative au PC qui suit l'opérande"
+      assert resultat.cycles == 12
+    end
+
+    test "un offset de JR négatif recule" do
+      # 0xFE vaut -2 : le saut revient sur l'opcode lui-même.
+      memoire = programme(%{0x100 => 0x18, 0x101 => 0xFE})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100}, 12)
+
+      assert resultat.state.pc == 0x100
+    end
+
+    test "CALL puis RET reviennent exactement où il faut" do
+      # CALL 0x300, et à 0x300 un RET. L'adresse de retour est celle qui suit
+      # les deux octets d'opérande.
+      memoire = programme(%{0x100 => 0xCD, 0x101 => 0x00, 0x102 => 0x03, 0x300 => 0xC9})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100, sp: 0x200}, 40)
+
+      assert resultat.statut == :ok
+      assert resultat.state.pc == 0x103
+      assert resultat.state.sp == 0x200, "la pile doit être rendue"
+      assert resultat.cycles == 40, "24 pour le CALL, 16 pour le RET"
+    end
+
+    test "JP HL ne touche pas la mémoire" do
+      memoire = programme(%{0x100 => 0xE9})
+
+      resultat = Run.run!(memoire, %State{pc: 0x100, h: 0x12, l: 0x34}, 4)
+
+      assert resultat.state.pc == 0x1234
+      assert resultat.memoire == memoire
     end
 
     test "PC reboucle à 0xFFFF sans déborder" do
