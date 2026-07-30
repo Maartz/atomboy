@@ -162,6 +162,7 @@ defmodule Atomboy.Native.Machine do
   alias Atomboy.Native.ALU
   alias Atomboy.Native.Asm
   alias Atomboy.Native.Bus
+  alias Atomboy.Native.Blob
   alias Atomboy.Native.Cart
   alias Atomboy.Native.Image
   alias Atomboy.Native.Interp
@@ -260,7 +261,7 @@ defmodule Atomboy.Native.Machine do
 
     Image.build(
       [
-        driver(render?, rom),
+        driver(render?, rom, true),
         scanline(),
         line_done(render?),
         Interp.routines(budget_exit: :line_done),
@@ -337,7 +338,7 @@ defmodule Atomboy.Native.Machine do
   # and the timer's phase -- also out of the header, which is what lets a run
   # continue another one rather than restart it.
 
-  defp driver(render?, rom) do
+  defp driver(render?, rom, instret?) do
     header = Interp.header_offsets()
 
     [
@@ -352,7 +353,11 @@ defmodule Atomboy.Native.Machine do
       RV32.lhu(:t0, :t2, header.tima),
       RV32.sw(:t0, @state_pointer, @ms_tima),
       RV32.sw(:zero, @state_pointer, @ms_total),
-      Interp.instret_baseline(),
+      # Only under qemu. `instret` is CSR 0xC02, an optional user-level counter
+      # the C6 does not implement -- reading it there is an illegal instruction,
+      # and it took a Guru Meditation on the board to find out. Nothing on
+      # silicon wants it anyway: the host times the call in CPU cycles.
+      if(instret?, do: Interp.instret_baseline(), else: []),
       Asm.label(:frame_loop),
       RV32.sw(:zero, @state_pointer, @ms_ly),
 
@@ -677,6 +682,90 @@ defmodule Atomboy.Native.Machine do
           {:timer, [Asm.la(:t3, :machine_state), RV32.addi(:t3, :t3, @ms_div)], @ms_timer_size}
         ]
     )
+  end
+
+  # status, opcode, cycles, framebuffer, memory -- five words.
+  @result_size 20
+
+  @doc """
+  The same machine, as a subroutine an ESP-IDF application calls.
+
+  `image/4` builds something that boots, talks to a 16550 UART and powers the
+  machine off; on an ESP32-C6 none of those exist and none of them is wanted.
+  This emits the identical body -- the same driver, the same 501 handlers, the
+  same renderer -- wrapped by `Atomboy.Native.Blob` and ending in a `ret`
+  instead of a serial dump.
+
+  Assembled at base 0 and position independent: the caller copies the bytes
+  into executable memory and calls offset 0 as `uint32_t (*)(void *)`.
+
+  What comes back in `a0` is the address of a five-word block:
+
+      0   status      0 ok, 1 stopped on an opcode it does not know
+      4   opcode      the byte it stopped on, when it stopped
+      8   cycles      T-cycles run, the whole run
+      12  framebuffer the last frame, one shade per pixel -- 0 without `:render`
+      16  memory      the 64 KB, so a host can read OAM or a save
+
+  The guest's state lives inside the blob, so the copy the caller keeps *is* the
+  console: calling again continues where the last call stopped. What it must not
+  do is call the pristine bytes twice -- see `Atomboy.Native.Blob.relocate/0`.
+  """
+  @spec blob(binary(), State.t(), pos_integer(), keyword()) :: Asm.assembled()
+  def blob(memory, %State{} = state, frames, opts \\ [])
+      when byte_size(memory) == @memory and is_integer(frames) and frames > 0 do
+    render? = Keyword.get(opts, :render, true)
+    rom = Keyword.get(opts, :rom)
+
+    Blob.build(
+      [
+        driver(render?, rom, false),
+        scanline(),
+        line_done(render?),
+        Interp.routines(budget_exit: :line_done),
+        blob_exits(render?),
+        seam(rom),
+        Interp.handlers(),
+        ALU.routines(),
+        if(render?, do: PPU.routines(), else: [])
+      ],
+      data(memory, state, frames, render?, Keyword.get(opts, :timer, {0, 0}), rom) ++
+        [{:align, 4}, Asm.label(:blob_result), {:space, @result_size}]
+    )
+  end
+
+  @doc "How many bytes the block `blob/4` returns a pointer to occupies."
+  @spec result_size() :: pos_integer()
+  def result_size, do: @result_size
+
+  # The two exits an image sends over a serial port, answered instead. Both
+  # labels have to exist under either regime: `unknown_opcode` is what 500 jump
+  # table entries point at for a byte no handler covers.
+  defp blob_exits(render?) do
+    statuses = Interp.statuses()
+
+    [
+      Asm.label(:materialise),
+      RV32.li(:t2, statuses.ok),
+      Asm.j(:blob_report),
+      Asm.label(:unknown_opcode),
+      RV32.li(:t2, statuses.unknown_opcode),
+      Asm.label(:blob_report),
+      Asm.la(:a0, :blob_result),
+      RV32.sw(:t2, :a0, 0),
+      RV32.sw(Regs.opcode(), :a0, 4),
+      RV32.lw(:t0, @state_pointer, @ms_total),
+      RV32.sw(:t0, :a0, 8),
+      if render? do
+        [Asm.la(:t0, :framebuffer)]
+      else
+        [RV32.li(:t0, 0)]
+      end,
+      RV32.sw(:t0, :a0, 12),
+      Asm.la(:t0, :memory_gb),
+      RV32.sw(:t0, :a0, 16),
+      Asm.j(Blob.return())
+    ]
   end
 
   # ══ The data ═════════════════════════════════════════════════════════════════

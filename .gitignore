@@ -44,3 +44,5 @@ esp32/native/build/
 esp32/native/sdkconfig
 esp32/native/sdkconfig.old
 dependencies.lock
+esp32/native/main/blob.bin
+esp32/native/sdkconfig*

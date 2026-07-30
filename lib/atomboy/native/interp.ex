@@ -382,9 +382,12 @@ defmodule Atomboy.Native.Interp do
   defp record do
     [
       Asm.label(:report),
-      # Read before anything else: the report itself must not count.
-      RV32.csrrs(:s10, @instret, :zero),
-      RV32.sub(:s10, :s10, :s9),
+      # Read before anything else: the report itself must not count. The delta
+      # lands back in `s9`, the register already spoken for by the baseline:
+      # `s10` now carries `Regs.pages()` and `s11` the machine's state pointer,
+      # so the two obvious scratch registers are both somebody's.
+      RV32.csrrs(:t3, @instret, :zero),
+      RV32.sub(:s9, :t3, :s9),
       byte_out(RV32.li(:a0, @magic)),
       byte_out(RV32.mv(:a0, Regs.a())),
       byte_out(RV32.mv(:a0, Regs.f())),
@@ -405,10 +408,10 @@ defmodule Atomboy.Native.Interp do
       byte_out(RV32.srli(:a0, Regs.cycles(), 24)),
       byte_out(RV32.mv(:a0, :t2)),
       byte_out(RV32.mv(:a0, Regs.opcode())),
-      byte_out(RV32.mv(:a0, :s10)),
-      byte_out(RV32.srli(:a0, :s10, 8)),
-      byte_out(RV32.srli(:a0, :s10, 16)),
-      byte_out(RV32.srli(:a0, :s10, 24))
+      byte_out(RV32.mv(:a0, :s9)),
+      byte_out(RV32.srli(:a0, :s9, 8)),
+      byte_out(RV32.srli(:a0, :s9, 16)),
+      byte_out(RV32.srli(:a0, :s9, 24))
     ]
   end
 

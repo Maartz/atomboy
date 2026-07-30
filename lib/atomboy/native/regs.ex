@@ -74,10 +74,14 @@ defmodule Atomboy.Native.Regs do
     pages: :s10
   ]
 
-  # `s9` is not in the map and is not free either: `Atomboy.Native.Interp`
-  # samples the retired-instruction counter into it at startup and reads it
-  # back at the end. Nothing between the two may touch it.
-  @reserved [:s9]
+  # Two registers are spoken for without appearing in the map, and both were
+  # found the hard way -- by being handed to a second owner.
+  #
+  #   * `s9` holds `Atomboy.Native.Interp`'s retired-instruction baseline from
+  #     startup to the report. Nothing between the two may touch it.
+  #   * `s11` is `Atomboy.Native.Machine`'s pointer to the console state block,
+  #     live for a whole run.
+  @reserved [:s9, :s11]
 
   @doc "Registers spoken for outside `map/0`, which no role may claim."
   @spec reserved() :: [RV32.reg()]
