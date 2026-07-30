@@ -22,6 +22,12 @@ defmodule Atomboy.Native.Bus do
   cartridge register rather than memory. `Atomboy.CPU.CartLoop.ram_write/3` is
   the oracle for all of it.
 
+  A store below `0x8000` used to be dropped here, which was right while the
+  cartridge was a 32 KB slab that nothing could reconfigure. It is now sent to
+  the seam instead, because that is where `Atomboy.Native.Cart` reads it as a
+  bank select. It still never reaches memory: it skips the store rather than
+  undoing it, there being no way to un-write a byte.
+
   Every single-byte write therefore goes through the seam, and *every* form goes:
   `LD (HL), r` as much as `LD (a16), A`. Routing only the forms that name an
   address absolutely was tempting -- those are the ones an assembler produces for
@@ -34,7 +40,7 @@ defmodule Atomboy.Native.Bus do
   It sits on the hot path of every store, so the fast path carries two checks
   around the translation:
 
-      bltu address, rom_top, done    # below 0x8000 the cartridge answers: drop
+      bltu address, rom_top, seam    # below 0x8000 the cartridge is being spoken to
       <translate address, write>     # five instructions, into t1
       sb   source, t1, 0
       bltu address, io_base, done    # below 0xFF00 a store is only a store
@@ -232,10 +238,13 @@ defmodule Atomboy.Native.Bus do
     # And between the first check and that same point: the store, plus the
     # second check. Counted from the lists rather than written out, so that
     # lengthening the translation cannot silently retarget a branch.
-    head = 4 * (length(store) + 2) + tail
+    # A store below `rom_top` is the cartridge being spoken to, not memory being
+    # written: it skips the store entirely and lands on the seam's setup, which
+    # is the one path that can tell a bank select from a byte.
+    to_seam = 4 * (length(store) + 2)
 
     [
-      RV32.bltu(address, Regs.rom_top(), head),
+      RV32.bltu(address, Regs.rom_top(), to_seam),
       store,
       RV32.bltu(address, Regs.io_base(), 4 + tail),
       setup,

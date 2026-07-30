@@ -82,9 +82,11 @@ defmodule Atomboy.Native.Machine do
     * **0xFF04, DIV.** Any write resets the counter *and* its sub-counter to
       zero. Potion's own kernel does this on its second instruction.
 
-  Writes below 0x8000 are dropped rather than stored: they are MBC registers on
-  hardware, and in a flat memory they would rewrite the cartridge under the
-  program's feet.
+    * **Anything below 0x8000, the cartridge.** Nothing is stored -- those are MBC
+      registers on hardware, and in a flat memory a store would rewrite the
+      cartridge under the program's feet. With a `:rom` given, the write is a
+      bank select and `Atomboy.Native.Cart` acts on it; without one it is
+      dropped, which is what this loop did with it before banking existed.
 
   **Every** store form reaches this routine, and it took a hook in `Bus` to make
   that true. While only the three forms addressing memory absolutely were routed
@@ -160,6 +162,7 @@ defmodule Atomboy.Native.Machine do
   alias Atomboy.Native.ALU
   alias Atomboy.Native.Asm
   alias Atomboy.Native.Bus
+  alias Atomboy.Native.Cart
   alias Atomboy.Native.Image
   alias Atomboy.Native.Interp
   alias Atomboy.Native.PPU
@@ -253,20 +256,21 @@ defmodule Atomboy.Native.Machine do
   def image(memory, %State{} = state, frames, opts \\ [])
       when byte_size(memory) == @memory and is_integer(frames) and frames > 0 do
     render? = Keyword.get(opts, :render, false)
+    rom = Keyword.get(opts, :rom)
 
     Image.build(
       [
-        driver(render?),
+        driver(render?, rom),
         scanline(),
         line_done(render?),
         Interp.routines(budget_exit: :line_done),
         exits(render?),
-        seam(),
+        seam(rom),
         Interp.handlers(),
         ALU.routines(),
         if(render?, do: PPU.routines(), else: [])
       ],
-      data(memory, state, frames, render?, Keyword.get(opts, :timer, {0, 0}))
+      data(memory, state, frames, render?, Keyword.get(opts, :timer, {0, 0}), rom)
     )
   end
 
@@ -302,7 +306,11 @@ defmodule Atomboy.Native.Machine do
     render? = Keyword.get(opts, :render, false)
 
     image =
-      image(memory, state, frames, render: render?, timer: Keyword.get(opts, :timer, {0, 0}))
+      image(memory, state, frames,
+        render: render?,
+        timer: Keyword.get(opts, :timer, {0, 0}),
+        rom: Keyword.get(opts, :rom)
+      )
 
     case Qemu.run(image.code, opts) do
       %{status: :timeout, duration_us: us} ->
@@ -329,11 +337,12 @@ defmodule Atomboy.Native.Machine do
   # and the timer's phase -- also out of the header, which is what lets a run
   # continue another one rather than restart it.
 
-  defp driver(render?) do
+  defp driver(render?, rom) do
     header = Interp.header_offsets()
 
     [
       Interp.prologue(),
+      Cart.install(rom),
       Bus.bounds(:console),
       Asm.la(@state_pointer, :machine_state),
       RV32.lw(:t0, :t2, header.word),
@@ -589,9 +598,14 @@ defmodule Atomboy.Native.Machine do
   # routine, because `Bus` drops it before the store rather than after -- which is
   # the only order that works, there being no way to un-write a byte.
 
-  defp seam do
+  defp seam(rom) do
     [
       Asm.label(Bus.seam()),
+
+      # Below 0x8000 nothing was stored and nothing is going to be: this is the
+      # cartridge being spoken to, and only `Atomboy.Native.Cart` knows what it
+      # was told.
+      Asm.bltu(:a0, Regs.rom_top(), :cart_write),
 
       # 0xFF00: the matrix recomposed, as `Atomboy.Joypad.write/2` does it. Bits
       # 7-6 read high, the selection is kept, and the four lines of the selected
@@ -636,7 +650,8 @@ defmodule Atomboy.Native.Machine do
       RV32.add(:t1, Regs.mem(), :a0),
       RV32.sb(:t0, :t1, 0),
       Asm.label(:mmio_done),
-      RV32.ret()
+      RV32.ret(),
+      Cart.handle(rom, :mmio_done)
     ]
   end
 
@@ -666,9 +681,10 @@ defmodule Atomboy.Native.Machine do
 
   # ══ The data ═════════════════════════════════════════════════════════════════
 
-  defp data(memory, state, frames, render?, timer) do
+  defp data(memory, state, frames, render?, timer, rom) do
     [
       Interp.tables(),
+      Cart.data(rom),
       {:align, 4},
       Asm.label(:initial_state),
       Interp.header(state, frames, timer: timer),

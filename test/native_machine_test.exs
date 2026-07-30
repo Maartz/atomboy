@@ -41,7 +41,9 @@ defmodule Atomboy.NativeMachineTest do
 
   alias Atomboy.CPU.CartLoop
   alias Atomboy.CPU.State
+  alias Atomboy.BankedROM
   alias Atomboy.Native.Boot
+  alias Atomboy.Native.Cart
   alias Atomboy.Native.Machine
   alias Atomboy.PPU
   alias Atomboy.Screen
@@ -664,6 +666,52 @@ defmodule Atomboy.NativeMachineTest do
     end
   end
 
+  # ══ The cartridge ════════════════════════════════════════════════════════════
+
+  describe "the cartridge" do
+    test "a bank select changes which 16 KB answers at 0x4000" do
+      # Eight banks, bank N sixteen kilobytes of the byte N, and a program that
+      # asks for each in turn and keeps the first byte it finds. Flat memory
+      # answers 1 to all seven questions -- the bank that starts mapped -- so
+      # this fails loudly on anything that is not real banking.
+      {rom, expected} = BankedROM.build(banks: 8)
+
+      result = equivalence!(rom, 1)
+
+      for {address, bank} <- expected do
+        assert :binary.at(result.memory, address) == bank,
+               "bank #{bank} was asked for, bank #{:binary.at(result.memory, address)} answered"
+      end
+    end
+
+    test "the two clamps, on a cartridge small enough to need both" do
+      # Two banks, so `banks - 1` is 1. Asking for bank 0 is refused by the
+      # hardware's clamp and gives 1. Asking for bank 2 survives that clamp,
+      # masks to 0, and is only saved by the second one -- which is the clamp a
+      # reading of the formula would call redundant. Both must read as bank 1.
+      {rom, expected} = BankedROM.build(banks: 2, selects: [0, 2, 1])
+
+      assert expected == %{0xC000 => 1, 0xC001 => 1, 0xC002 => 1},
+             "the oracle's formula does not say what this test claims it says"
+
+      result = equivalence!(rom, 1)
+
+      for {address, bank} <- expected do
+        assert :binary.at(result.memory, address) == bank
+      end
+    end
+
+    test "a cartridge is a power of two whole banks" do
+      assert_raise ArgumentError, ~r/power of two/, fn ->
+        Cart.banks(:binary.copy(<<0>>, 3 * 0x4000))
+      end
+
+      assert_raise ArgumentError, ~r/whole number/, fn ->
+        Cart.banks(:binary.copy(<<0>>, 0x4001))
+      end
+    end
+  end
+
   # ══ Equivalence, in one line ═════════════════════════════════════════════════
 
   # Runs `frames` frames of `rom` through `Atomboy.Screen` and through the
@@ -674,8 +722,16 @@ defmodule Atomboy.NativeMachineTest do
     state = state || Screen.boot_state(rom, true)
     ram = Screen.boot_ram(rom, true) |> Map.merge(seed()) |> Map.merge(extra)
 
+    # A cartridge bigger than the address space is handed over whole, and the
+    # flat 64 KB then carries only the two banks that start mapped -- everything
+    # past them is reached through the page tables. See `Atomboy.Native.Cart`.
+    banked? = byte_size(rom) > 0x8000
+    resident = if banked?, do: Cart.resident(rom), else: rom
+
     {expected, oracle_ram} = oracle(state, rom, ram, frames)
-    result = Machine.run!(memory(rom, ram), state, frames)
+
+    result =
+      Machine.run!(memory(resident, ram), state, frames, if(banked?, do: [rom: rom], else: []))
 
     assert result.status == :ok,
            "the guest stopped on opcode #{inspect(result.opcode, base: :hex)}"
@@ -694,7 +750,7 @@ defmodule Atomboy.NativeMachineTest do
 
     assert result.state == expected
 
-    assert binary_part(result.memory, 0, 0x8000) == rom,
+    assert binary_part(result.memory, 0, 0x8000) == resident,
            "the guest wrote into the cartridge"
 
     divergences =
