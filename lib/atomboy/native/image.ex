@@ -42,14 +42,20 @@ defmodule Atomboy.Native.Image do
   def base, do: @base
 
   @doc """
-  Construit une image complète : le préambule, le corps, puis le socle.
+  Construit une image complète : le préambule, le code, le socle, les données.
 
-  Le corps reçoit la main avec la pile installée ; il termine en sautant à
+  Le code reçoit la main avec la pile installée ; il termine en sautant à
   `:poweroff`, ou en tombant dedans.
+
+  Les données passent **après** tout le code, et ce n'est pas cosmétique : les
+  branchements conditionnels du RISC-V ne portent qu'à ±4 Ko. Glisser 64 Ko de
+  mémoire émulée au milieu du code mettrait hors de portée tout branchement qui
+  l'enjambe, et l'assembleur le dirait — mais bien plus tard, quand la table
+  sera pleine.
   """
-  @spec build([Asm.item()]) :: Atomboy.Native.Asm.assembled()
-  def build(body) do
-    Asm.assemble([prelude(), body, runtime()], @base)
+  @spec build([Asm.item()], [Asm.item()]) :: Atomboy.Native.Asm.assembled()
+  def build(code, data \\ []) do
+    Asm.assemble([prelude(), code, runtime(), data], @base)
   end
 
   @doc """
@@ -84,7 +90,11 @@ defmodule Atomboy.Native.Image do
 
   # ══ Le socle ═════════════════════════════════════════════════════════════════
 
-  defp runtime do
+  @doc """
+  Le socle, exposé pour les images qui composent elles-mêmes leur disposition.
+  """
+  @spec runtime() :: [Asm.item()]
+  def runtime do
     [putc(), puts(), poweroff()]
   end
 

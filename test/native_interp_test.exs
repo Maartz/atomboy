@@ -1,0 +1,185 @@
+defmodule Atomboy.NativeInterpTest do
+  @moduledoc """
+  L'interpréteur natif contre l'oracle — la même méthode que `loop_test.exs`.
+
+  `Atomboy.CPU.Loop` n'est pas validé par les vecteurs SM83 mais par héritage :
+  l'oracle passe les vecteurs, et l'équivalence croisée sur programmes
+  aléatoires prouve que la boucle rapide en est indiscernable. L'interpréteur
+  RV32 est un troisième backend et se valide exactement pareil, à ceci près que
+  l'écart à combler est plus large — un encodage d'instruction, un jeu de
+  registres, un assembleur et un émulateur de processeur séparent les deux
+  états qu'on compare.
+
+  Les graines sont fixes : un échec est reproductible tel quel.
+  """
+
+  use ExUnit.Case, async: true
+
+  alias Atomboy.CPU.State
+  alias Atomboy.Memory.Flat
+  alias Atomboy.Native.Emit
+  alias Atomboy.Native.Interp
+  alias Atomboy.Native.Run
+
+  @moduletag :qemu
+  # Le harnais paie un lancement de qemu et un vidage de 64 Ko par exécution.
+  @moduletag timeout: 120_000
+
+  @steps 500
+  @seeds 1..5
+
+  describe "la couverture" do
+    test "l'étape 1 couvre NOP et les LD registre à registre" do
+      couverts = MapSet.new(Emit.couverture())
+
+      assert {nil, 0x00} in couverts, "NOP"
+      assert {nil, 0x41} in couverts, "LD B, C"
+      assert {nil, 0x7F} in couverts, "LD A, A"
+
+      # 0x76 est HALT, pas un LD : le trou dans le bloc x=1.
+      refute {nil, 0x76} in couverts, "HALT n'est pas un LD"
+      # La colonne et la ligne (HL) touchent la mémoire — étape 4.
+      refute {nil, 0x46} in couverts, "LD B, (HL)"
+      refute {nil, 0x70} in couverts, "LD (HL), B"
+
+      assert MapSet.size(couverts) == 50, "NOP plus 49 LD r, r'"
+    end
+
+    test "tout ce que le natif couvre, l'oracle le couvre aussi" do
+      assert MapSet.subset?(MapSet.new(Emit.couverture()), MapSet.new(Atomboy.CPU.implemented()))
+    end
+  end
+
+  describe "l'exécution" do
+    test "une mémoire de NOP avance PC d'un cran par instruction" do
+      memoire = :binary.copy(<<0x00>>, 0x10000)
+
+      resultat = Run.run!(memoire, %State{}, 100)
+
+      assert resultat.statut == :ok
+      assert resultat.cycles == 100
+      assert resultat.state.pc == 25
+      assert resultat.memoire == memoire
+    end
+
+    test "un opcode hors couverture s'arrête net et se nomme" do
+      # 0x76 : HALT, présent dans la table mais pas encore émis.
+      memoire = :binary.copy(<<0x76>>, 0x10000)
+
+      resultat = Run.run!(memoire, %State{}, 100)
+
+      assert resultat.statut == :opcode_inconnu
+      assert resultat.opcode == 0x76
+    end
+
+    test "un état avec IME armé est refusé plutôt que mal exécuté" do
+      memoire = :binary.copy(<<0x00>>, 0x10000)
+
+      resultat = Run.run!(memoire, %State{ime: 1}, 100)
+
+      assert resultat.statut == :etat_non_supporte,
+             "les interruptions arrivent à l'étape 8 — d'ici là, l'invité doit refuser"
+    end
+
+    test "PC reboucle à 0xFFFF sans déborder" do
+      memoire = :binary.copy(<<0x00>>, 0x10000)
+
+      resultat = Run.run!(memoire, %State{pc: 0xFFFE}, 12)
+
+      assert resultat.statut == :ok
+      assert resultat.state.pc == 1
+    end
+  end
+
+  describe "l'équivalence croisée avec l'oracle" do
+    for seed <- @seeds do
+      test "programme aléatoire, graine #{seed}" do
+        :rand.seed(:exsss, {unquote(seed), 0, 0})
+
+        memoire = programme_aleatoire()
+        state = etat_aleatoire()
+
+        {attendu, memoire_oracle, budget} = oracle(memoire, state, @steps)
+
+        resultat = Run.run!(memoire, state, budget)
+
+        assert resultat.statut == :ok
+        assert resultat.cycles == budget
+        assert resultat.state == attendu
+
+        divergences =
+          for addr <- 0..0xFFFF,
+              octet_oracle = Flat.read8(memoire_oracle, addr),
+              octet_natif = :binary.at(resultat.memoire, addr),
+              octet_oracle != octet_natif,
+              do: {addr, octet_oracle, octet_natif}
+
+        assert divergences == []
+      end
+    end
+  end
+
+  describe "la taille du code" do
+    test "l'interpréteur reste très en deçà de l'icache du C6" do
+      memoire = :binary.copy(<<0x00>>, 0x10000)
+      image = Interp.image(memoire, %State{}, 1)
+
+      # `table_base` ouvre la section de données : tout ce qui précède est du
+      # code. C'est ce chiffre-là qui devra tenir dans 32 Ko une fois les 501
+      # opcodes émis.
+      code = image.labels[:table_base]
+
+      assert code < 32 * 1024,
+             "le code fait #{code} octets — l'icache du C6 en fait 32 768"
+    end
+  end
+
+  # ══ Génération ═══════════════════════════════════════════════════════════════
+
+  # Un octet par adresse, tiré de ce que le natif sait émettre. Aucun n'étant un
+  # saut, PC parcourt l'espace linéairement et reboucle — chaque tirage est un
+  # programme valide de bout en bout, et aucun n'écrit en mémoire à ce stade.
+  defp programme_aleatoire do
+    opcodes = for {nil, op} <- Emit.couverture(), do: op
+
+    0..0xFFFF
+    |> Enum.map(fn _addr -> Enum.random(opcodes) end)
+    |> :binary.list_to_bin()
+  end
+
+  defp etat_aleatoire do
+    %State{
+      a: :rand.uniform(256) - 1,
+      # F : quatre bits hauts seulement, comme le matériel.
+      f: (:rand.uniform(16) - 1) * 16,
+      b: :rand.uniform(256) - 1,
+      c: :rand.uniform(256) - 1,
+      d: :rand.uniform(256) - 1,
+      e: :rand.uniform(256) - 1,
+      h: :rand.uniform(256) - 1,
+      l: :rand.uniform(256) - 1,
+      sp: :rand.uniform(0x10000) - 1,
+      pc: :rand.uniform(0x10000) - 1
+    }
+  end
+
+  # N pas d'oracle sur une mémoire plate initialisée depuis le programme. Le
+  # budget rendu est la somme exacte des cycles de ces N pas : si le natif
+  # comptait autrement, il exécuterait un nombre différent d'instructions et
+  # les états divergeraient.
+  defp oracle(memoire, state, steps) do
+    plate =
+      Flat.new(
+        for {byte, addr} <- Enum.with_index(:binary.bin_to_list(memoire)), do: {addr, byte}
+      )
+
+    boucle(state, plate, 0, steps)
+  end
+
+  defp boucle(st, mem, cycles, 0), do: {st, mem, cycles}
+
+  defp boucle(st, mem, cycles, steps) do
+    {st, mem, pas} = Atomboy.CPU.tick(st, mem)
+    boucle(st, mem, cycles + pas, steps - 1)
+  end
+end

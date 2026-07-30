@@ -33,11 +33,14 @@ defmodule Atomboy.Native.Asm do
       {:align, n}               bourrage de zéros jusqu'au multiple de n
       {:ref, nom, encodeur}     4 octets, comblés par `encodeur.(distance)`
       {:addr, nom}              4 octets : l'adresse absolue de l'étiquette
+      {:la, rd, nom}            8 octets : charge l'adresse de nom dans rd
       {:space, n}               n octets à zéro
 
   `{:addr, nom}` est ce qui rend la table de saut possible : 256 mots contenant
   l'adresse de chaque gestionnaire, chargés par un `lw` et suivis d'un `jr`.
   """
+
+  import Bitwise
 
   alias Atomboy.Native.RV32
 
@@ -48,6 +51,7 @@ defmodule Atomboy.Native.Asm do
           | {:align, pos_integer()}
           | {:ref, atom(), (integer() -> binary())}
           | {:addr, atom()}
+          | {:la, RV32.reg(), atom()}
           | {:space, non_neg_integer()}
 
   @typedoc "Le résultat d'un assemblage : les octets, et où chaque étiquette est tombée."
@@ -108,6 +112,7 @@ defmodule Atomboy.Native.Asm do
   defp size(binary, _offset) when is_binary(binary), do: byte_size(binary)
   defp size({:ref, _, _}, _offset), do: 4
   defp size({:addr, _}, _offset), do: 4
+  defp size({:la, _, _}, _offset), do: 8
   defp size({:space, n}, _offset), do: n
   defp size({:align, n}, offset), do: padding(offset, n)
 
@@ -152,6 +157,20 @@ defmodule Atomboy.Native.Asm do
     encoder.(resolve!(labels, name) - offset)
   end
 
+  # `auipc` pose les 20 bits hauts d'une distance relative au PC, `addi` ajoute
+  # les 12 bas — et comme `addi` sign-étend, les bits hauts sont arrondis pour
+  # compenser, exactement comme dans `RV32.li/2`. Relatif au PC plutôt
+  # qu'absolu : l'image reste déplaçable, ce qui comptera le jour où elle ne
+  # sera plus chargée à 0x8000_0000 mais quelque part dans la flash d'un C6.
+  defp bytes({:la, rd, name}, offset, _base, labels) do
+    delta = resolve!(labels, name) - offset
+    high = (delta + 0x800) >>> 12 &&& 0xFFFFF
+    low = delta - (high <<< 12) &&& 0xFFF
+    low = if low > 0x7FF, do: low - 0x1000, else: low
+
+    RV32.auipc(rd, high) <> RV32.addi(rd, rd, low)
+  end
+
   defp resolve!(labels, name) do
     case labels do
       %{^name => offset} ->
@@ -176,6 +195,16 @@ defmodule Atomboy.Native.Asm do
   @doc "Un appel de sous-routine : l'adresse de retour part dans `ra`."
   @spec call(atom()) :: item()
   def call(name), do: {:ref, name, &RV32.jal(:ra, &1)}
+
+  @doc """
+  Charge l'adresse d'une étiquette dans un registre — deux instructions.
+
+  C'est ce qui permet au pilote de désigner la table de saut, la zone d'état et
+  les 64 Ko de mémoire émulée sans qu'aucune adresse absolue ne soit écrite en
+  dur nulle part.
+  """
+  @spec la(RV32.reg(), atom()) :: item()
+  def la(rd, name), do: {:la, rd, name}
 
   for branch <- [:beq, :bne, :blt, :bge, :bltu, :bgeu] do
     @doc "`#{branch} rs1, rs2, étiquette`"
