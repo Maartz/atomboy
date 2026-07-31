@@ -54,20 +54,32 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
 #define PANEL_W 240
 #define PANEL_H 320
 
-/* 80 MHz, and it took three attempts spread over two days to earn that.
+/* Back down to 20, and the way back up is a measurement rather than a memory.
  *
  * It started at 10, deliberately: on loose jumper wires 40 is a coin toss --
  * the clock rings, the data is sampled wrong, and the panel ignores every
  * command and stays in the white it powered up in, which is exactly what it
- * did. Then 20, once the picture was trusted. 40 and 80 both hold on wiring
- * that has since been done properly, and the difference is not cosmetic:
- * 103,680 bytes a frame at 20 MHz is 41 ms, which capped the console at 40% of
- * real time and left the music full of holes. At 80 it is 10 ms and the limit
- * moved to the emulator, where it belongs.
+ * did. Then 20, once the picture was trusted. 40 and 80 both held on wiring
+ * that had since been done properly, and the difference is not cosmetic:
+ * 103,680 bytes a frame at 20 MHz is 41 ms, which caps the console at 40% of
+ * real time and leaves the music full of holes. At 80 it is 10 ms and the limit
+ * moves to the emulator, where it belongs.
  *
- * Speed is still the last thing to raise. It is simply worth raising once
- * everything below it is known good. */
-#define SPI_HZ (80 * 1000 * 1000)
+ * Then the panel came up white again at 80, on the same code that had painted
+ * at 80 the day before, and that is the whole argument for this line. Nothing
+ * above the wires changed; what a bus at 80 MHz carries on jumper wires is a
+ * property of the wires that afternoon, and it is not a number one gets to
+ * learn once. 20 is where the picture was last trusted on the worst wiring this
+ * project has had.
+ *
+ * `panel_sweep` below exists to earn a higher number back -- five speeds, RGB at
+ * each, and an eye. Raising this without running it is how the afternoon went
+ * that produced the comment you are reading. */
+#define SPI_HZ (20 * 1000 * 1000)
+
+/* TEMPORAIRE -- avec 1, `panel_sweep` ne rend jamais la main et la console ne
+ * demarre pas. */
+#define PANEL_SOAK 0
 
 #define GB_W 160
 #define GB_H 144
@@ -89,6 +101,27 @@ extern const uint8_t blob_end[] asm("_binary_blob_bin_end");
 
 #define ORIGIN_X ((PANEL_W - OUT_W) / 2)
 #define ORIGIN_Y ((PANEL_H - OUT_H) / 2)
+
+/* The frame cut into horizontal bands, for a measurement and not yet for a
+ * transfer. Nine of 24 lines: 216 divides by nine exactly, and 24 lines is
+ * 11,520 bytes -- 1.2 ms on the bus where the whole frame is 10.
+ *
+ * Nothing below sends a band. The comparison runs, the numbers are logged once
+ * a second, and the whole frame goes out in one transfer exactly as it did
+ * before. That is deliberate: a measurement that cannot change the picture
+ * cannot be blamed for it either.
+ *
+ * The question it answers is the one the band idea rests on and that nobody has
+ * asked this hardware yet -- how much of the screen actually changes between two
+ * frames. "The falling piece and nothing else" is a guess, and the last guess
+ * about this panel cost an evening. */
+#define BANDS 9
+#define BAND_H (OUT_H / BANDS)
+
+/* How often the tally is said out loud. Sixty frames is one second of console,
+ * and one extra line a second is what the serial port can carry -- the per-frame
+ * line is already 85 characters, which at 115200 baud is 7 ms of every 16.7. */
+#define BANDS_REPORT_EVERY 60
 
 /* The pinned checksum is the tenth frame -- test/native_machine_test.exs,
  * @hero_crc -- and the blob is built for one frame a call. */
@@ -201,7 +234,10 @@ static uint16_t rgb565_be(const uint8_t rgb[3]) {
   return (uint16_t)((value >> 8) | (value << 8));
 }
 
-static esp_lcd_panel_handle_t panel_open(void) {
+/* `hz` rather than SPI_HZ, and `io_out` rather than nothing, so the sweep below
+ * can open the same panel five times at five speeds and close it in between.
+ * The console calls this exactly once, with SPI_HZ and a handle it discards. */
+static esp_lcd_panel_handle_t panel_open(int hz, esp_lcd_panel_io_handle_t *io_out) {
   gpio_config_t backlight = {.mode = GPIO_MODE_OUTPUT, .pin_bit_mask = 1ULL << PIN_BL};
   ESP_ERROR_CHECK(gpio_config(&backlight));
   gpio_set_level(PIN_BL, 0);
@@ -221,7 +257,7 @@ static esp_lcd_panel_handle_t panel_open(void) {
   esp_lcd_panel_io_spi_config_t io_config = {
       .dc_gpio_num = PIN_DC,
       .cs_gpio_num = PIN_CS,
-      .pclk_hz = SPI_HZ,
+      .pclk_hz = hz,
       .lcd_cmd_bits = 8,
       .lcd_param_bits = 8,
       .spi_mode = 0,
@@ -249,7 +285,22 @@ static esp_lcd_panel_handle_t panel_open(void) {
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
   gpio_set_level(PIN_BL, 1);
+
+  if (io_out != NULL) {
+    *io_out = io;
+  }
+
   return panel;
+}
+
+/* The other half of `panel_open`, for the sweep alone: the console opens the
+ * panel once and never gives it back. Torn down in the order it was built, and
+ * the bus last -- `spi_bus_free` refuses while a device is still on it. */
+static void panel_close(esp_lcd_panel_handle_t panel, esp_lcd_panel_io_handle_t io) {
+  gpio_set_level(PIN_BL, 0);
+  ESP_ERROR_CHECK(esp_lcd_panel_del(panel));
+  ESP_ERROR_CHECK(esp_lcd_panel_io_del(io));
+  ESP_ERROR_CHECK(spi_bus_free(SPI2_HOST));
 }
 
 /* Three solid screens before anything subtle, and the *whole* panel each time.
@@ -281,7 +332,36 @@ static void panel_prove(esp_lcd_panel_handle_t panel, uint16_t *scratch) {
     }
 
     ESP_LOGI(TAG, "painted the whole panel %s", i == 0 ? "red" : i == 1 ? "green" : "blue");
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    vTaskDelay(pdMS_TO_TICKS(900));
+  }
+}
+
+/* TEMPORAIRE -- le meme banc de test a cinq vitesses, en boucle et sans fin.
+ *
+ * The panel came up white at 80 MHz and painted at 10, which puts the fault in
+ * the signalling rather than in any wire being absent -- and leaves one number
+ * to find: the fastest clock this wiring carries *today*. Asking a person to
+ * watch three separate flashes is three chances to blink at the wrong moment,
+ * so the board asks itself: open, paint, close, next speed, round again.
+ *
+ * Nothing below this runs. The console never starts, which is the point --
+ * `esp_lcd_panel_draw_bitmap` reports ESP_OK into an unplugged panel just as
+ * happily as into a working one, so the only instrument here is an eye. */
+static void panel_sweep(uint16_t *scratch) {
+  static const int speeds[] = {10, 20, 40, 60, 80};
+
+  while (1) {
+    for (size_t i = 0; i < sizeof(speeds) / sizeof(speeds[0]); i++) {
+      esp_lcd_panel_io_handle_t io = NULL;
+
+      ESP_LOGW(TAG, "==== SPI a %d MHz ====", speeds[i]);
+
+      esp_lcd_panel_handle_t panel = panel_open(speeds[i] * 1000 * 1000, &io);
+      panel_prove(panel, scratch);
+      panel_close(panel, io);
+    }
+
+    ESP_LOGW(TAG, "---- fin du balayage, on recommence ----");
   }
 }
 
@@ -449,7 +529,12 @@ void app_main(void) {
    * one. Without the fence the processor may run whatever was there before. */
   __asm__ volatile("fence.i" ::: "memory");
 
-  esp_lcd_panel_handle_t panel = panel_open();
+  /* TEMPORAIRE -- ne rend jamais la main. A retirer avec `panel_sweep`. */
+  if (PANEL_SOAK) {
+    panel_sweep(pixels[0]);
+  }
+
+  esp_lcd_panel_handle_t panel = panel_open(SPI_HZ, NULL);
   panel_prove(panel, pixels[0]);
 
   i2c_master_bus_config_t i2c_bus = {
@@ -513,6 +598,17 @@ void app_main(void) {
 
   /* Which buffer the emulator may write. The other one belongs to the panel. */
   int page = 0;
+
+  /* The tally, one second at a time: how many frames changed n bands, the worst
+   * run count seen, and the dearest the comparison itself ever cost. The first
+   * frame is left out of all three -- the page it would be compared against is
+   * whatever `heap_caps_malloc` handed back, and a number derived from
+   * uninitialised memory is worse than no number. */
+  unsigned changed_histogram[BANDS + 1] = {0};
+  unsigned frames_tallied = 0;
+  int worst_runs = 0;
+  uint32_t compare_peak = 0;
+  int first = 1;
 
   audio_resume(audio);
 
@@ -580,8 +676,10 @@ void app_main(void) {
 
     /* Scale and colour in one pass. The 2/3 division is integer and lands on
      * the pattern 0,0,1,1,2,3,3,4,4,5 -- two source pixels stretched into
-     * three, forever. */
+     * three, forever. The whole frame, every time -- which is what lets the
+     * other page stand in for the panel's contents further down. */
     uint16_t *const frame = pixels[page];
+    const uint16_t *const previous = pixels[page ^ 1];
 
     for (int y = 0; y < OUT_H; y++) {
       const uint8_t *row = shades + (y * 2 / 3) * GB_W;
@@ -646,9 +744,79 @@ void app_main(void) {
 
     const uint32_t drawn = esp_cpu_get_cycle_count() - before;
 
+    /* The measurement, taken after `drawn` so the palette figure stays the same
+     * number it was before this existed and remains comparable to yesterday's
+     * logs.
+     *
+     * `previous` is the other page. The panel received it whole one frame ago
+     * and nothing has touched it since, so it is exactly what the glass shows --
+     * an equivalence that holds only while the transfer below stays whole, and
+     * that stops holding the moment a band is skipped. Which is the point: this
+     * measures the picture the band idea would be allowed to skip, before
+     * anything is skipped. */
+    const uint32_t compare_before = esp_cpu_get_cycle_count();
+
+    int changed = 0, runs = 0, was_dirty = 0;
+
+    for (int b = 0; b < BANDS; b++) {
+      const size_t offset = (size_t)b * BAND_H * OUT_W;
+      const int differs =
+          memcmp(frame + offset, previous + offset, (size_t)BAND_H * OUT_W * 2) != 0;
+
+      if (differs) {
+        changed++;
+
+        if (!was_dirty) {
+          runs++;
+        }
+      }
+
+      was_dirty = differs;
+    }
+
+    const uint32_t compared = esp_cpu_get_cycle_count() - compare_before;
+
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y, ORIGIN_X + OUT_W,
                                               ORIGIN_Y + OUT_H, frame));
     page ^= 1;
+
+    if (first) {
+      first = 0;
+    } else {
+      changed_histogram[changed]++;
+      frames_tallied++;
+
+      if (runs > worst_runs) {
+        worst_runs = runs;
+      }
+
+      if (compared > compare_peak) {
+        compare_peak = compared;
+      }
+
+      if (frames_tallied == BANDS_REPORT_EVERY) {
+        char tally[96] = "";
+        size_t written = 0;
+
+        for (int b = 0; b <= BANDS; b++) {
+          if (changed_histogram[b] > 0) {
+            written += (size_t)snprintf(tally + written, sizeof(tally) - written, "%d:%u ", b,
+                                        changed_histogram[b]);
+          }
+        }
+
+        /* Read it as: of sixty frames, this many changed n bands. A column at 0
+         * is a frame that could have gone out as nothing at all; a column at 9
+         * is one the idea buys nothing on. */
+        ESP_LOGI(TAG, "bands changed over %d frames: %s-- runs up to %d, compare %lu us at worst",
+                 BANDS_REPORT_EVERY, tally, worst_runs, (unsigned long)(compare_peak / 160u));
+
+        memset(changed_histogram, 0, sizeof(changed_histogram));
+        frames_tallied = 0;
+        worst_runs = 0;
+        compare_peak = 0;
+      }
+    }
 
     const int64_t elapsed = esp_timer_get_time() - audio_t0;
 
