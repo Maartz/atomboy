@@ -744,24 +744,37 @@ void app_main(void) {
 
     const uint32_t drawn = esp_cpu_get_cycle_count() - before;
 
-    /* The measurement, taken after `drawn` so the palette figure stays the same
-     * number it was before this existed and remains comparable to yesterday's
-     * logs.
+    /* Which bands the panel still needs, taken after `drawn` so the palette
+     * figure stays the same number it was before this existed and remains
+     * comparable to yesterday's logs.
      *
-     * `previous` is the other page. The panel received it whole one frame ago
-     * and nothing has touched it since, so it is exactly what the glass shows --
-     * an equivalence that holds only while the transfer below stays whole, and
-     * that stops holding the moment a band is skipped. Which is the point: this
-     * measures the picture the band idea would be allowed to skip, before
-     * anything is skipped. */
+     * `previous` is the other page: the frame before this one, because the two
+     * pages alternate and nothing else writes them. What makes it safe to skip a
+     * band is not that `previous` is what the glass shows -- once bands are
+     * skipped it stops being that -- but an induction one step longer. Suppose
+     * the glass already carries frame N-1 in every band. A band identical
+     * between N and N-1 therefore already shows frame N, and sending it would
+     * change nothing; a band that differs is sent. Either way the glass carries
+     * frame N in every band, which is the hypothesis again for N+1.
+     *
+     * It rests entirely on the comparison being against the immediately previous
+     * frame. Two pages give exactly that and a third would not: with three, the
+     * other page is two frames back and a band that changed in N-1 and changed
+     * back in N would read as clean while the glass still held N-2. */
     const uint32_t compare_before = esp_cpu_get_cycle_count();
 
+    int dirty[BANDS];
     int changed = 0, runs = 0, was_dirty = 0;
 
     for (int b = 0; b < BANDS; b++) {
       const size_t offset = (size_t)b * BAND_H * OUT_W;
+
+      /* The first frame has no predecessor -- the other page is whatever
+       * `heap_caps_malloc` returned -- so everything goes out. */
       const int differs =
-          memcmp(frame + offset, previous + offset, (size_t)BAND_H * OUT_W * 2) != 0;
+          first || memcmp(frame + offset, previous + offset, (size_t)BAND_H * OUT_W * 2) != 0;
+
+      dirty[b] = differs;
 
       if (differs) {
         changed++;
@@ -776,8 +789,34 @@ void app_main(void) {
 
     const uint32_t compared = esp_cpu_get_cycle_count() - compare_before;
 
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y, ORIGIN_X + OUT_W,
-                                              ORIGIN_Y + OUT_H, frame));
+    /* Runs rather than bands, because the cost of a band is not its bytes.
+     * Sending 216 single lines took 49.7 ms against 16.7 for the same pixels in
+     * one transfer, which puts roughly 0.15 ms on each transaction regardless of
+     * size -- so nine transfers of one band would spend more on overhead than
+     * three contiguous bands cost in bus time. The measurement said `runs up to
+     * 1`: in practice this is one transfer of two or three bands, and on a still
+     * screen it is no transfer at all. */
+    for (int b = 0; b < BANDS;) {
+      if (!dirty[b]) {
+        b++;
+        continue;
+      }
+
+      int end = b;
+
+      while (end + 1 < BANDS && dirty[end + 1]) {
+        end++;
+      }
+
+      const int top = b * BAND_H;
+      const int bottom = (end + 1) * BAND_H;
+
+      ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, ORIGIN_X, ORIGIN_Y + top,
+                                                ORIGIN_X + OUT_W, ORIGIN_Y + bottom,
+                                                frame + (size_t)top * OUT_W));
+      b = end + 1;
+    }
+
     page ^= 1;
 
     if (first) {
