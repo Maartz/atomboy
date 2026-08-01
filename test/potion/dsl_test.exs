@@ -397,8 +397,8 @@ defmodule Potion.DSLTest do
         body
         |> Potion.Compiler.compile(allocation)
         |> Enum.filter(fn
-          {:jr, _, {:label, :potion_installed}} -> false
-          {:jr, _, _} -> true
+          {_, _, {:label, :potion_installed}} -> false
+          {mnemonic, _, _} when mnemonic in [:jr, :jp] -> true
           _ -> false
         end)
         |> Enum.map(&elem(&1, 1))
@@ -415,6 +415,27 @@ defmodule Potion.DSLTest do
       # Less-or-equal is the only one that jumps *into* the body: "C or Z"
       # cannot be said by jumping away from it.
       assert conditions.(:<=) == [:c, :nz]
+    end
+
+    # The jumps that leave an `if` are absolute, and this is the reason. They
+    # were relative, which reaches 127 bytes, and Pong's ball walked off that
+    # cliff at 152: a collision, the offset it was struck at, and two ladders of
+    # four speeds. Nothing about that block is extravagant — but the failure it
+    # produced spoke of JR displacements, which is not a thing the author of a
+    # game has any reason to have heard of.
+    #
+    # Forty assignments at five bytes each put the label some two hundred bytes
+    # past the jump, which no relative jump can reach and every absolute one can.
+    test "an `if` block may be larger than a relative jump could reach" do
+      allocation = Potion.Compiler.allocate(x: 0, hit: 0)
+
+      statements = for value <- 1..40, do: {:=, [], [{:hit, [], nil}, rem(value, 256)]}
+      condition = {:>, [], [{:x, [], nil}, 5]}
+      body = {:if, [], [condition, [do: {:__block__, [], statements}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert is_binary(Potion.Assembler.assemble(Potion.Runtime.program(elements), origin: 0x0150))
     end
 
     test "the comparison loads the variable it names" do
@@ -612,7 +633,7 @@ defmodule Potion.DSLTest do
 
       assert {:ld, :a, {:mem, allocation.cells.vx}} in elements
       assert {:bit, 7, :a} in elements
-      assert Enum.any?(elements, &match?({:jr, :z, {:label, _}}, &1))
+      assert Enum.any?(elements, &match?({:jp, :z, {:label, _}}, &1))
       refute Enum.any?(elements, &match?({:cp, :a, _}, &1))
     end
 

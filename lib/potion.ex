@@ -425,8 +425,8 @@ defmodule Potion do
   # The dry run of the assembly: is the fragment a program? The kernel checks the
   # closing RET, the assembler the labels and the jump ranges. Doing it here
   # rather than on the first call to `rom/0` is the whole benefit of a compiled
-  # language: an `if` whose block overshoots the range of a JR shows up in `mix
-  # compile`, not three weeks later on a flashcart.
+  # language: a fragment that is not a program shows up in `mix compile`, not
+  # three weeks later on a flashcart.
   defp verify!(fragment, name) do
     Assembler.assemble(Runtime.program(fragment), origin: 0x0150)
     :ok
@@ -440,9 +440,9 @@ defmodule Potion do
                 #{error.message}
 
                 The body compiled, but the fragment that came out of it is not a \
-                valid program. If the message speaks of a jump out of range, it is \
-                an `if` block that is too big: JR only jumps 127 bytes, and the v0 \
-                knows nothing but JR.
+                valid program. An `if` block of any size is fine — every jump that \
+                leaves one is absolute — so a jump out of range here is a bug in \
+                the compiler and not in the game.
                 """
               ],
               __STACKTRACE__

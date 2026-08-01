@@ -296,7 +296,10 @@ defmodule Potion.Compiler do
     [
       {:ld, :a, {:mem, allocation.installed}},
       {:and, :a, :a},
-      {:jr, :nz, {:label, installed_label(allocation)}},
+      # JP and not JR: what this jumps over is five bytes per declared variable,
+      # so an actor with twenty-six of them would put the label out of a JR's
+      # reach. See `skip_unless/4` for why that rule is applied everywhere.
+      {:jp, :nz, {:label, installed_label(allocation)}},
       {:ld, :a, 0x01},
       {:ld, {:mem, allocation.installed}, :a}
     ] ++
@@ -417,7 +420,7 @@ defmodule Potion.Compiler do
   defp else_tail(body, otherwise, done, allocation, counter) do
     {elements, counter} = block(body, allocation, counter)
 
-    {[{:jr, {:label, done}}, {:label, otherwise}] ++ elements ++ [{:label, done}], counter}
+    {[{:jp, {:label, done}}, {:label, otherwise}] ++ elements ++ [{:label, done}], counter}
   end
 
   # ── The conditions ──────────────────────────────────────────────────────────
@@ -433,7 +436,7 @@ defmodule Potion.Compiler do
     {[
        {:ld, :a, {:mem, Runtime.pad()}},
        {:bit, bit, :a},
-       {:jr, :z, {:label, otherwise}}
+       {:jp, :z, {:label, otherwise}}
      ], counter}
   end
 
@@ -451,7 +454,7 @@ defmodule Potion.Compiler do
     {[
        {:ld, :a, {:mem, cell!(name, allocation, statement)}},
        {:bit, 7, :a},
-       {:jr, :z, {:label, otherwise}}
+       {:jp, :z, {:label, otherwise}}
      ], counter}
   end
 
@@ -509,20 +512,37 @@ defmodule Potion.Compiler do
   # one jump; `>` needs two, since it must rule out both equality and the
   # borrow; and `<=` is the only one that jumps *into* the body, because "C or
   # Z" cannot be spelled by jumping away from it.
+  #
+  # Every jump that leaves for `otherwise` is a JP and not a JR, and that is the
+  # rule rather than a local choice: `otherwise` sits past the body, the body is
+  # whatever the game wrote, and a relative jump reaches 127 bytes. Pong's ball
+  # found the cliff at 152 -- a collision, the offset it was struck at, and two
+  # ladders of four speeds. Nothing about that block is extravagant, and the
+  # failure it produced named an assembler the author of the game has no reason
+  # to have heard of.
+  #
+  # It costs one byte and four cycles per taken jump. Choosing JR when it fits
+  # and JP when it does not would cost neither, and wants an assembler that
+  # relaxes branches -- sizes depend on distances which depend on sizes, so it
+  # iterates to a fixed point. That is worth doing the day a frame is short of
+  # cycles. It is not worth a cliff at 127 bytes in the meantime.
+  #
+  # `below` is the exception that proves the rule: it is the compiler's own
+  # label, three bytes ahead, and no game can move it.
   defp skip_unless(:==, otherwise, _allocation, counter),
-    do: {[{:jr, :nz, {:label, otherwise}}], counter}
+    do: {[{:jp, :nz, {:label, otherwise}}], counter}
 
   defp skip_unless(:!=, otherwise, _allocation, counter),
-    do: {[{:jr, :z, {:label, otherwise}}], counter}
+    do: {[{:jp, :z, {:label, otherwise}}], counter}
 
   defp skip_unless(:<, otherwise, _allocation, counter),
-    do: {[{:jr, :nc, {:label, otherwise}}], counter}
+    do: {[{:jp, :nc, {:label, otherwise}}], counter}
 
   defp skip_unless(:>=, otherwise, _allocation, counter),
-    do: {[{:jr, :c, {:label, otherwise}}], counter}
+    do: {[{:jp, :c, {:label, otherwise}}], counter}
 
   defp skip_unless(:>, otherwise, _allocation, counter) do
-    {[{:jr, :c, {:label, otherwise}}, {:jr, :z, {:label, otherwise}}], counter}
+    {[{:jp, :c, {:label, otherwise}}, {:jp, :z, {:label, otherwise}}], counter}
   end
 
   defp skip_unless(:<=, otherwise, allocation, counter) do
@@ -530,7 +550,7 @@ defmodule Potion.Compiler do
 
     {[
        {:jr, :c, {:label, below}},
-       {:jr, :nz, {:label, otherwise}},
+       {:jp, :nz, {:label, otherwise}},
        {:label, below}
      ], counter + 1}
   end
