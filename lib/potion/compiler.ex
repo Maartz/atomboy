@@ -114,7 +114,10 @@ defmodule Potion.Compiler do
           initial: %{atom() => byte()},
           installed: non_neg_integer(),
           prefix: String.t(),
-          tiles: %{atom() => non_neg_integer()}
+          tiles: %{atom() => non_neg_integer()},
+          states: %{atom() => non_neg_integer()},
+          state: non_neg_integer() | nil,
+          entered: non_neg_integer() | nil
         }
 
   # The bits of the pad cell, as `Potion.Runtime.read_pad/0` files them. This
@@ -155,33 +158,47 @@ defmodule Potion.Compiler do
     base = Keyword.get(opts, :base, Runtime.actor_state())
     prefix = Keyword.get(opts, :prefix, "potion")
     tiles = Keyword.get(opts, :tiles, %{})
+    states = Keyword.get(opts, :states, [])
 
     list = declarations!(declarations)
     names = Keyword.keys(list)
 
     duplicates!(names, declarations)
-    capacity!(names, declarations, base)
+    capacity!(names ++ machine_cells(states), declarations, base)
 
     cells =
       names
       |> Enum.with_index()
       |> Map.new(fn {name, rank} -> {name, base + rank} end)
 
+    installed = base + length(names)
+
     %{
       cells: cells,
       order: names,
       initial: Map.new(list),
-      installed: base + length(names),
+      installed: installed,
       prefix: prefix,
-      tiles: tiles
+      tiles: tiles,
+      states: states |> Enum.with_index() |> Map.new(),
+      state: if(states == [], do: nil, else: installed + 1),
+      entered: if(states == [], do: nil, else: installed + 2)
     }
   end
+
+  # An actor with states keeps two more cells than one without: which state it
+  # is in, and which one it has already entered. They are counted here so that
+  # the page's ceiling is checked against what an actor really occupies rather
+  # than against what it declared.
+  defp machine_cells([]), do: []
+  defp machine_cells(_states), do: [:__state__, :__entered__]
 
   @doc """
   The address just past an allocation -- where the next actor's slice starts.
   """
   @spec next_free(allocation()) :: non_neg_integer()
-  def next_free(allocation), do: allocation.installed + 1
+  def next_free(%{entered: nil} = allocation), do: allocation.installed + 1
+  def next_free(allocation), do: allocation.entered + 1
 
   defp declarations!(declarations) when is_list(declarations) do
     Enum.map(declarations, fn
@@ -290,6 +307,87 @@ defmodule Potion.Compiler do
     install(allocation) ++ compiled ++ [{:ret}]
   end
 
+  @doc """
+  An actor whose behaviour is a set of states, into one fragment.
+
+  `states` is a list of `{name, on_enter, every_frame}` in declaration order, and
+  that order is the numbering: the first state is 0 and the one the actor starts
+  in.
+
+  ## What the fragment looks like
+
+  The current state is loaded once, and each state is a `CP` against its own
+  number followed by a jump past its arm. Nothing runs between one arm's test and
+  the next -- an arm that matches leaves by the end label -- so the register
+  still holds the state all the way down the chain, and the whole dispatch costs
+  two bytes a state.
+
+  A linear chain rather than a jump table, and deliberately: a table costs a
+  16-bit add, a `JP (HL)` and two bytes of ROM a state before the first
+  instruction of any of them runs. It wins somewhere past a dozen states, which
+  is more than a v0 actor has, and it would have to be explained to anybody
+  reading the output.
+
+  ## Entering
+
+  A state with an `on_enter` compares the state against `entered` before running
+  its frame body. They differ exactly once per transition, which is what makes
+  `on_enter` the place to paint a screen: sixty times a second is what
+  `every_frame` is for, and once is what a title screen wants.
+  """
+  @spec compile_machine([{atom(), Macro.t() | nil, Macro.t() | nil}], allocation()) ::
+          [Assembler.item()]
+  def compile_machine(states, allocation) do
+    done = done_label(allocation)
+
+    {arms, _counter} =
+      Enum.reduce(states, {[], 0}, fn {name, on_enter, every_frame}, {acc, counter} ->
+        index = Map.fetch!(allocation.states, name)
+        {arm, counter} = arm(index, on_enter, every_frame, allocation, counter, done)
+        {acc ++ arm, counter}
+      end)
+
+    install(allocation) ++
+      [{:ld, :a, {:mem, allocation.state}}] ++
+      arms ++ [{:label, done}, {:ret}]
+  end
+
+  defp arm(index, on_enter, every_frame, allocation, counter, done) do
+    next = :"#{allocation.prefix}_state_#{index}_next"
+
+    {enter, counter} = enter(index, on_enter, allocation, counter)
+
+    {frame, counter} =
+      if every_frame, do: block(every_frame, allocation, counter), else: {[], counter}
+
+    arm =
+      [{:cp, :a, index}, {:jp, :nz, {:label, next}}] ++
+        enter ++ frame ++ [{:jp, {:label, done}}, {:label, next}]
+
+    {arm, counter}
+  end
+
+  defp enter(_index, nil, _allocation, counter), do: {[], counter}
+
+  defp enter(index, body, allocation, counter) do
+    entered = :"#{allocation.prefix}_state_#{index}_entered"
+    {compiled, counter} = block(body, allocation, counter)
+
+    {[
+       {:ld, :a, {:mem, allocation.entered}},
+       {:cp, :a, index},
+       {:jp, :z, {:label, entered}}
+     ] ++
+       compiled ++
+       [
+         {:ld, :a, index},
+         {:ld, {:mem, allocation.entered}, :a},
+         {:label, entered}
+       ], counter}
+  end
+
+  defp done_label(allocation), do: :"#{allocation.prefix}_done"
+
   # The first turn: lay down the initial values, then never come back to them.
   # With no variables there is nothing to install, and the flag stays an inert
   # cell — we do not emit six bytes to keep a state nobody wants.
@@ -312,7 +410,23 @@ defmodule Potion.Compiler do
           {:ld, {:mem, allocation.cells[name]}, :a}
         ]
       end) ++
+      first_state(allocation) ++
       [{:label, installed_label(allocation)}]
+  end
+
+  # The state an actor wakes up in is the first one written, and `entered` starts
+  # at a number no state answers to -- the count, since indices stop one short of
+  # it. That is what makes the first frame an entry rather than a continuation,
+  # so `on_enter` runs for the opening state without it being a special case.
+  defp first_state(%{state: nil}), do: []
+
+  defp first_state(allocation) do
+    [
+      {:xor, :a, :a},
+      {:ld, {:mem, allocation.state}, :a},
+      {:ld, :a, map_size(allocation.states)},
+      {:ld, {:mem, allocation.entered}, :a}
+    ]
   end
 
   # A block: the statements one after another, the label counter passing from one
@@ -380,7 +494,125 @@ defmodule Potion.Compiler do
     {sprite_value(value, base, allocation, statement) ++ [{:ld, {:mem, address}, :a}], counter}
   end
 
+  # ── Changing state ──────────────────────────────────────────────────────────
+
+  defp statement({:become, _, [name]} = statement, allocation, counter) do
+    if allocation.state == nil do
+      raise CompileError, """
+      `become` in an actor that has no states.
+
+          #{one_line(statement)}
+
+      An actor is either one `every_frame` or a set of `state` blocks. There is \
+      nothing here to become.
+
+          defactor :ball do
+            state :serving do
+              every_frame do
+                if pressed?(:start), do: become(:playing)
+              end
+            end
+
+            state :playing do
+              every_frame do
+                …
+              end
+            end
+          end
+      """
+    end
+
+    index = state!(name, allocation, statement)
+
+    # `entered` is set to the impossible number rather than left alone, so that
+    # `become` into the state already running is a real re-entry and runs
+    # `on_enter` again. Leaving it would have made that one case silently
+    # different from every other, which is the kind of rule nobody remembers.
+    #
+    # And it ends the frame: what follows `become` in the block does not run.
+    # An actor that has changed state has finished this turn, and the alternative
+    # -- carrying on through the body of the state just left -- is a bug that
+    # reads like a feature.
+    {[
+       {:ld, :a, map_size(allocation.states)},
+       {:ld, {:mem, allocation.entered}, :a},
+       {:ld, :a, index},
+       {:ld, {:mem, allocation.state}, :a},
+       {:jp, {:label, done_label(allocation)}}
+     ], counter}
+  end
+
+  # ── The palette, which is what a fade is made of ────────────────────────────
+
+  # Four steps to black. Each byte is four two-bit entries, low pair first,
+  # saying which grey each shade prints as -- so darkening is not a blend, it is
+  # a rewriting of that table.
+  #
+  #     0xE4  11 10 01 00   the identity: shade 0 white, shade 3 black
+  #     0xF9  11 11 10 01   everything one grey darker
+  #     0xFE  11 11 11 10   two darker, and the bottom already at black
+  #     0xFF  11 11 11 11   every shade black
+  @fades {0xE4, 0xF9, 0xFE, 0xFF}
+
+  defp statement({:fade, _, [level]}, _allocation, counter)
+       when is_integer(level) and level in 0..3 do
+    {bgp, obp0} = Runtime.palettes()
+
+    {[
+       {:ld, :a, elem(@fades, level)},
+       {:ldh, {:high, bgp}, :a},
+       {:ldh, {:high, obp0}, :a}
+     ], counter}
+  end
+
+  defp statement({:fade, _, [other]} = statement, _allocation, _counter) do
+    raise CompileError, """
+    `fade` takes a step from 0 to 3, written out: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    0 is the picture as drawn and 3 is a black screen; 1 and 2 are the two \
+    between. A fade is therefore a state that counts frames and says `fade(1)`, \
+    `fade(2)`, `fade(3)` as it goes.
+
+    A step held in a cell would want a table and a lookup, and does not exist \
+    yet.
+    """
+  end
+
   defp statement(other, _allocation, _counter), do: reject!(other)
+
+  defp state!(name, allocation, statement) when is_atom(name) do
+    case Map.fetch(allocation.states, name) do
+      {:ok, index} ->
+        index
+
+      :error ->
+        known =
+          allocation.states
+          |> Enum.sort_by(fn {_name, index} -> index end)
+          |> Enum.map_join(", ", fn {name, _index} -> inspect(name) end)
+
+        raise CompileError, """
+        no state is named #{inspect(name)}.
+
+            #{one_line(statement)}
+
+        The ones this actor has, in the order they were written: #{known}.
+        """
+    end
+  end
+
+  defp state!(other, _allocation, statement) do
+    raise CompileError, """
+    `become` takes the name of a state, written out: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    The target is decided when the game compiles, not while it runs -- a state \
+    is a place in the ROM, and there is nothing to look it up in.
+    """
+  end
 
   # A bare atom in `tile:` is a name from `tiles from: ...`, and it can be
   # nothing else: a variable arrives as `{name, meta, context}` and an index as

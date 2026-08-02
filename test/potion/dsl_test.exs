@@ -37,6 +37,8 @@ defmodule Potion.DSLTest do
   @left 0x0F - 0x02
   @up 0x0F - 0x04
   @down 0x0F - 0x08
+  @start_key 0x0F - 0x08
+  @a_key 0x0F - 0x01
 
   @start_x 80
   @start_y 72
@@ -427,6 +429,129 @@ defmodule Potion.DSLTest do
         sprite(0, x: x, y: 20, tile: :bands)
         background(3, 4, tile: :split)
       end
+    end
+  end
+
+  # Three screens and the two ways out of each: a key, and a count of frames.
+  # `seen` and `played` count entries rather than frames, so they are what says
+  # `on_enter` ran once per transition and not once per frame.
+  defmodule Screens do
+    @moduledoc false
+    use Potion
+
+    defactor :director do
+      variables step: 0, seen: 0, played: 0
+
+      state :title do
+        on_enter do
+          seen = seen + 1
+        end
+
+        every_frame do
+          if pressed?(:start), do: become(:playing)
+        end
+      end
+
+      state :playing do
+        on_enter do
+          played = played + 1
+          step = 0
+        end
+
+        every_frame do
+          step = step + 1
+          if step == 3, do: fade(1)
+          if step == 6, do: fade(2)
+          if step >= 9, do: become(:title)
+        end
+      end
+    end
+  end
+
+  # One state that becomes itself. `become` sets the entry marker to a number no
+  # state answers to rather than leaving it alone, and this is the only shape
+  # that can tell: every other transition goes somewhere else, where the marker
+  # already differs and the entry would have run regardless.
+  defmodule Restart do
+    @moduledoc false
+    use Potion
+
+    defactor :thing do
+      variables entries: 0
+
+      state :only do
+        on_enter do
+          entries = entries + 1
+        end
+
+        every_frame do
+          if pressed?(:a), do: become(:only)
+        end
+      end
+    end
+  end
+
+  describe "an actor made of states" do
+    test "becoming the state already running enters it again" do
+      addresses = Restart.addresses()
+      {_pixels, state, ram} = run_frames(Restart, 12)
+
+      assert Map.get(ram, addresses.entries) == 1
+
+      {_state, ram} = frames(Restart, state, Joypad.set(ram, @released, @a_key), 2)
+
+      assert Map.get(ram, addresses.entries) == 2
+    end
+
+    test "it wakes up in the first state, and enters it exactly once" do
+      addresses = Screens.addresses()
+      {_pixels, _state, ram} = run_frames(Screens, 20)
+
+      # Twenty frames in the title screen, one entry. Anything that ran
+      # `on_enter` per frame rather than per transition would read 18 here.
+      assert Map.get(ram, addresses.seen) == 1
+      assert Map.get(ram, addresses.played) == 0
+    end
+
+    test "a key changes the state, and the new one is entered" do
+      addresses = Screens.addresses()
+      {_pixels, state, ram} = run_frames(Screens, 5)
+
+      {_state, ram} = frames(Screens, state, Joypad.set(ram, @released, @start_key), 2)
+
+      assert Map.get(ram, addresses.played) == 1
+      assert Map.get(ram, addresses.seen) == 1
+    end
+
+    # The whole round trip: title, start, nine frames of play, and back to the
+    # title -- which has to be entered a second time. A machine that only ever
+    # entered a state once would pass every assertion above this one.
+    test "a state left and come back to is entered again" do
+      addresses = Screens.addresses()
+      {_pixels, state, ram} = run_frames(Screens, 5)
+
+      {state, ram} = frames(Screens, state, Joypad.set(ram, @released, @start_key), 2)
+      {_state, ram} = frames(Screens, state, Joypad.set(ram, @released, @released), 12)
+
+      assert Map.get(ram, addresses.played) == 1
+      assert Map.get(ram, addresses.seen) == 2
+    end
+
+    test "the fade rewrites the palette, and only once the count reaches it" do
+      {_pixels, state, ram} = run_frames(Screens, 5)
+      {state, ram} = frames(Screens, state, Joypad.set(ram, @released, @start_key), 2)
+
+      # Two frames into `playing`, the count has not reached the first step.
+      assert Map.get(ram, 0xFF47) == 0xE4
+
+      {_state, ram} = frames(Screens, state, Joypad.set(ram, @released, @released), 4)
+      assert Map.get(ram, 0xFF47) == 0xF9
+    end
+
+    test "the two cells the machine keeps are not in the game's own" do
+      # `addresses/0` is what a game sees, and it sees what it declared. The
+      # state and the entry marker are the compiler's, like the installed flag.
+      assert Map.keys(Screens.addresses()) |> Enum.sort() == [:played, :seen, :step]
     end
   end
 

@@ -424,6 +424,17 @@ defmodule Potion.Runtime do
     for glyph <- @font, row <- glyph, into: <<>>, do: <<row, row>>
   end
 
+  @doc """
+  The two palette registers, background then sprites.
+
+  A fade on this console is not a fade at all: there is nothing to blend. What
+  there is, is a table saying which of the four greys each shade prints as, and
+  darkening a picture means rewriting that table. `Potion.Compiler` holds the
+  four steps.
+  """
+  @spec palettes() :: {byte(), byte()}
+  def palettes, do: {@bgp, @obp0}
+
   @doc "The tile index a game's own art starts at."
   @spec art_base() :: non_neg_integer()
   def art_base, do: @art

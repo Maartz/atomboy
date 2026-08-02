@@ -160,7 +160,8 @@ defmodule Potion do
   """
   defmacro __using__(_opts) do
     quote do
-      import Potion, only: [defactor: 2, variables: 1, every_frame: 1, tiles: 1]
+      import Potion,
+        only: [defactor: 2, variables: 1, every_frame: 1, tiles: 1, state: 2, on_enter: 1]
 
       @before_compile Potion
     end
@@ -180,19 +181,23 @@ defmodule Potion do
     name = name!(name, module)
     unique!(module, name)
 
-    {declarations, every_frame} = split!(body, name)
+    {declarations, behaviour} = split!(body, name)
 
     slot = length(actors(module))
 
     allocation =
-      Compiler.allocate(declarations, base: next_base(module), prefix: "potion_#{slot}")
+      Compiler.allocate(declarations,
+        base: next_base(module),
+        prefix: "potion_#{slot}",
+        states: state_names(behaviour)
+      )
 
     shared_names!(module, allocation, name)
 
     Module.put_attribute(
       module,
       :potion_actors,
-      actors(module) ++ [{name, allocation, every_frame}]
+      actors(module) ++ [{name, allocation, behaviour}]
     )
 
     :ok
@@ -294,9 +299,14 @@ defmodule Potion do
         art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
 
         fragments =
-          Enum.map(actors, fn {name, allocation, body} ->
+          Enum.map(actors, fn {name, allocation, behaviour} ->
+            allocation = %{allocation | cells: cells, tiles: art.names}
+
             fragment =
-              Compiler.compile(body, %{allocation | cells: cells, tiles: art.names})
+              case behaviour do
+                {:body, body} -> Compiler.compile(body, allocation)
+                {:states, states} -> Compiler.compile_machine(states, allocation)
+              end
 
             verify!(fragment, name, art.bytes)
             fragment
@@ -381,6 +391,24 @@ defmodule Potion do
     outside_actor!("every_frame", "every_frame do … end")
   end
 
+  @doc """
+  One of an actor's states. Only inside a `defactor`, and never on its own.
+
+  Like `variables` and `every_frame`, this exists so that writing it in the wrong
+  place says so. Inside `defactor` the body is read as a tree and never expanded,
+  so this function is not the one that runs — `Potion.Compiler` is.
+  """
+  defmacro state(_name, _blocks) do
+    outside_actor!("state", "state :title do … end")
+  end
+
+  @doc """
+  A state's entry code: run once, on the frame the state is entered.
+  """
+  defmacro on_enter(_blocks) do
+    outside_actor!("on_enter", "on_enter do … end")
+  end
+
   # ══ Reading the actor's tree ═════════════════════════════════════════════════
 
   defp name!(name, _module) when is_atom(name), do: name
@@ -437,47 +465,70 @@ defmodule Potion do
   end
 
   defp split!(body, name) do
-    body
-    |> statements()
-    |> Enum.reduce({nil, nil}, fn statement, {declarations, every_frame} ->
-      case statement do
-        {:variables, _, _} when declarations != nil ->
-          duplicate!("variables", name)
+    {declarations, every_frame, states} =
+      body
+      |> statements()
+      |> Enum.reduce({nil, nil, []}, fn statement, {declarations, every_frame, states} ->
+        case statement do
+          {:variables, _, _} when declarations != nil ->
+            duplicate!("variables", name)
 
-        {:every_frame, _, _} when every_frame != nil ->
-          duplicate!("every_frame", name)
+          {:every_frame, _, _} when every_frame != nil ->
+            duplicate!("every_frame", name)
 
-        {:variables, _, [decl]} ->
-          {decl, every_frame}
+          {:variables, _, [decl]} ->
+            {decl, every_frame, states}
 
-        {:every_frame, _, [[do: block]]} ->
-          {declarations, {:body, block}}
+          {:every_frame, _, [[do: block]]} ->
+            {declarations, block, states}
 
-        other ->
-          raise CompileError, """
-          unknown statement in `defactor #{inspect(name)}`:
+          {:state, _, [state_name, [do: block]]} ->
+            {declarations, every_frame, states ++ [state!(state_name, block, name, states)]}
 
-              #{Macro.to_string(other)}
+          other ->
+            raise CompileError, """
+            unknown statement in `defactor #{inspect(name)}`:
 
-          Rejected AST: #{inspect(other)}
+                #{Macro.to_string(other)}
 
-          An actor's body contains two forms and no others:
+            Rejected AST: #{inspect(other)}
 
-              variables x: 80, y: 72
-              every_frame do … end
+            An actor's body contains three forms and no others:
 
-          The game's code goes into `every_frame`; that is what the kernel calls.
-          """
-      end
-    end)
-    |> case do
-      {_declarations, nil} ->
+                variables x: 80, y: 72
+                every_frame do … end
+                state :title do … end
+
+            The game's code goes into `every_frame` — either one for the whole \
+            actor, or one inside each `state`.
+            """
+        end
+      end)
+
+    cond do
+      every_frame != nil and states != [] ->
         raise CompileError, """
-        actor without `every_frame`: #{inspect(name)}
+        the actor #{inspect(name)} has both an `every_frame` and states.
 
-        An actor is code called once per frame. Without `every_frame`, the kernel \
-        would be calling a `RET` sixty times a second and the screen would stay \
-        empty.
+        An actor is one or the other. With states, the kernel still calls it once \
+        a frame — it is the state it is in that decides what runs, so a body \
+        outside them would have no moment at which to be called.
+
+        Move that code into the state it belongs to, or into each of them.
+        """
+
+      states != [] ->
+        {declarations || [], {:states, states}}
+
+      every_frame != nil ->
+        {declarations || [], {:body, every_frame}}
+
+      true ->
+        raise CompileError, """
+        actor without `every_frame` or states: #{inspect(name)}
+
+        An actor is code called once per frame. Without either, the kernel would \
+        be calling a `RET` sixty times a second and the screen would stay empty.
 
             defactor #{inspect(name)} do
               every_frame do
@@ -485,11 +536,68 @@ defmodule Potion do
               end
             end
         """
-
-      {declarations, {:body, block}} ->
-        {declarations || [], block}
     end
   end
+
+  # A state's body holds the same `every_frame` an actor does, and may hold an
+  # `on_enter` before it. Both are optional -- a state that only waits for a key
+  # has no entry code, and one that paints a screen and then does nothing has no
+  # frame code.
+  defp state!(state_name, block, actor, seen) do
+    state_name = literal_name!(state_name, actor)
+
+    if Enum.any?(seen, fn {name, _, _} -> name == state_name end) do
+      raise CompileError, """
+      the actor #{inspect(actor)} declares the state #{inspect(state_name)} twice.
+
+      States are numbered in the order they are written and `become` names them, \
+      so two with one name is a question with no answer.
+      """
+    end
+
+    {on_enter, every_frame} =
+      block
+      |> statements()
+      |> Enum.reduce({nil, nil}, fn statement, {on_enter, every_frame} ->
+        case statement do
+          {:on_enter, _, [[do: body]]} when on_enter == nil -> {body, every_frame}
+          {:every_frame, _, [[do: body]]} when every_frame == nil -> {on_enter, body}
+          other -> reject_state!(other, state_name, actor)
+        end
+      end)
+
+    {state_name, on_enter, every_frame}
+  end
+
+  defp literal_name!(name, _actor) when is_atom(name), do: name
+
+  defp literal_name!(other, actor) do
+    raise CompileError, """
+    a state's name is written out: #{Macro.to_string(other)}, in #{inspect(actor)}.
+
+    States are numbered when the game compiles, and `become` names one of those \
+    numbers. There is nothing to look a name up in at run time.
+    """
+  end
+
+  defp reject_state!(other, state_name, actor) do
+    raise CompileError, """
+    unknown statement in `state #{inspect(state_name)}` of #{inspect(actor)}:
+
+        #{Macro.to_string(other)}
+
+    A state holds two forms and no others, both optional:
+
+        on_enter do … end       once, on the frame the state is entered
+        every_frame do … end    every frame it stays in
+
+    `on_enter` is where a screen is painted: doing it in `every_frame` would \
+    redraw it sixty times a second to no effect.
+    """
+  end
+
+  defp state_names({:body, _}), do: []
+  defp state_names({:states, states}), do: Enum.map(states, fn {name, _, _} -> name end)
 
   defp statements({:__block__, _, list}), do: list
   defp statements(nil), do: []
