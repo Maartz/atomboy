@@ -72,8 +72,12 @@ defmodule Potion.RuntimeTest do
         |> Enum.drop_while(&(&1 != {:label, :main_loop}))
         |> Enum.filter(&match?({:call, _}, &1))
 
+      # The music player is called between the pad and the actors: a tune the
+      # game started last frame has already advanced by the time an actor looks
+      # at anything.
       assert calls == [
                {:call, {:label, :read_pad}},
+               {:call, {:label, :play_music}},
                {:call, {:label, :actor_0}},
                {:call, {:label, :actor_1}}
              ]

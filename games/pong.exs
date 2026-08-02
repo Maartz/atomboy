@@ -20,6 +20,11 @@ defmodule Pong do
   # the game refers to them from here on. Nothing below knows a tile index.
   tiles from: "art/pong.png", names: [:ball, :paddle]
 
+  # The title's tune, on channel 1 — `beep` has channel 2, so a paddle can be
+  # struck over a bar without either cutting the other. It loops on its own: the
+  # player reads a length of zero and goes back to the start.
+  music(:attract, "c4 . e4 . g4 . c5 . . . g4 . e4 . c4 . . . - -", beat: 9)
+
   # ── The director ───────────────────────────────────────────────────────────
   #
   # The screens, and nothing else. It owns `playing`, which the three actors
@@ -48,6 +53,8 @@ defmodule Pong do
         text(4, 2, " ")
         text(15, 2, " ")
 
+        play(:attract)
+
         sprite(0, x: 0, y: 160, tile: :paddle)
         sprite(1, x: 0, y: 160, tile: :paddle)
         sprite(2, x: 0, y: 160, tile: :paddle)
@@ -69,6 +76,7 @@ defmodule Pong do
     state :playing do
       on_enter do
         playing = 1
+        silence()
 
         # The title, wiped a square at a time. A space is the empty tile the
         # init already filled the whole map with, so this costs nothing to say.

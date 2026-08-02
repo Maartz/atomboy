@@ -189,7 +189,8 @@ defmodule Potion.Compiler do
       state: if(states == [], do: nil, else: installed + 1),
       entered: if(states == [], do: nil, else: installed + 2),
       routines: MapSet.new(routines),
-      in_routine: nil
+      in_routine: nil,
+      tunes: MapSet.new(Keyword.get(opts, :tunes, []))
     }
   end
 
@@ -623,19 +624,11 @@ defmodule Potion.Compiler do
   # from it, so the whole table is one expression. Below about 64 Hz the formula
   # asks for a negative `x` and there is no note to be had; that is where the
   # range stops, and it stops on its own rather than by being clipped.
-  @concert 440.0
-  @octaves 2..7
-  @semitones ~w(c cs d ds e f fs g gs a as b)a
+  # One table, in `Potion.Music`, because a note means the same thing whether it
+  # is a sound effect or a bar of a tune -- and two tables that agreed today
+  # would be two tables to keep agreeing.
 
-  @notes (for octave <- @octaves,
-              {name, index} <- Enum.with_index(@semitones),
-              into: %{} do
-            midi = (octave + 1) * 12 + index
-            hertz = @concert * :math.pow(2, (midi - 69) / 12)
-            {:"#{name}#{octave}", 2048 - round(131_072 / hertz)}
-          end)
-         |> Enum.reject(fn {_name, x} -> x < 0 end)
-         |> Map.new()
+  @notes Potion.Music.notes()
 
   defp statement({:beep, _, [note]} = statement, _allocation, counter) when is_atom(note) do
     {duty, envelope, low, high} = Runtime.pulse()
@@ -673,6 +666,58 @@ defmodule Potion.Compiler do
     is gets worked out while the game compiles. There is nothing at run time that \
     could turn a cell into a frequency.
     """
+  end
+
+  # ── A tune ──────────────────────────────────────────────────────────────────
+  #
+  # Two pointers and a countdown, and then the kernel does the rest: it reads a
+  # step every frame between the pad and the actors. A game says this once.
+  #
+  # The base is written as well as the cursor, and that is what makes a tune
+  # loop -- the player, reaching a step of length zero, goes back to where the
+  # base says it started.
+  defp statement({:play, _, [name]} = statement, allocation, counter) when is_atom(name) do
+    {tune, base, wait} = Runtime.music_cells()
+    label = tune!(name, allocation, statement)
+
+    {[
+       {:ld, :hl, {:label, label}},
+       {:ld, :a, :l},
+       {:ld, {:mem, tune}, :a},
+       {:ld, {:mem, base}, :a},
+       {:ld, :a, :h},
+       {:ld, {:mem, tune + 1}, :a},
+       {:ld, {:mem, base + 1}, :a},
+       # Nothing to wait for: the next frame reads the first step.
+       {:xor, :a, :a},
+       {:ld, {:mem, wait}, :a}
+     ], counter}
+  end
+
+  defp statement({:play, _, [other]} = statement, _allocation, _counter) do
+    raise CompileError, """
+    `play` takes the name of a tune, written out: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    A tune is a run of bytes at a known place in the cartridge, and which place \
+    is decided while the game compiles.
+    """
+  end
+
+  # A pointer of zero is what the kernel reads as silence, and the envelope is
+  # taken down in the same breath so the note already sounding stops rather than
+  # hanging on until something else triggers the channel.
+  defp statement({:silence, _, []}, _allocation, counter) do
+    {tune, _base, _wait} = Runtime.music_cells()
+    {_nr10, _nr11, nr12, _nr13, _nr14} = Runtime.pulse_one()
+
+    {[
+       {:xor, :a, :a},
+       {:ld, {:mem, tune}, :a},
+       {:ld, {:mem, tune + 1}, :a},
+       {:ldh, {:high, nr12}, :a}
+     ], counter}
   end
 
   # ── Calling a routine ───────────────────────────────────────────────────────
@@ -817,6 +862,30 @@ defmodule Potion.Compiler do
 
   defp statement(other, _allocation, _counter), do: reject!(other)
 
+  defp tune!(name, allocation, statement) do
+    tunes = Map.get(allocation, :tunes, MapSet.new())
+
+    if MapSet.member?(tunes, name) do
+      :"potion_tune_#{name}"
+    else
+      known = tunes |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+
+      raise CompileError, """
+      no tune is called #{inspect(name)}.
+
+          #{one_line(statement)}
+
+      #{if known == "", do: "This game declares none.", else: "The ones it has: #{known}."}
+
+      A tune is declared beside the actors and named where it is started:
+
+          music :theme, "c4 . e4 . g4 ."
+
+          play(:theme)
+      """
+    end
+  end
+
   @doc """
   The notes a `beep` can name, and the eleven-bit number each one is.
 
@@ -830,7 +899,7 @@ defmodule Potion.Compiler do
   each other -- the register counts *down* to a period, not up to a pitch.
   """
   @spec notes() :: %{atom() => 0..2047}
-  def notes, do: @notes
+  defdelegate notes, to: Potion.Music
 
   defp note!(name, statement) do
     case Map.fetch(@notes, name) do

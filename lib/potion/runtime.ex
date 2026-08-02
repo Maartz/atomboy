@@ -93,6 +93,12 @@ defmodule Potion.Runtime do
   @scx 0x43
   @ly 0x44
   @dma 0x46
+  @nr10 0x10
+  @nr11 0x11
+  @nr12 0x12
+  @nr13 0x13
+  @nr14 0x14
+
   @nr50 0x24
   @nr51 0x25
   @nr52 0x26
@@ -107,6 +113,14 @@ defmodule Potion.Runtime do
   @oam_mirror 0xC000
   @pad 0xC0A0
   @flag 0xC0A1
+  # The music player's own cells, in the page the kernel keeps for itself: where
+  # the tune is being read from, where it started so it can loop, and how many
+  # frames the current step has left. A pointer of zero is silence, which is what
+  # the init's clearing leaves behind.
+  @tune 0xC0A2
+  @tune_base 0xC0A4
+  @tune_wait 0xC0A6
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -236,8 +250,8 @@ defmodule Potion.Runtime do
   happens here, at assembly time, because at run time the symptom would be an
   illegal opcode thousands of cycles away from its cause.
   """
-  @spec program([Assembler.element()], binary()) :: [Assembler.element()]
-  def program(actors, art \\ <<>>) when is_list(actors) and is_binary(art) do
+  @spec program([Assembler.element()], binary(), [{atom(), binary()}]) :: [Assembler.element()]
+  def program(actors, art \\ <<>>, tunes \\ []) when is_list(actors) and is_binary(art) do
     fragments = fragments(actors)
     Enum.each(fragments, &check_actor!/1)
     art!(art)
@@ -245,11 +259,15 @@ defmodule Potion.Runtime do
     init(art) ++
       vblank() ++
       read_pad() ++
+      play_music() ++
       main_loop(length(fragments)) ++
       [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
       [{:label, :font_data}, {:bytes, font_bytes()}] ++
       [{:label, :letter_data}, {:bytes, letter_bytes()}] ++
       art_data(art) ++
+      Enum.flat_map(tunes, fn {name, bytes} ->
+        [{:label, :"potion_tune_#{name}"}, {:bytes, bytes}]
+      end) ++
       Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
         [{:label, actor_label(slot)}] ++ fragment
       end)
@@ -532,6 +550,10 @@ defmodule Potion.Runtime do
   @spec pulse() :: {byte(), byte(), byte(), byte()}
   def pulse, do: {0x16, 0x17, 0x18, 0x19}
 
+  @doc "Channel 1's five, the one the tune plays on: sweep, duty, envelope, frequency."
+  @spec pulse_one() :: {byte(), byte(), byte(), byte(), byte()}
+  def pulse_one, do: {@nr10, @nr11, @nr12, @nr13, @nr14}
+
   @doc """
   The two palette registers, background then sprites.
 
@@ -572,6 +594,109 @@ defmodule Potion.Runtime do
 
   # The alphabet, copied like the digits and for the same reason: a game that
   # wants to say PRESS START should not have to spend an OAM entry a letter.
+  @doc """
+  The four cells and the routine that make a tune play itself.
+
+  Called by the main loop every frame, right after the pad and before the
+  actors, so a game that starts a tune hears it from the next frame and never
+  has to feed it. That placement is the whole design: a game says `play(:theme)`
+  once and the kernel owns the beat, exactly as it owns the vblank.
+
+  A pointer of zero is silence, and zero is what the init's clearing leaves — so
+  a game that never mentions music costs three instructions a frame and no
+  thought.
+  """
+  @spec music_cells() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
+  def music_cells, do: {@tune, @tune_base, @tune_wait}
+
+  # Three bytes a step: frequency low, frequency high with the trigger bit, and
+  # a count of frames. A length of zero is the end and sends the pointer back to
+  # where it started, which is why a tune loops without saying so.
+  defp play_music do
+    [
+      {:label, :play_music},
+      # A pointer of zero means no tune. Both halves, because a tune could sit
+      # at 0x0100-something and have a zero low byte.
+      {:ld, :a, {:mem, @tune}},
+      {:ld, :b, :a},
+      {:ld, :a, {:mem, @tune + 1}},
+      {:or, :a, :b},
+      {:ret, :z},
+
+      # Still inside the current step? Count down and leave.
+      {:ld, :a, {:mem, @tune_wait}},
+      {:and, :a, :a},
+      {:jr, :z, {:label, :music_step}},
+      {:dec, :a},
+      {:ld, {:mem, @tune_wait}, :a},
+      {:ret},
+      {:label, :music_step},
+      {:ld, :a, {:mem, @tune}},
+      {:ld, :l, :a},
+      {:ld, :a, {:mem, @tune + 1}},
+      {:ld, :h, :a},
+
+      # The third byte first: a zero length is the terminator, and the tune goes
+      # back to its start rather than walking off into whatever follows it.
+      {:inc, :hl},
+      {:inc, :hl},
+      {:ld, :a, {:mem, :hl}},
+      {:and, :a, :a},
+      {:jr, :nz, {:label, :music_sound}},
+      {:ld, :a, {:mem, @tune_base}},
+      {:ld, {:mem, @tune}, :a},
+      {:ld, :l, :a},
+      {:ld, :a, {:mem, @tune_base + 1}},
+      {:ld, {:mem, @tune + 1}, :a},
+      {:ld, :h, :a},
+      {:inc, :hl},
+      {:inc, :hl},
+      {:ld, :a, {:mem, :hl}},
+      {:label, :music_sound},
+
+      # `frames` is in A. Keep it, then walk HL back to the step's first byte.
+      {:ld, {:mem, @tune_wait}, :a},
+      {:dec, :hl},
+      {:dec, :hl},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, :c, :a},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, :b, :a},
+      {:inc, :hl},
+
+      # HL now points at the next step: put it back before touching the channel.
+      {:ld, :a, :l},
+      {:ld, {:mem, @tune}, :a},
+      {:ld, :a, :h},
+      {:ld, {:mem, @tune + 1}, :a},
+
+      # B holds the high byte. Without the trigger bit this step is a rest, and
+      # a rest is the envelope taken to zero -- silence that does not restart
+      # anything when the next note arrives.
+      {:bit, 7, :b},
+      {:jr, :nz, {:label, :music_note}},
+      {:xor, :a, :a},
+      {:ldh, {:high, @nr12}, :a},
+      {:ret},
+      {:label, :music_note},
+
+      # No sweep, 50% duty, and a volume that does not decay: a tune wants a
+      # note that lasts until the next one, which is the opposite of what `beep`
+      # asks of channel 2.
+      {:xor, :a, :a},
+      {:ldh, {:high, @nr10}, :a},
+      {:ld, :a, 0x80},
+      {:ldh, {:high, @nr11}, :a},
+      {:ld, :a, 0xF0},
+      {:ldh, {:high, @nr12}, :a},
+      {:ld, :a, :c},
+      {:ldh, {:high, @nr13}, :a},
+      {:ld, :a, :b},
+      {:ldh, {:high, @nr14}, :a},
+      {:ret}
+    ]
+  end
+
   defp letters do
     [
       {:ld, :hl, {:label, :letter_data}},
@@ -786,6 +911,7 @@ defmodule Potion.Runtime do
       {:xor, :a, :a},
       {:ld, {:mem, @flag}, :a},
       {:call, {:label, :read_pad}},
+      {:call, {:label, :play_music}},
       calls,
       {:jr, {:label, :main_loop}}
     ]

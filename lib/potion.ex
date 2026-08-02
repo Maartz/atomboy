@@ -156,6 +156,10 @@ defmodule Potion do
 
       beep(:c5)                          a note, :c2 to :b7, sharps as `cs`
 
+      music :theme, "c4 . e4 . g4 -"     a tune, declared beside the actors
+      play(:theme)                       started once; the kernel keeps the beat
+      silence()                          and stopped
+
       routine :bounce do … end           written once
       bounce()                           called from anywhere in the actor
 
@@ -193,6 +197,7 @@ defmodule Potion do
     * `Potion.ROM` — the 32 KB cartridge, header and checksums included.
     * `Potion.PNG` and `Potion.Tiles` — a drawing down to its pixels, and pixels
       into the console's two-byte-a-row tiles.
+    * `Potion.Music` — a line of notation into the bytes a tune is made of.
   """
 
   alias Potion.Assembler
@@ -216,7 +221,9 @@ defmodule Potion do
           tiles: 1,
           state: 2,
           on_enter: 1,
-          routine: 2
+          routine: 2,
+          music: 2,
+          music: 3
         ]
 
       @before_compile Potion
@@ -246,7 +253,8 @@ defmodule Potion do
         base: next_base(module),
         prefix: "potion_#{slot}",
         states: state_names(behaviour),
-        routines: Enum.map(routines, fn {name, _} -> name end)
+        routines: Enum.map(routines, fn {name, _} -> name end),
+        tunes: Enum.map(tunes(module), fn {name, _} -> name end)
       )
 
     shared_names!(module, allocation, name)
@@ -354,10 +362,16 @@ defmodule Potion do
           end)
 
         art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
+        songs = tunes(env.module)
 
         fragments =
           Enum.map(actors, fn {name, allocation, behaviour, routines} ->
-            allocation = %{allocation | cells: cells, tiles: art.names}
+            allocation = %{
+              allocation
+              | cells: cells,
+                tiles: art.names,
+                tunes: MapSet.new(songs, fn {name, _bytes} -> name end)
+            }
 
             fragment =
               case behaviour do
@@ -368,7 +382,7 @@ defmodule Potion do
                   Compiler.compile_machine(states, allocation, routines)
               end
 
-            verify!(fragment, name, art.bytes)
+            verify!(fragment, name, art.bytes, songs)
             fragment
           end)
 
@@ -383,7 +397,8 @@ defmodule Potion do
           def program do
             Potion.Runtime.program(
               unquote(Macro.escape(fragments)),
-              unquote(Macro.escape(art.bytes))
+              unquote(Macro.escape(art.bytes)),
+              unquote(Macro.escape(songs))
             )
           end
 
@@ -475,6 +490,44 @@ defmodule Potion do
   defmacro routine(_name, _blocks) do
     outside_actor!("routine", "routine :bounce do … end")
   end
+
+  @doc """
+  A tune, declared beside the actors and started with `play(:name)`.
+
+      music :theme, "c4 . e4 . g4 . c5 . . ."
+      music :hurry, "c5 e5 c5 e5", beat: 4
+
+  Compiled here, into the bytes the cartridge carries — `Potion.Music` sets out
+  the notation and the format. The kernel reads a step a frame, so a game starts
+  a tune once and never feeds it.
+  """
+  defmacro music(name, notation, opts \\ []) do
+    module = __CALLER__.module
+    name = literal_name!(name, module)
+
+    unless is_binary(notation) do
+      raise CompileError, """
+      the tune #{inspect(name)} is written as a line of text: #{Macro.to_string(notation)}
+
+          music :theme, "c4 . e4 . g4 ."
+      """
+    end
+
+    if Enum.any?(tunes(module), fn {taken, _} -> taken == name end) do
+      raise CompileError, """
+      two tunes called #{inspect(name)} in #{inspect(module)}.
+
+      `play` names one of them, and two with one name is a question with no answer.
+      """
+    end
+
+    bytes = Potion.Music.compile!(notation, name, opts)
+    Module.put_attribute(module, :potion_tunes, tunes(module) ++ [{name, bytes}])
+
+    :ok
+  end
+
+  defp tunes(module), do: Module.get_attribute(module, :potion_tunes) || []
 
   # ══ Reading the actor's tree ═════════════════════════════════════════════════
 
@@ -711,8 +764,8 @@ defmodule Potion do
   # rather than on the first call to `rom/0` is the whole benefit of a compiled
   # language: a fragment that is not a program shows up in `mix compile`, not
   # three weeks later on a flashcart.
-  defp verify!(fragment, name, art) do
-    Assembler.assemble(Runtime.program(fragment, art), origin: 0x0150)
+  defp verify!(fragment, name, art, songs) do
+    Assembler.assemble(Runtime.program(fragment, art, songs), origin: 0x0150)
     :ok
   rescue
     error in ArgumentError ->

@@ -187,6 +187,12 @@ call graph is walked at compile time and a circle is refused, because a `CALL`
 that goes round grows the stack by two bytes a lap until it reaches the actor's
 own cells.
 
+**A tune.** `music :theme, "c4 . e4 -"` becomes three bytes a step — frequency,
+frequency-with-trigger, frames — laid into the cartridge, and the kernel reads
+one step a frame between the pad and the actors. A game says `play(:theme)`
+once and never feeds it. A hold is a longer step rather than a repeated one,
+because retriggering a note restarts it and the ear hears that as a stutter.
+
 **A note.** `beep(:c5)` is four writes to channel 2 and nothing kept. The
 console has no pitch register — it has an eleven-bit number `x` where
 `f = 131072 / (2048 - x)` — so the table is that formula run backwards at

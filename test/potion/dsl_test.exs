@@ -539,6 +539,123 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A tune, and a game that starts it and can stop it.
+  defmodule Tune do
+    @moduledoc false
+    use Potion
+
+    music(:theme, "c4 e4 g4 -", beat: 4)
+
+    defactor :voice do
+      variables t: 0
+
+      every_frame do
+        t = t + 1
+        if t == 3, do: play(:theme)
+        if t == 30, do: silence()
+      end
+    end
+  end
+
+  # The same tune with nothing to stop it, for the one thing `Tune` cannot show:
+  # a tune that reaches its end goes back to its beginning.
+  defmodule Rounds do
+    @moduledoc false
+    use Potion
+
+    music(:round, "c4 g4", beat: 4)
+
+    defactor :voice do
+      variables t: 0
+
+      every_frame do
+        t = t + 1
+        if t == 3, do: play(:round)
+      end
+    end
+  end
+
+  describe "a tune" do
+    # A length of zero is the terminator and sends the cursor back to the base
+    # pointer, which is why `play` writes both. Without the reset the player
+    # would walk off the end of the tune into whatever bytes follow it, so this
+    # is the assertion that keeps a cartridge from playing its own font.
+    test "it comes round again on its own" do
+      heard = channel_one(Rounds, 40)
+      notes = Potion.Music.notes()
+
+      runs = heard |> Enum.map(&elem(&1, 0)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+
+      assert Enum.take(runs, 4) == [notes[:c4], notes[:g4], notes[:c4], notes[:g4]]
+    end
+
+    # The kernel reads a step a frame between the pad and the actors, so what a
+    # game says once is heard for as long as it lasts. The frequency register is
+    # read back rather than the samples, because it says which *note* -- a peak
+    # would only say that something sounded.
+    test "the notes come out in the order they were written" do
+      heard = channel_one(Tune, 24)
+
+      # Four frames a beat, and the first note lands on the frame after the one
+      # that started it. Runs rather than exact frames: what is being pinned is
+      # the order and the pitches, not the emulator's start-up timetable.
+      runs = heard |> Enum.map(&elem(&1, 0)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+      notes = Potion.Music.notes()
+
+      assert runs == [notes[:c4], notes[:e4], notes[:g4]]
+    end
+
+    # A rest carries no trigger; it takes the envelope to zero instead. That is
+    # what makes it silence rather than a note nobody asked for, and the only
+    # way to see it is that the channel goes quiet while its frequency register
+    # still holds the note before.
+    test "a rest silences without changing the note" do
+      heard = channel_one(Tune, 24)
+
+      # Only once a note has been in the register: before the tune starts the
+      # channel is silent too, and for a duller reason.
+      quiet = Enum.filter(heard, fn {x, loud} -> loud == 0 and x != 0 end)
+
+      assert quiet != [], "the rest never silenced anything"
+      assert Enum.all?(quiet, fn {x, _loud} -> x == Potion.Music.notes()[:g4] end)
+    end
+
+    test "`silence` stops it, and it stays stopped" do
+      heard = channel_one(Tune, 45)
+      after_stop = heard |> Enum.drop(33) |> Enum.map(&elem(&1, 1))
+
+      assert Enum.max(after_stop) == 0, "the tune played on after `silence`"
+    end
+
+    test "a tune that was never declared is refused, with the ones that were" do
+      allocation = Potion.Compiler.allocate([x: 0], tunes: [:theme, :hurry])
+
+      assert_raise Potion.CompileError, ~r/no tune is called :them.*:hurry, :theme/s, fn ->
+        Potion.Compiler.compile({:play, [], [:them]}, allocation)
+      end
+    end
+  end
+
+  # Channel 1, frame by frame: the eleven-bit frequency the register holds, and
+  # whether anything was actually heard.
+  defp channel_one(game, count) do
+    rom = game.rom()
+
+    {_state, _ram, _apu, heard} =
+      Enum.reduce(1..count, {Screen.boot_state(rom), Screen.boot_ram(rom), %Atomboy.APU{}, []}, fn
+        _n, {state, ram, apu, acc} ->
+          {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+          {samples, ram, apu} = Atomboy.APU.frame(ram, apu)
+
+          x = Map.get(ram, 0xFF13, 0) + Bitwise.band(Map.get(ram, 0xFF14, 0), 0x07) * 256
+          loud = for(<<v::little-signed-16 <- samples>>, do: abs(v)) |> Enum.max(fn -> 0 end)
+
+          {state, ram, apu, [{x, loud} | acc]}
+      end)
+
+    Enum.reverse(heard)
+  end
+
   describe "a note" do
     # The only judge of a sound is the APU, so the game is played and the samples
     # are read. What the trace has to show is not merely that something was heard
@@ -1252,6 +1369,7 @@ defmodule Potion.DSLTest do
 
       assert calls == [
                {:call, {:label, :read_pad}},
+               {:call, {:label, :play_music}},
                {:call, {:label, :actor_0}},
                {:call, {:label, :actor_1}}
              ]
