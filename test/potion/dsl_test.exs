@@ -575,6 +575,119 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # Four bullets in one array, walked by an index that lives in a cell. Nothing
+  # here can be written with named cells: `bullets[n]` is a different address
+  # every frame and the compiler does not know which.
+  defmodule Volley do
+    @moduledoc false
+    use Potion
+
+    defactor :guns do
+      variables bullets: [10, 20, 30, 40], n: 0, seen: 0, total: 0
+
+      every_frame do
+        # Each frame moves one bullet and adds it up, round and round.
+        bullets[n] = bullets[n] + 1
+        total = total + bullets[n]
+
+        n = n + 1
+        if n > 3, do: n = 0
+
+        # A literal index is an address the compiler works out itself.
+        seen = bullets[2]
+
+        sprite(0, x: bullets[0], y: bullets[1], tile: 0)
+      end
+    end
+  end
+
+  describe "an array" do
+    test "its cells are consecutive, and the game sees one name" do
+      addresses = Volley.addresses()
+
+      # One entry for the array, at its first cell. The four are not four names.
+      assert Map.keys(addresses) |> Enum.sort() == [:bullets, :n, :seen, :total]
+      assert addresses.n == addresses.bullets + 4
+    end
+
+    # Four frames is two turns of the actor, so bullets 0 and 1 have moved and 2
+    # and 3 have not. That the untouched two still read 30 and 40 is the
+    # assertion: one `variables` line laid down four different values.
+    test "each cell gets its own starting value" do
+      {_pixels, _state, ram} = run_frames(Volley, 4)
+      base = Volley.addresses().bullets
+
+      assert for(i <- 0..3, do: Map.get(ram, base + i)) == [11, 21, 30, 40]
+    end
+
+    # The index is a cell, so the address is worked out at run time. Four frames
+    # walk the whole array, and nothing but a real sixteen-bit add gets all four
+    # moved exactly once.
+    test "an index held in a cell reaches every cell in turn" do
+      # Six frames is four turns, which is once round. Every cell moved exactly
+      # once, which is what says the address really followed `n` -- a broken add
+      # would move one of them four times.
+      {_pixels, _state, ram} = run_frames(Volley, 6)
+      base = Volley.addresses().bullets
+
+      assert for(i <- 0..3, do: Map.get(ram, base + i)) == [11, 21, 31, 41]
+    end
+
+    test "a literal index costs nothing at run time" do
+      allocation = Potion.Compiler.allocate(bullets: [0, 0, 0, 0], n: 0)
+      body = {:=, [], [{:seen, [], nil}, index(:bullets, 2)]}
+
+      # `bullets[2]` is an address, so this is the same two instructions a plain
+      # cell would have been -- no HL, no add.
+      elements =
+        Potion.Compiler.compile(body, %{
+          allocation
+          | cells: Map.put(allocation.cells, :seen, 0xC1F0)
+        })
+
+      refute Enum.any?(elements, &match?({:add, :hl, _}, &1))
+      assert {:ld, :a, {:mem, allocation.cells.bullets + 2}} in elements
+    end
+
+    test "a cell index brings out the sixteen-bit add" do
+      allocation = Potion.Compiler.allocate(bullets: [0, 0, 0, 0], n: 0, seen: 0)
+      body = {:=, [], [{:seen, [], nil}, index(:bullets, {:n, [], nil})]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:add, :hl, :bc} in elements
+      assert {:ld, :bc, allocation.cells.bullets} in elements
+    end
+
+    test "an index written past the end is refused, and the message counts" do
+      allocation = Potion.Compiler.allocate(bullets: [0, 0, 0, 0], seen: 0)
+      body = {:=, [], [{:seen, [], nil}, index(:bullets, 4)]}
+
+      assert_raise Potion.CompileError, ~r/has 4 cells.*number 4.*last one is 3/s, fn ->
+        Potion.Compiler.compile(body, allocation)
+      end
+    end
+
+    test "indexing something that is not an array says so" do
+      allocation = Potion.Compiler.allocate(x: 0, bullets: [0, 0])
+      body = {:=, [], [{:x, [], nil}, index(:x, 0)]}
+
+      assert_raise Potion.CompileError, ~r/:x is not an array.*:bullets/s, fn ->
+        Potion.Compiler.compile(body, allocation)
+      end
+    end
+
+    test "an array with nothing in it is refused" do
+      assert_raise Potion.CompileError, ~r/no cells in it/, fn ->
+        Potion.Compiler.allocate(bullets: [])
+      end
+    end
+  end
+
+  defp index(array, subscript) do
+    {{:., [], [Access, :get]}, [], [{array, [], nil}, subscript]}
+  end
+
   describe "a tune" do
     # A length of zero is the terminator and sends the cursor back to the base
     # pointer, which is why `play` writes both. Without the reset the player

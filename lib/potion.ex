@@ -117,6 +117,10 @@ defmodule Potion do
   ### State
 
       variables x: 80, vx: -1            cells of WRAM, and their first values
+      variables bullets: [0, 0, 0, 0]    an array: consecutive cells, one name
+
+      bullets[2] = 5                     a literal index is worked out here
+      bullets[n] = bullets[n] + 1        one held in a cell, at run time
 
       x = 5                              a constant into a cell
       x = y                              one cell into another

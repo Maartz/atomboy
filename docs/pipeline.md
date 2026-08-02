@@ -187,6 +187,13 @@ call graph is walked at compile time and a circle is refused, because a `CALL`
 that goes round grows the stack by two bytes a lap until it reaches the actor's
 own cells.
 
+**An index.** `bullets[2]` is an address the compiler works out itself and
+costs nothing; `bullets[n]` is a sixteen-bit add — index into L, zero into H,
+base into BC, `ADD HL, BC` — and then the ordinary load. Writing through one
+pushes the value first, because the address goes through HL and the expression
+being stored is free to use HL as well: `bullets[n] = bullets[n] + 1` uses it
+twice.
+
 **A tune.** `music :theme, "c4 . e4 -"` becomes three bytes a step — frequency,
 frequency-with-trigger, frames — laid into the cartridge, and the kernel reads
 one step a frame between the pad and the actors. A game says `play(:theme)`

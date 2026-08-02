@@ -113,7 +113,8 @@ defmodule Potion.Compiler do
   @type allocation :: %{
           cells: %{atom() => non_neg_integer()},
           order: [atom()],
-          initial: %{atom() => byte()},
+          initial: %{atom() => byte() | [byte()]},
+          arrays: %{atom() => pos_integer()},
           installed: non_neg_integer(),
           prefix: String.t(),
           tiles: %{atom() => non_neg_integer()},
@@ -169,20 +170,30 @@ defmodule Potion.Compiler do
     names = Keyword.keys(list)
 
     duplicates!(names, declarations)
-    capacity!(names ++ machine_cells(states), declarations, base)
 
-    cells =
-      names
-      |> Enum.with_index()
-      |> Map.new(fn {name, rank} -> {name, base + rank} end)
+    # Cells are handed out in declaration order and an array takes as many as it
+    # has elements, so a name's address is the sum of everything written above
+    # it rather than its rank. `arrays` remembers the lengths, which is the only
+    # thing that tells `bullets` apart from `x` afterwards.
+    {cells, arrays, installed} =
+      Enum.reduce(list, {%{}, %{}, base}, fn {name, value}, {cells, arrays, at} ->
+        case value do
+          values when is_list(values) ->
+            {Map.put(cells, name, at), Map.put(arrays, name, length(values)), at + length(values)}
 
-    installed = base + length(names)
+          _ ->
+            {Map.put(cells, name, at), arrays, at + 1}
+        end
+      end)
+
+    capacity!(installed + length(machine_cells(states)), declarations, base)
 
     %{
       cells: cells,
       order: names,
       initial: Map.new(list),
       installed: installed,
+      arrays: arrays,
       prefix: prefix,
       tiles: tiles,
       states: states |> Enum.with_index() |> Map.new(),
@@ -210,6 +221,9 @@ defmodule Potion.Compiler do
 
   defp declarations!(declarations) when is_list(declarations) do
     Enum.map(declarations, fn
+      {name, values} when is_atom(name) and is_list(values) ->
+        {name, elements!(name, values, declarations)}
+
       {name, value} when is_atom(name) ->
         {name, initial!(name, value)}
 
@@ -235,6 +249,22 @@ defmodule Potion.Compiler do
     The form is `variables x: 80, y: 72` — a name, a byte, and one cell of WRAM \
     per name.
     """
+  end
+
+  # An array's cells, each read the way a lone one is -- so a negative element
+  # is two's complement here too, and `vx: [-1, 1]` means what it looks like.
+  defp elements!(_name, [], declarations) do
+    raise CompileError, """
+    an array with no cells in it: #{Macro.to_string(declarations)}
+
+    An array is declared by writing its cells out, and there has to be one:
+
+        variables bullets: [0, 0, 0, 0]
+    """
+  end
+
+  defp elements!(name, values, _declarations) do
+    Enum.map(values, &initial!(name, &1))
   end
 
   defp initial!(name, value) do
@@ -275,13 +305,12 @@ defmodule Potion.Compiler do
     end
   end
 
-  defp capacity!(names, declarations, base) do
-    last = base + length(names)
+  defp capacity!(last, declarations, base) do
     ceiling = Runtime.actor_state() + @state_page - 1
 
     if last > ceiling do
       raise CompileError, """
-      no room left in the actor page: #{length(names)} variables asked for from \
+      no room left in the actor page: #{last - base} cells asked for from \
       0x#{hex(base)}, and the page ends at 0x#{hex(ceiling)}.
 
           #{Macro.to_string(declarations)}
@@ -468,14 +497,26 @@ defmodule Potion.Compiler do
       {:ld, :a, 0x01},
       {:ld, {:mem, allocation.installed}, :a}
     ] ++
-      Enum.flat_map(allocation.order, fn name ->
-        [
-          {:ld, :a, allocation.initial[name]},
-          {:ld, {:mem, allocation.cells[name]}, :a}
-        ]
-      end) ++
+      Enum.flat_map(allocation.order, fn name -> initial(name, allocation) end) ++
       first_state(allocation) ++
       [{:label, installed_label(allocation)}]
+  end
+
+  # An array lays down one value per element, at consecutive addresses. There is
+  # no loop: the values are known here and a loop would cost a counter, a
+  # pointer and a comparison to save four bytes on a first frame that runs once.
+  defp initial(name, allocation) do
+    case allocation.initial[name] do
+      values when is_list(values) ->
+        values
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {value, offset} ->
+          [{:ld, :a, value}, {:ld, {:mem, allocation.cells[name] + offset}, :a}]
+        end)
+
+      value ->
+        [{:ld, :a, value}, {:ld, {:mem, allocation.cells[name]}, :a}]
+    end
   end
 
   # The state an actor wakes up in is the first one written, and `entered` starts
@@ -510,6 +551,29 @@ defmodule Potion.Compiler do
   defp statements(single), do: [single]
 
   # ── An assignment ───────────────────────────────────────────────────────────
+
+  # `bullets[i] = …`. The value is worked out first and pushed, because the
+  # address is worked out through HL and the expression is free to use HL too --
+  # `bullets[i] = bullets[i] + x` uses it twice. Two bytes to make the order of
+  # those two never matter.
+  #
+  # A literal index needs none of that: `bullets[2]` is an address the compiler
+  # already knows, so it compiles into exactly what a plain cell does.
+  defp statement(
+         {:=, _, [{{:., _, [Access, :get]}, _, [array, index]}, expression]} = statement,
+         allocation,
+         counter
+       ) do
+    value = load(expression, allocation, statement)
+
+    case indexed(array, index, allocation, statement) do
+      {[], {:mem, address}} ->
+        {value ++ [{:ld, {:mem, address}, :a}], counter}
+
+      {setup, operand} ->
+        {value ++ [{:push, :af}] ++ setup ++ [{:pop, :af}, {:ld, operand, :a}], counter}
+    end
+  end
 
   defp statement({:=, _, [target, expression]} = statement, allocation, counter) do
     address = cell!(target, allocation, statement)
@@ -1264,6 +1328,16 @@ defmodule Potion.Compiler do
     if offset == 0, do: load, else: load ++ [{:add, :a, offset}]
   end
 
+  # A cell of an array drives a sprite the same way a lone cell does, which is
+  # the point of arrays existing: a pool of bullets is a pool of positions, and
+  # a position that could not reach the OAM would be half a feature.
+  defp sprite_value({{:., _, [Access, :get]}, _, [array, index]}, offset, allocation, statement) do
+    {setup, operand} = indexed(array, index, allocation, statement)
+    load = setup ++ [{:ld, :a, operand}]
+
+    if offset == 0, do: load, else: load ++ [{:add, :a, offset}]
+  end
+
   defp sprite_value(other, _offset, _allocation, statement) do
     raise CompileError, """
     `sprite` field outside the v0 subset:
@@ -1272,8 +1346,9 @@ defmodule Potion.Compiler do
 
     Rejected AST: #{inspect(other)}
 
-    In #{one_line(statement)}, `x:`, `y:` and `tile:` take a declared variable \
-    or a literal from 0 to 255. A computation happens before, in a variable.
+    In #{one_line(statement)}, `x:`, `y:` and `tile:` take a declared variable, \
+    a cell of an array, or a literal from 0 to 255. A computation happens \
+    before, in a variable.
     """
   end
 
@@ -1286,6 +1361,11 @@ defmodule Potion.Compiler do
   defp load({name, _, context}, allocation, statement)
        when is_atom(name) and is_atom(context) do
     [{:ld, :a, {:mem, cell!(name, allocation, statement)}}]
+  end
+
+  defp load({{:., _, [Access, :get]}, _, [array, index]}, allocation, statement) do
+    {setup, operand} = indexed(array, index, allocation, statement)
+    setup ++ [{:ld, :a, operand}]
   end
 
   defp load({:-, _, [literal]}, _allocation, statement) when is_integer(literal) do
@@ -1330,6 +1410,10 @@ defmodule Potion.Compiler do
   # the actor, and the vblank handler pushes all four pairs before touching
   # anything -- so an interrupt landing between the `LD HL` and the `ADD` hands
   # it back untouched.
+  defp term({{:., _, [Access, :get]}, _, [array, index]}, allocation, statement) do
+    indexed(array, index, allocation, statement)
+  end
+
   defp term({name, _, context}, allocation, statement)
        when is_atom(name) and is_atom(context) do
     {[{:ld, :hl, cell!(name, allocation, statement)}], {:mem, :hl}}
@@ -1391,6 +1475,89 @@ defmodule Potion.Compiler do
   defp two_complement(value), do: value
 
   # ── The cell of a variable ──────────────────────────────────────────────────
+
+  # A case of an array, as an address. Two shapes, and which one comes out is
+  # the whole of what indexing costs.
+  #
+  # A literal index is arithmetic the compiler can do itself, so `bullets[2]` is
+  # an address and nothing is emitted at all. A cell index is a sixteen-bit add:
+  # the index into L, zero into H, the base into BC, `ADD HL, BC`.
+  #
+  # Three bytes more than adding the index to L would cost, and today they buy
+  # nothing -- the actor page is 0xC100-0xC1FF, so every array sits inside one
+  # page and a byte add would never lose a carry. They are spent because that
+  # page is 256 bytes for one reason, `@state_page`, and WRAM runs to the stack
+  # at 0xDFFF: the day an actor wants more than a page, a byte add starts
+  # wrapping arrays onto themselves and nothing says so. A test pins the add for
+  # the same reason, since no game today can make it fail.
+  #
+  # HL is free to clobber for the same reason `term/3` says: the kernel keeps
+  # nothing in it across its `CALL`, and the vblank handler pushes all four
+  # pairs before touching anything.
+  defp indexed(array, index, allocation, statement) do
+    {name, base, length} = array!(array, allocation, statement)
+
+    case fold(index) do
+      {:ok, offset} when offset >= 0 and offset < length ->
+        {[], {:mem, base + offset}}
+
+      {:ok, offset} ->
+        raise CompileError, """
+        #{inspect(name)} has #{length} cells, and this asks for number #{offset}.
+
+            #{one_line(statement)}
+
+        They are numbered from zero, so the last one is #{length - 1}. An index \
+        held in a cell is not checked -- there is no room in a frame to check it \
+        -- but one written out is.
+        """
+
+      :error ->
+        {[
+           {:ld, :a, {:mem, cell!(index, allocation, statement)}},
+           {:ld, :l, :a},
+           {:ld, :h, 0},
+           {:ld, :bc, base},
+           {:add, :hl, :bc}
+         ], {:mem, :hl}}
+    end
+  end
+
+  defp array!({name, _, context}, allocation, statement)
+       when is_atom(name) and is_atom(context) do
+    case Map.fetch(Map.get(allocation, :arrays, %{}), name) do
+      {:ok, length} ->
+        {name, Map.fetch!(allocation.cells, name), length}
+
+      :error ->
+        known =
+          allocation
+          |> Map.get(:arrays, %{})
+          |> Map.keys()
+          |> Enum.sort()
+          |> Enum.map_join(", ", &inspect/1)
+
+        raise CompileError, """
+        #{inspect(name)} is not an array, so it has no numbered cells.
+
+            #{one_line(statement)}
+
+        #{if known == "", do: "This game declares none.", else: "The arrays it has: #{known}."}
+
+        An array is declared by writing its cells out:
+
+            variables bullets: [0, 0, 0, 0]
+        """
+    end
+  end
+
+  defp array!(other, _allocation, statement) do
+    raise CompileError, """
+    only a name can be indexed: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+    """
+  end
 
   defp cell!({name, _, context}, allocation, statement)
        when is_atom(name) and is_atom(context) do
