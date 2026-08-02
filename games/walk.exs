@@ -68,15 +68,20 @@ defmodule Walk do
       # `touching?` answers about whatever cell its arithmetic lands on -- a
       # wall, as it happens. Cross first, and the collision below only ever
       # sees on-screen pixels.
-      # The edges are doors. Crossing one shows the other room and carries the
-      # walker to its far side — the position survives the move because cells
-      # are WRAM and a room only rewrites the background map.
-      if x > 152 do
+      #
+      # And a door is a *place*, not an edge. Without the rows in the test,
+      # pushing into the left wall anywhere reached x = 7, fired the door, and
+      # re-showed the room -- every frame. The position reverted each time, so
+      # nothing looked wrong in the cells; but every `show` switches the panel
+      # off for a third of a frame, and the top of the picture is scanned while
+      # it is dark. The screen flickered blank at the top, the walker vanished
+      # into it, and the map was innocent all along.
+      if x > 152 and y >= 64 and y <= 72 do
         show(:cave)
         x = 8
       end
 
-      if x < 8 do
+      if x < 8 and y >= 64 and y <= 72 do
         show(:meadow)
         x = 152
       end
