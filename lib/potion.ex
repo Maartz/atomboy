@@ -211,7 +211,8 @@ defmodule Potion do
     * `Potion.ROM` — the 32 KB cartridge, header and checksums included.
     * `Potion.PNG` and `Potion.Tiles` — a drawing down to its pixels, and pixels
       into the console's two-byte-a-row tiles.
-    * `Potion.Music` — a line of notation into the bytes a tune is made of.
+    * `Potion.Music` — a line of notation into the bytes a tune is made of;
+      `docs/sound.md` is the whole sound story on one page.
   """
 
   alias Potion.Assembler
