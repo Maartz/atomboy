@@ -29,15 +29,17 @@ defmodule Pong do
 end
 ```
 
-`use Potion` imports six words — `defactor`, `variables`, `every_frame`,
-`tiles`, `state`, `on_enter` — and registers a `@before_compile` hook. Nothing
-else about the module is special, and `Pong` is a perfectly ordinary Elixir
-module that happens to have `rom/0` on it when the compiler is done.
+`use Potion` imports seven words — `defactor`, `variables`, `every_frame`,
+`tiles`, `state`, `on_enter`, `routine` — and registers a `@before_compile`
+hook. Nothing else about the module is special, and `Pong` is a perfectly
+ordinary Elixir module that happens to have `rom/0` on it when the compiler is
+done.
 
-Those six are the only ones imported, and the reason is stage 2: everything
+Those seven are the only ones imported, and the reason is stage 2: everything
 else a game writes — `sprite`, `background`, `text`, `become`, `fade`,
-`pressed?` — is never expanded, so it needs no definition to import. The six
-exist as functions purely so that writing one in the wrong place says so.
+`pressed?`, and a call to one of the actor's own routines — is never expanded,
+so it needs no definition to import. The seven exist as functions purely so that
+writing one in the wrong place says so.
 
 ## 2. The tree, unexpanded
 
@@ -168,7 +170,7 @@ Pong.addresses()  # %{x: 0xC100, y: 0xC101}
 
 ---
 
-## The two other pipelines
+## The three other pipelines
 
 **A drawing.** `tiles from: "art/pong.png"` runs while the module compiles:
 `Potion.PNG` reads the file down to `{r, g, b, a}` per pixel, `Potion.Tiles`
@@ -176,6 +178,14 @@ bands the brightness into four shades and cuts 8x8 tiles into the console's
 two-byte-a-row bitplanes, and the bytes go into the cartridge where the init
 copies them to VRAM. The names are handed out in reading order, and a game never
 writes a tile number.
+
+**A routine.** `routine :bounce do … end` is a labelled block ending in `RET`,
+laid after the actor's body where nothing falls into it, and `bounce()` is a
+`CALL`. No parameters: an actor's cells are the only storage there is, so a
+caller sets them first — which is what an argument would have compiled to. The
+call graph is walked at compile time and a circle is refused, because a `CALL`
+that goes round grows the stack by two bytes a lap until it reaches the actor's
+own cells.
 
 **A word.** `text(3, 7, "PRESS START")` becomes eleven `LD` pairs, one a square,
 at compile time. There is no string at run time — there are letters that were

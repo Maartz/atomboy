@@ -161,7 +161,15 @@ defmodule Potion do
   defmacro __using__(_opts) do
     quote do
       import Potion,
-        only: [defactor: 2, variables: 1, every_frame: 1, tiles: 1, state: 2, on_enter: 1]
+        only: [
+          defactor: 2,
+          variables: 1,
+          every_frame: 1,
+          tiles: 1,
+          state: 2,
+          on_enter: 1,
+          routine: 2
+        ]
 
       @before_compile Potion
     end
@@ -181,7 +189,7 @@ defmodule Potion do
     name = name!(name, module)
     unique!(module, name)
 
-    {declarations, behaviour} = split!(body, name)
+    {declarations, behaviour, routines} = split!(body, name)
 
     slot = length(actors(module))
 
@@ -189,7 +197,8 @@ defmodule Potion do
       Compiler.allocate(declarations,
         base: next_base(module),
         prefix: "potion_#{slot}",
-        states: state_names(behaviour)
+        states: state_names(behaviour),
+        routines: Enum.map(routines, fn {name, _} -> name end)
       )
 
     shared_names!(module, allocation, name)
@@ -197,7 +206,7 @@ defmodule Potion do
     Module.put_attribute(
       module,
       :potion_actors,
-      actors(module) ++ [{name, allocation, behaviour}]
+      actors(module) ++ [{name, allocation, behaviour, routines}]
     )
 
     :ok
@@ -292,20 +301,23 @@ defmodule Potion do
         # could never see the ball -- a rule nobody would remember. By the time
         # the module closes, every cell is known, and reading is symmetric.
         cells =
-          Enum.reduce(actors, %{}, fn {_name, allocation, _body}, acc ->
+          Enum.reduce(actors, %{}, fn {_name, allocation, _behaviour, _routines}, acc ->
             Map.merge(acc, allocation.cells)
           end)
 
         art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
 
         fragments =
-          Enum.map(actors, fn {name, allocation, behaviour} ->
+          Enum.map(actors, fn {name, allocation, behaviour, routines} ->
             allocation = %{allocation | cells: cells, tiles: art.names}
 
             fragment =
               case behaviour do
-                {:body, body} -> Compiler.compile(body, allocation)
-                {:states, states} -> Compiler.compile_machine(states, allocation)
+                {:body, body} ->
+                  Compiler.compile(body, allocation, routines)
+
+                {:states, states} ->
+                  Compiler.compile_machine(states, allocation, routines)
               end
 
             verify!(fragment, name, art.bytes)
@@ -409,6 +421,13 @@ defmodule Potion do
     outside_actor!("on_enter", "on_enter do … end")
   end
 
+  @doc """
+  A block written once inside an actor and called by name from several places.
+  """
+  defmacro routine(_name, _blocks) do
+    outside_actor!("routine", "routine :bounce do … end")
+  end
+
   # ══ Reading the actor's tree ═════════════════════════════════════════════════
 
   defp name!(name, _module) when is_atom(name), do: name
@@ -427,7 +446,9 @@ defmodule Potion do
   end
 
   defp unique!(module, name) do
-    if Enum.any?(actors(module), fn {taken, _allocation, _fragment} -> taken == name end) do
+    if Enum.any?(actors(module), fn {taken, _allocation, _behaviour, _routines} ->
+         taken == name
+       end) do
       raise CompileError, """
       two actors called #{inspect(name)} in #{inspect(module)}.
 
@@ -442,7 +463,7 @@ defmodule Potion do
   # declaration is still on screen.
   defp shared_names!(module, allocation, name) do
     clashes =
-      Enum.flat_map(actors(module), fn {other, other_allocation, _fragment} ->
+      Enum.flat_map(actors(module), fn {other, other_allocation, _behaviour, _routines} ->
         for {variable, _address} <- other_allocation.cells,
             Map.has_key?(allocation.cells, variable),
             do: {variable, other}
@@ -465,10 +486,11 @@ defmodule Potion do
   end
 
   defp split!(body, name) do
-    {declarations, every_frame, states} =
+    {declarations, every_frame, states, routines} =
       body
       |> statements()
-      |> Enum.reduce({nil, nil, []}, fn statement, {declarations, every_frame, states} ->
+      |> Enum.reduce({nil, nil, [], []}, fn statement,
+                                            {declarations, every_frame, states, routines} ->
         case statement do
           {:variables, _, _} when declarations != nil ->
             duplicate!("variables", name)
@@ -477,13 +499,18 @@ defmodule Potion do
             duplicate!("every_frame", name)
 
           {:variables, _, [decl]} ->
-            {decl, every_frame, states}
+            {decl, every_frame, states, routines}
 
           {:every_frame, _, [[do: block]]} ->
-            {declarations, block, states}
+            {declarations, block, states, routines}
 
           {:state, _, [state_name, [do: block]]} ->
-            {declarations, every_frame, states ++ [state!(state_name, block, name, states)]}
+            {declarations, every_frame, states ++ [state!(state_name, block, name, states)],
+             routines}
+
+          {:routine, _, [routine_name, [do: block]]} ->
+            {declarations, every_frame, states,
+             routines ++ [routine!(routine_name, block, name, routines)]}
 
           other ->
             raise CompileError, """
@@ -493,11 +520,12 @@ defmodule Potion do
 
             Rejected AST: #{inspect(other)}
 
-            An actor's body contains three forms and no others:
+            An actor's body contains four forms and no others:
 
                 variables x: 80, y: 72
                 every_frame do … end
                 state :title do … end
+                routine :bounce do … end
 
             The game's code goes into `every_frame` — either one for the whole \
             actor, or one inside each `state`.
@@ -518,10 +546,10 @@ defmodule Potion do
         """
 
       states != [] ->
-        {declarations || [], {:states, states}}
+        {declarations || [], {:states, states}, routines}
 
       every_frame != nil ->
-        {declarations || [], {:body, every_frame}}
+        {declarations || [], {:body, every_frame}, routines}
 
       true ->
         raise CompileError, """
@@ -537,6 +565,23 @@ defmodule Potion do
             end
         """
     end
+  end
+
+  # A routine is a name and a block, and nothing else -- no parameters, because
+  # an actor's cells are the only storage there is and a caller sets them.
+  defp routine!(routine_name, block, actor, seen) do
+    routine_name = literal_name!(routine_name, actor)
+
+    if Enum.any?(seen, fn {name, _} -> name == routine_name end) do
+      raise CompileError, """
+      the actor #{inspect(actor)} declares the routine #{inspect(routine_name)} twice.
+
+      A call names one place in the ROM, so two blocks with one name is a call \
+      with no answer.
+      """
+    end
+
+    {routine_name, block}
   end
 
   # A state's body holds the same `every_frame` an actor does, and may hold an

@@ -196,6 +196,39 @@ defmodule Pong do
   defactor :ball do
     variables bx: 80, by: 68, vx: -1, vy: 1, speed: 64, acc: 0, off: 0, mine: 0, theirs: 0
 
+    # The angle a paddle gives, written once and called by both of them.
+    #
+    # `off` is where the ball struck: 0 at the top of the overlap and 24 at the
+    # bottom, so 12 is the middle. Above it the ball leaves upward, below it
+    # downward, and the further from the middle the steeper — which is what lets
+    # a player aim rather than merely return.
+    #
+    # No parameters, and none are missing. The caller works `off` out from its
+    # own paddle's top and sets `vx` and `bx` before calling, which is what an
+    # argument would have compiled to anyway: an actor's cells are the only
+    # storage there is.
+    #
+    # The ladders count *away* from the middle, and each rung is a plain
+    # comparison against a literal — there is no `abs`, and `12 - off` would put
+    # a literal on the left of a subtraction, which the v0 does not spell.
+    routine :bounce do
+      if off < 12 do
+        vy = -1
+        speed = 32
+        if off < 9, do: speed = 64
+        if off < 6, do: speed = 96
+        if off < 3, do: speed = 128
+      end
+
+      if off >= 12 do
+        vy = 1
+        speed = 32
+        if off > 14, do: speed = 64
+        if off > 17, do: speed = 96
+        if off > 20, do: speed = 128
+      end
+    end
+
     every_frame do
       if playing == 1 do
         # Horizontally, one pixel a frame, always. Vertically, a fraction.
@@ -235,25 +268,7 @@ defmodule Pong do
           # what lets a player aim rather than merely return.
           off = by - ptop
 
-          # The ladders count *away* from the middle, and each rung is a plain
-          # comparison against a literal — there is no `abs`, and `12 - off`
-          # would put a literal on the left of a subtraction, which the v0 does
-          # not spell.
-          if off < 12 do
-            vy = -1
-            speed = 32
-            if off < 9, do: speed = 64
-            if off < 6, do: speed = 96
-            if off < 3, do: speed = 128
-          end
-
-          if off >= 12 do
-            vy = 1
-            speed = 32
-            if off > 14, do: speed = 64
-            if off > 17, do: speed = 96
-            if off > 20, do: speed = 128
-          end
+          bounce()
         end
 
         # ── The rival's paddle, the same rule ────────────────────────────────
@@ -268,21 +283,7 @@ defmodule Pong do
 
           off = by - etop
 
-          if off < 12 do
-            vy = -1
-            speed = 32
-            if off < 9, do: speed = 64
-            if off < 6, do: speed = 96
-            if off < 3, do: speed = 128
-          end
-
-          if off >= 12 do
-            vy = 1
-            speed = 32
-            if off > 14, do: speed = 64
-            if off > 17, do: speed = 96
-            if off > 20, do: speed = 128
-          end
+          bounce()
         end
 
         # A miss, and the reason these thresholds are 4 and 152 rather than 0

@@ -117,7 +117,9 @@ defmodule Potion.Compiler do
           tiles: %{atom() => non_neg_integer()},
           states: %{atom() => non_neg_integer()},
           state: non_neg_integer() | nil,
-          entered: non_neg_integer() | nil
+          entered: non_neg_integer() | nil,
+          routines: MapSet.t(atom()),
+          in_routine: atom() | nil
         }
 
   # The bits of the pad cell, as `Potion.Runtime.read_pad/0` files them. This
@@ -159,6 +161,7 @@ defmodule Potion.Compiler do
     prefix = Keyword.get(opts, :prefix, "potion")
     tiles = Keyword.get(opts, :tiles, %{})
     states = Keyword.get(opts, :states, [])
+    routines = Keyword.get(opts, :routines, [])
 
     list = declarations!(declarations)
     names = Keyword.keys(list)
@@ -182,7 +185,9 @@ defmodule Potion.Compiler do
       tiles: tiles,
       states: states |> Enum.with_index() |> Map.new(),
       state: if(states == [], do: nil, else: installed + 1),
-      entered: if(states == [], do: nil, else: installed + 2)
+      entered: if(states == [], do: nil, else: installed + 2),
+      routines: MapSet.new(routines),
+      in_routine: nil
     }
   end
 
@@ -302,9 +307,9 @@ defmodule Potion.Compiler do
   control back.
   """
   @spec compile(Macro.t(), allocation()) :: [Assembler.element()]
-  def compile(body, allocation) do
-    {compiled, _counter} = block(body, allocation, 0)
-    install(allocation) ++ compiled ++ [{:ret}]
+  def compile(body, allocation, routines \\ []) do
+    {compiled, counter} = block(body, allocation, 0)
+    install(allocation) ++ compiled ++ [{:ret}] ++ subroutines(routines, allocation, counter)
   end
 
   @doc """
@@ -335,12 +340,15 @@ defmodule Potion.Compiler do
   `on_enter` the place to paint a screen: sixty times a second is what
   `every_frame` is for, and once is what a title screen wants.
   """
-  @spec compile_machine([{atom(), Macro.t() | nil, Macro.t() | nil}], allocation()) ::
-          [Assembler.item()]
-  def compile_machine(states, allocation) do
+  @spec compile_machine(
+          [{atom(), Macro.t() | nil, Macro.t() | nil}],
+          allocation(),
+          [{atom(), Macro.t()}]
+        ) :: [Assembler.item()]
+  def compile_machine(states, allocation, routines \\ []) do
     done = done_label(allocation)
 
-    {arms, _counter} =
+    {arms, counter} =
       Enum.reduce(states, {[], 0}, fn {name, on_enter, every_frame}, {acc, counter} ->
         index = Map.fetch!(allocation.states, name)
         {arm, counter} = arm(index, on_enter, every_frame, allocation, counter, done)
@@ -349,7 +357,7 @@ defmodule Potion.Compiler do
 
     install(allocation) ++
       [{:ld, :a, {:mem, allocation.state}}] ++
-      arms ++ [{:label, done}, {:ret}]
+      arms ++ [{:label, done}, {:ret}] ++ subroutines(routines, allocation, counter)
   end
 
   defp arm(index, on_enter, every_frame, allocation, counter, done) do
@@ -385,6 +393,59 @@ defmodule Potion.Compiler do
          {:label, entered}
        ], counter}
   end
+
+  # A routine is a labelled block ending in RET, laid after the actor's body
+  # where nothing falls into it. `check_actor!` looks at the fragment's last
+  # element and finds the last routine's RET, which is why appending them is
+  # safe rather than merely convenient.
+  defp subroutines([], _allocation, _counter), do: []
+
+  defp subroutines(list, allocation, counter) do
+    acyclic!(list)
+
+    {elements, _counter} =
+      Enum.reduce(list, {[], counter}, fn {name, body}, {acc, counter} ->
+        {compiled, counter} = block(body, %{allocation | in_routine: name}, counter)
+
+        {acc ++ [{:label, routine_label(allocation, name)}] ++ compiled ++ [{:ret}], counter}
+      end)
+
+    elements
+  end
+
+  # Routines that call each other in a circle would run until the stack reached
+  # the actor's own cells, which is a crash a long way from its cause. The graph
+  # is walked here, where the names are still names.
+  defp acyclic!(list) do
+    graph = Map.new(list, fn {name, body} -> {name, calls(body)} end)
+    Enum.each(Map.keys(graph), &descend!(&1, graph, []))
+  end
+
+  defp calls(body) do
+    {_tree, found} =
+      Macro.prewalk(body, [], fn
+        {name, _, []} = node, acc when is_atom(name) -> {node, [name | acc]}
+        node, acc -> {node, acc}
+      end)
+
+    Enum.uniq(found)
+  end
+
+  defp descend!(name, graph, seen) do
+    if name in seen do
+      raise CompileError, """
+      the routines call each other in a circle: #{Enum.map_join(Enum.reverse([name | seen]), " -> ", &inspect/1)}
+
+      A call is a `CALL`, and the return address it pushes is only taken back by \
+      the matching `RET`. Going round would grow the stack by two bytes a lap \
+      until it reached the actor's own cells -- a crash a long way from its cause.
+      """
+    end
+
+    Enum.each(Map.get(graph, name, []), &descend!(&1, graph, [name | seen]))
+  end
+
+  defp routine_label(allocation, name), do: :"#{allocation.prefix}_do_#{name}"
 
   defp done_label(allocation), do: :"#{allocation.prefix}_done"
 
@@ -544,9 +605,63 @@ defmodule Potion.Compiler do
     """
   end
 
+  # ── Calling a routine ───────────────────────────────────────────────────────
+  #
+  # Written `bounce()`, and the empty parentheses are what make it unambiguous:
+  # a cell arrives as `{name, meta, nil}` and every other statement carries
+  # arguments, so a name with an empty argument list can only be a call.
+  #
+  # No parameters, and none are missing. An actor's cells are the only storage
+  # there is, and both callers of Pong's bounce set `off` and `vx` before calling
+  # -- which is what an argument would have compiled to anyway, minus the
+  # register juggling.
+  defp statement({name, _, []} = statement, allocation, counter) when is_atom(name) do
+    unless MapSet.member?(allocation.routines, name) do
+      known = allocation.routines |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+
+      raise CompileError, """
+      no routine is named #{inspect(name)}.
+
+          #{one_line(statement)}
+
+      #{if known == "", do: "This actor declares none.", else: "The ones it has: #{known}."}
+
+      A routine is written once inside the actor and called by its name:
+
+          routine :bounce do
+            …
+          end
+      """
+    end
+
+    {[{:call, {:label, routine_label(allocation, name)}}], counter}
+  end
+
   # ── Changing state ──────────────────────────────────────────────────────────
 
   defp statement({:become, _, [name]} = statement, allocation, counter) do
+    if allocation.in_routine do
+      raise CompileError, """
+      `become` inside the routine #{inspect(allocation.in_routine)}.
+
+          #{one_line(statement)}
+
+      `become` ends the frame by jumping to the end of the actor, and a routine \
+      was reached by a `CALL` -- so the return address it pushed would still be \
+      on the stack, and every transition would leave two more bytes there until \
+      the stack reached the actor's own cells.
+
+      Have the routine decide, and the caller act on it:
+
+          routine :check do
+            if theirs >= 5, do: finished = 1
+          end
+
+          check()
+          if finished == 1, do: become(:over)
+      """
+    end
+
     if allocation.state == nil do
       raise CompileError, """
       `become` in an actor that has no states.

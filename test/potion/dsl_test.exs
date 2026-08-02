@@ -492,6 +492,114 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # One routine, called from two places that differ only in what they set first.
+  # That is Pong's collision in miniature: the callers set `input`, the routine
+  # reads it, and the parameter an argument would have carried is a cell — which
+  # is what an argument would have compiled to anyway.
+  defmodule Twice do
+    @moduledoc false
+    use Potion
+
+    defactor :thing do
+      variables input: 0, doubled: 0, calls: 0, left: 0, right: 0
+
+      routine :double do
+        doubled = input + input
+        calls = calls + 1
+      end
+
+      every_frame do
+        if left == 0 do
+          input = 3
+          double()
+          left = doubled
+        end
+
+        if right == 0 do
+          input = 5
+          double()
+          right = doubled
+        end
+      end
+    end
+  end
+
+  describe "a routine written once and called twice" do
+    test "both callers get the routine's work, on their own input" do
+      addresses = Twice.addresses()
+      {_pixels, _state, ram} = run_frames(Twice, 10)
+
+      assert Map.get(ram, addresses.left) == 6
+      assert Map.get(ram, addresses.right) == 10
+    end
+
+    # A `CALL` that never returned would run into whatever follows, and the
+    # counter says the block ran twice rather than once and fallen through, or
+    # twice on a frame that should have stopped after the first.
+    test "the routine returns, so the caller carries on" do
+      addresses = Twice.addresses()
+      {_pixels, _state, ram} = run_frames(Twice, 10)
+
+      assert Map.get(ram, addresses.calls) == 2
+    end
+
+    # A `CALL` pushes a return address that only the matching `RET` takes back,
+    # so routines calling each other in a circle would grow the stack by two
+    # bytes a lap until it reached the actor's own cells. The message names the
+    # circle, because a stack that has quietly walked into `x` is a crash a long
+    # way from its cause.
+    test "routines that call each other in a circle are refused, and the circle is named" do
+      error =
+        assert_raise Potion.CompileError, fn ->
+          Code.compile_string("""
+          defmodule Circular.Routines do
+            use Potion
+
+            defactor :thing do
+              variables x: 0
+
+              routine :one do
+                x = x + 1
+                two()
+              end
+
+              routine :two do
+                x = x + 1
+                one()
+              end
+
+              every_frame do
+                one()
+              end
+            end
+          end
+          """)
+        end
+
+      assert error.message =~ "circle"
+      assert error.message =~ ":one"
+      assert error.message =~ ":two"
+    end
+
+    test "a routine that was never declared is refused, with the ones that were" do
+      allocation = Potion.Compiler.allocate([x: 0], routines: [:bounce, :serve])
+
+      assert_raise Potion.CompileError, ~r/no routine is named :bonce.*:bounce, :serve/s, fn ->
+        Potion.Compiler.compile({:bonce, [], []}, allocation)
+      end
+    end
+
+    test "the block is in the ROM once, not once per call" do
+      program = Twice.program()
+
+      labels = Enum.filter(program, &match?({:label, :potion_0_do_double}, &1))
+      calls = Enum.filter(program, &match?({:call, {:label, :potion_0_do_double}}, &1))
+
+      assert length(labels) == 1
+      assert length(calls) == 2
+    end
+  end
+
   describe "an actor made of states" do
     test "becoming the state already running enters it again" do
       addresses = Restart.addresses()
