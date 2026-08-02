@@ -270,7 +270,8 @@ defmodule Potion.PNG do
         {r, g, b, alpha}
 
       _ ->
-        raise ArgumentError, "#{source} names palette entry #{index}, which its PLTE does not hold"
+        raise ArgumentError,
+              "#{source} names palette entry #{index}, which its PLTE does not hold"
     end
   end
 

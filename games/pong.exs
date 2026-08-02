@@ -12,6 +12,11 @@
 defmodule Pong do
   use Potion
 
+  # The drawing, cut into tiles while this file compiles. Reading order, so the
+  # ball is the left square and the paddle the right one — and the names are how
+  # the game refers to them from here on. Nothing below knows a tile index.
+  tiles from: "art/pong.png", names: [:ball, :paddle]
+
   # The screen is 160x144 and a tile is 8x8. Paddles are two stacked sprites,
   # the ball is one, and tile 0 is the kernel's solid square.
   #
@@ -49,8 +54,8 @@ defmodule Pong do
       pmid = py + 8
       pbot = py + 16
 
-      sprite(0, x: 8, y: py, tile: 0)
-      sprite(1, x: 8, y: pmid, tile: 0)
+      sprite(0, x: 8, y: py, tile: :paddle)
+      sprite(1, x: 8, y: pmid, tile: :paddle)
     end
   end
 
@@ -75,8 +80,8 @@ defmodule Pong do
       emid = ey + 8
       ebot = ey + 16
 
-      sprite(2, x: 144, y: ey, tile: 0)
-      sprite(3, x: 144, y: emid, tile: 0)
+      sprite(2, x: 144, y: ey, tile: :paddle)
+      sprite(3, x: 144, y: emid, tile: :paddle)
     end
   end
 
@@ -218,7 +223,7 @@ defmodule Pong do
       if mine > 9, do: mine = 0
       if theirs > 9, do: theirs = 0
 
-      sprite(4, x: bx, y: by, tile: 0)
+      sprite(4, x: bx, y: by, tile: :ball)
 
       background(4, 2, digit: mine)
       background(15, 2, digit: theirs)

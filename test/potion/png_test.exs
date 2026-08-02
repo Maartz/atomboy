@@ -88,9 +88,10 @@ defmodule Potion.PNGTest do
     # a message that names the fix is the whole benefit of refusing rather than
     # decoding something half-right.
     test "an interlaced file, by name, with the way out" do
-      png = with_header(read_bytes("rgb"), fn <<w::32, h::32, d, c, z1, z2, _>> ->
-        <<w::32, h::32, d, c, z1, z2, 1>>
-      end)
+      png =
+        with_header(read_bytes("rgb"), fn <<w::32, h::32, d, c, z1, z2, _>> ->
+          <<w::32, h::32, d, c, z1, z2, 1>>
+        end)
 
       assert_raise ArgumentError, ~r/interlaced.*without interlacing/s, fn ->
         Potion.PNG.decode!(png, "interlaced.png")
@@ -98,9 +99,10 @@ defmodule Potion.PNGTest do
     end
 
     test "sixteen bits a sample, by name, with the reason" do
-      png = with_header(read_bytes("rgb"), fn <<w::32, h::32, _d, c, z1, z2, i>> ->
-        <<w::32, h::32, 16, c, z1, z2, i>>
-      end)
+      png =
+        with_header(read_bytes("rgb"), fn <<w::32, h::32, _d, c, z1, z2, i>> ->
+          <<w::32, h::32, 16, c, z1, z2, i>>
+        end)
 
       assert_raise ArgumentError, ~r/sixteen bits a sample/, fn ->
         Potion.PNG.decode!(png, "deep.png")
