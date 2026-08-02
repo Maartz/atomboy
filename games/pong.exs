@@ -114,48 +114,46 @@ defmodule Pong do
 
       # ── The left paddle, and the angle it gives ────────────────────────────
       #
-      # Three nested ifs and not one condition, because the language has no
-      # `and` — which costs nothing here, since nested jumps are what an `and`
-      # would have compiled to anyway.
+      # One condition and three clauses. `and` costs nothing at run time: a
+      # condition compiles to the jumps that leave when it is false, so two of
+      # them in a row leave when either is false — which is the same bytes the
+      # three nested ifs this replaces produced, and one indentation level
+      # instead of three.
       #
       # `bx = 17` after the bounce is not decoration. Without it the ball can
       # spend a second frame under 16 and bounce again, back into the paddle.
-      if bx <= 16 do
-        if by >= ptop do
-          if by <= pbot do
-            vx = 1
-            bx = 17
+      if bx <= 16 and by >= ptop and by <= pbot do
+        vx = 1
+        bx = 17
 
-            # Where it struck, 0 at the top of the overlap and 24 at the bottom,
-            # so 12 is the middle. Above the middle it leaves upward, below it
-            # downward, and the further from the middle the steeper — which is
-            # what lets a player aim rather than merely return.
-            off = by - ptop
+        # Where it struck, 0 at the top of the overlap and 24 at the bottom, so
+        # 12 is the middle. Above the middle it leaves upward, below it
+        # downward, and the further from the middle the steeper — which is what
+        # lets a player aim rather than merely return.
+        off = by - ptop
 
-            # Two separate ifs rather than an if/else: the two branches want a
-            # block each, and this shape needs nothing from the language beyond
-            # what the walls above already use.
-            #
-            # The ladders count *away* from the middle, and each rung is written
-            # as a plain comparison against a literal — there is no `abs`, and
-            # `12 - off` would put a literal on the left of a subtraction, which
-            # the v0 does not spell.
-            if off < 12 do
-              vy = -1
-              speed = 32
-              if off < 9, do: speed = 64
-              if off < 6, do: speed = 96
-              if off < 3, do: speed = 128
-            end
+        # Two separate ifs rather than an if/else: the two branches want a block
+        # each, and this shape needs nothing from the language beyond what the
+        # walls above already use.
+        #
+        # The ladders count *away* from the middle, and each rung is written as
+        # a plain comparison against a literal — there is no `abs`, and
+        # `12 - off` would put a literal on the left of a subtraction, which the
+        # v0 does not spell.
+        if off < 12 do
+          vy = -1
+          speed = 32
+          if off < 9, do: speed = 64
+          if off < 6, do: speed = 96
+          if off < 3, do: speed = 128
+        end
 
-            if off >= 12 do
-              vy = 1
-              speed = 32
-              if off > 14, do: speed = 64
-              if off > 17, do: speed = 96
-              if off > 20, do: speed = 128
-            end
-          end
+        if off >= 12 do
+          vy = 1
+          speed = 32
+          if off > 14, do: speed = 64
+          if off > 17, do: speed = 96
+          if off > 20, do: speed = 128
         end
       end
 
@@ -165,30 +163,26 @@ defmodule Pong do
       # routine and call it twice. That is the next thing worth taking back into
       # the compiler: this block and the one above differ only in `vx` and in
       # which paddle's `top` the offset is measured from.
-      if bx >= 136 do
-        if by >= etop do
-          if by <= ebot do
-            vx = -1
-            bx = 135
+      if bx >= 136 and by >= etop and by <= ebot do
+        vx = -1
+        bx = 135
 
-            off = by - etop
+        off = by - etop
 
-            if off < 12 do
-              vy = -1
-              speed = 32
-              if off < 9, do: speed = 64
-              if off < 6, do: speed = 96
-              if off < 3, do: speed = 128
-            end
+        if off < 12 do
+          vy = -1
+          speed = 32
+          if off < 9, do: speed = 64
+          if off < 6, do: speed = 96
+          if off < 3, do: speed = 128
+        end
 
-            if off >= 12 do
-              vy = 1
-              speed = 32
-              if off > 14, do: speed = 64
-              if off > 17, do: speed = 96
-              if off > 20, do: speed = 128
-            end
-          end
+        if off >= 12 do
+          vy = 1
+          speed = 32
+          if off > 14, do: speed = 64
+          if off > 17, do: speed = 96
+          if off > 20, do: speed = 128
         end
       end
 
