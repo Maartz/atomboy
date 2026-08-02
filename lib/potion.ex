@@ -148,6 +148,8 @@ defmodule Potion do
   ### Showing
 
       sprite(n, x: …, y: …, tile: …)     entry n of the mirror OAM, n a literal 0..39
+      sprite(0, …, flip: :x)             mirrored — :x, :y or :both; a facing
+                                         that changes is an `if` with two sprites
       background(2, 1, digit: score)     a digit on the background layer
       background(0, 0, tile: :wall)      a tile, by name or by index
       text(3, 7, "PRESS START")          words, turned into stores at compile time
@@ -182,8 +184,10 @@ defmodule Potion do
   `sprite` writes into the kernel's mirror OAM — never into the real OAM, which
   is only writable during the vblank. The hardware offsets (Y+16, X+8) are added
   by the compiler: `sprite(0, x: 80, y: 72, …)` puts the sprite's top-left corner
-  at pixel (80, 72) of the screen, and not sixteen lines further down. The
-  attributes are zeroed.
+  at pixel (80, 72) of the screen, and not sixteen lines further down. `flip:`
+  sets the attribute byte's mirror bits; the rest of it is zeroed — and it is
+  written on every call, so a sprite that stops saying `flip:` stops being
+  flipped.
 
   ## The loop
 

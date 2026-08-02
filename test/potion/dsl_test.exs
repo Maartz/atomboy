@@ -1194,6 +1194,121 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A mirrored cast: the same asymmetric tile -- the "1" of the score font --
+  # worn straight and flipped each of the three ways, one entry picked at run
+  # time, and one facing that follows the pad through an `if`'s two arms.
+  defmodule Mirrored do
+    @moduledoc false
+    use Potion
+
+    defactor :mirrored do
+      variables entry: 4
+
+      every_frame do
+        if pressed?(:right) do
+          sprite(0, x: 40, y: 40, tile: 3, flip: :x)
+        else
+          sprite(0, x: 40, y: 40, tile: 3)
+        end
+
+        sprite(1, x: 60, y: 40, tile: 3, flip: :x)
+        sprite(2, x: 80, y: 40, tile: 3, flip: :y)
+        sprite(3, x: 100, y: 40, tile: 3, flip: :both)
+        sprite(entry, x: 120, y: 40, tile: 3, flip: :y)
+      end
+    end
+  end
+
+  describe "a mirrored sprite" do
+    test "each name sets its own bits of the attribute byte, and no flip means zero" do
+      {_pixels, _state, ram} = run_frames(Mirrored, 6)
+
+      assert attribute(ram, 0) == 0x00
+      assert attribute(ram, 1) == 0x20
+      assert attribute(ram, 2) == 0x40
+      assert attribute(ram, 3) == 0x60
+    end
+
+    test "the entry picked at run time carries its flip the same way" do
+      {_pixels, _state, ram} = run_frames(Mirrored, 6)
+
+      assert attribute(ram, 4) == 0x40
+    end
+
+    test "the DMA publishes the flip with the rest of the entry" do
+      {_pixels, _state, ram} = run_frames(Mirrored, 7)
+
+      assert oam(ram, 1) == [40 + 16, 60 + 8, 3, 0x20]
+    end
+
+    test "the attribute is written on every call: the facing follows the pad, both ways" do
+      {_pixels, state, ram} = run_frames(Mirrored, 6)
+
+      assert attribute(ram, 0) == 0x00
+
+      {state, ram} = frames(Mirrored, state, Joypad.set(ram, @right, @released), 2)
+      assert attribute(ram, 0) == 0x20
+
+      # Released, the `else` arm writes the zero back. This is the claim the
+      # compiler's comment makes -- a sprite that stops saying `flip:` stops
+      # being flipped, because no memory is the memory.
+      {_state, ram} = frames(Mirrored, state, Joypad.set(ram, @released, @released), 2)
+      assert attribute(ram, 0) == 0x00
+    end
+
+    test "the mirror reaches the glass: the same tile, drawn turned" do
+      {pixels, _state, _ram} = run_frames(Mirrored, 7, render: true)
+      ink = non_white(pixels)
+
+      straight = shape(ink, 40, 40)
+
+      # The "1" is asymmetric both ways, or the comparisons below would pass
+      # on a flip that never happened.
+      assert straight != mirror_x(straight)
+      assert straight != mirror_y(straight)
+
+      assert shape(ink, 60, 40) == mirror_x(straight)
+      assert shape(ink, 80, 40) == mirror_y(straight)
+      assert shape(ink, 100, 40) == straight |> mirror_x() |> mirror_y()
+      assert shape(ink, 120, 40) == mirror_y(straight)
+    end
+
+    test "a flip that is not a mirror's name is refused, with the three there are" do
+      message =
+        reject!(
+          "Rejected.FlipNumber",
+          "variables x: 0",
+          "sprite(0, x: 40, y: 40, tile: 0, flip: 32)"
+        )
+
+      assert message =~ "names a mirror"
+      assert message =~ ":both"
+    end
+
+    test "a flip in a cell is refused: a facing that changes is an `if`" do
+      message =
+        reject!(
+          "Rejected.FlipCell",
+          "variables f: 0",
+          "sprite(0, x: 40, y: 40, tile: 0, flip: f)"
+        )
+
+      assert message =~ "names a mirror"
+      assert message =~ "a sprite in each arm"
+    end
+
+    test "a doubled flip is refused like any doubled field" do
+      message =
+        reject!(
+          "Rejected.FlipTwice",
+          "variables x: 0",
+          "sprite(0, x: 40, y: 40, tile: 0, flip: :x, flip: :y)"
+        )
+
+      assert message =~ "at most one `flip:`"
+    end
+  end
+
   describe "a motif reused" do
     # The whole point of evaluating the notation instead of pattern-matching it:
     # Elixir is already the pattern language. Two modules, one saying the phrase
@@ -2760,6 +2875,20 @@ defmodule Potion.DSLTest do
   defp position(ram, addresses), do: {Map.get(ram, addresses.x), Map.get(ram, addresses.y)}
 
   defp oam(ram, entry), do: for(i <- 0..3, do: Map.get(ram, 0xFE00 + 4 * entry + i))
+
+  defp attribute(ram, entry), do: Map.get(ram, Potion.Runtime.oam_mirror() + 4 * entry + 3)
+
+  # An 8×8 window of the ink, in its own coordinates -- and its two mirrors,
+  # which is what a flipped tile must equal its straight twin through.
+  defp shape(ink, left, top) do
+    for {c, l} <- ink,
+        c >= left and c < left + 8 and l >= top and l < top + 8,
+        into: MapSet.new(),
+        do: {c - left, l - top}
+  end
+
+  defp mirror_x(shape), do: for({c, l} <- shape, into: MapSet.new(), do: {7 - c, l})
+  defp mirror_y(shape), do: for({c, l} <- shape, into: MapSet.new(), do: {c, 7 - l})
 
   defp non_white(pixels) do
     for i <- 0..(byte_size(pixels) - 1),

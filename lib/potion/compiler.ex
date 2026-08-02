@@ -690,14 +690,14 @@ defmodule Potion.Compiler do
   defp statement({:sprite, _, [index, fields]} = statement, allocation, counter)
        when is_integer(index) do
     base = Runtime.oam_mirror() + 4 * entry!(index, statement)
-    {x, y, tile} = fields!(fields, statement)
+    {x, y, tile, flip} = fields!(fields, statement)
     tile = tile!(tile, allocation, statement)
 
     elements =
       field(y, 16, base, allocation, statement) ++
         field(x, 8, base + 1, allocation, statement) ++
         field(tile, 0, base + 2, allocation, statement) ++
-        [{:xor, :a, :a}, {:ld, {:mem, base + 3}, :a}]
+        attribute(flip, {:mem, base + 3})
 
     {elements, counter}
   end
@@ -712,7 +712,7 @@ defmodule Potion.Compiler do
   # (DE), A` exists, DE survives everything the values do, and the four bytes
   # are consecutive so `INC DE` walks them.
   defp statement({:sprite, _, [index, fields]} = statement, allocation, counter) do
-    {x, y, tile} = fields!(fields, statement)
+    {x, y, tile, flip} = fields!(fields, statement)
     tile = tile!(tile, allocation, statement)
 
     address =
@@ -738,7 +738,7 @@ defmodule Potion.Compiler do
         write.(y, 16) ++
         write.(x, 8) ++
         write.(tile, 0) ++
-        [{:xor, :a, :a}, {:ld, {:mem, :de}, :a}]
+        attribute(flip, {:mem, :de})
 
     {elements, counter}
   end
@@ -1792,6 +1792,12 @@ defmodule Potion.Compiler do
     """
   end
 
+  # The attribute byte, written on every call, zero included: a sprite that
+  # stops saying `flip:` must stop being flipped, and the cheapest memory of
+  # that is no memory at all.
+  defp attribute(0, operand), do: [{:xor, :a, :a}, {:ld, operand, :a}]
+  defp attribute(flip, operand), do: [{:ld, :a, flip}, {:ld, operand, :a}]
+
   # ── The right-hand side of an assignment ────────────────────────────────────
 
   defp load(literal, _allocation, statement) when is_integer(literal) do
@@ -2197,18 +2203,39 @@ defmodule Potion.Compiler do
 
   @fields [:x, :y, :tile]
 
+  # The mirror bits of the attribute byte, the hardware's own: bit 5 turns the
+  # tile left-for-right, bit 6 upside down.
+  @flips %{x: 0x20, y: 0x40, both: 0x60}
+
   defp fields!(fields, statement) when is_list(fields) do
     with true <- Keyword.keyword?(fields),
-         [] <- Enum.sort(Keyword.keys(fields)) -- Enum.sort(@fields),
+         [] <- Keyword.keys(fields) -- (@fields ++ [:flip]),
          [] <- Enum.sort(@fields) -- Enum.sort(Keyword.keys(fields)),
          [] <- Keyword.keys(fields) -- Enum.uniq(Keyword.keys(fields)) do
-      {fields[:x], fields[:y], fields[:tile]}
+      {fields[:x], fields[:y], fields[:tile], flip!(fields[:flip], statement)}
     else
       _ -> fields_rejected!(fields, statement)
     end
   end
 
   defp fields!(fields, statement), do: fields_rejected!(fields, statement)
+
+  defp flip!(nil, _statement), do: 0
+  defp flip!(name, _statement) when is_map_key(@flips, name), do: @flips[name]
+
+  defp flip!(other, statement) do
+    raise CompileError, """
+    `flip:` names a mirror — :x, :y or :both — and this is neither: \
+    #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    :x turns the tile left-for-right, :y upside down, :both does both. It is \
+    decided at compile time: a facing that changes while the game runs is an \
+    `if` with a sprite in each arm — the facing was a decision already, and \
+    the `if` is where the game says so.
+    """
+  end
 
   defp fields_rejected!(fields, statement) do
     raise CompileError, """
@@ -2219,8 +2246,8 @@ defmodule Potion.Compiler do
     Rejected AST: #{inspect(fields)}
 
     In #{one_line(statement)}, `sprite` expects exactly `x:`, `y:` and `tile:` \
-    — each once. The attributes are zeroed by the compiler: the v0 has only one \
-    object palette, and neither mirroring nor priority.
+    — each once — and at most one `flip:`. The rest of the attribute byte is \
+    zeroed: the v0 has only one object palette, and no priority bit.
     """
   end
 
