@@ -468,6 +468,45 @@ defmodule Potion.Compiler do
     {[{:ld, :a, {:mem, address}}] ++ setup ++ [{:cp, :a, operand}] ++ jumps, counter}
   end
 
+  # `and` is free, and that is not a turn of phrase: a condition already emits
+  # the jumps that leave for `otherwise` when it is false, so two of them, one
+  # after the other, leave for `otherwise` when *either* is false. Nothing is
+  # added and nothing is inverted -- the concatenation is the whole
+  # implementation, and the bytes are the same the nested ifs it replaces
+  # produced.
+  #
+  # It nests by construction: `a and b and c` parses as `(a and b) and c`, and
+  # either side of this clause may be any condition, including another one.
+  defp condition!({:and, _, [left, right]}, otherwise, allocation, statement, counter) do
+    {first, counter} = condition!(left, otherwise, allocation, statement, counter)
+    {second, counter} = condition!(right, otherwise, allocation, statement, counter)
+
+    {first ++ second, counter}
+  end
+
+  # `or` costs one jump, and it is the only shape that has to invert a test the
+  # rest of this module states in one direction.
+  #
+  # Rather than write a second table of flags -- the complement of every one in
+  # `skip_unless/4`, where `>` and `<=` are already two jumps and would become
+  # awkward -- the inversion is spelled by jumping over a jump. The left
+  # condition leaves for `next` when it is false; falling through it means it
+  # was true, and the body is entered directly. `next` is where the right
+  # condition gets its turn, and that one leaves for `otherwise` as usual.
+  #
+  # Three bytes, and no flag is reasoned about twice.
+  defp condition!({:or, _, [left, right]}, otherwise, allocation, statement, counter) do
+    next = label(allocation, "or_next", counter)
+    body = label(allocation, "or_body", counter + 1)
+
+    {first, counter} = condition!(left, next, allocation, statement, counter + 2)
+    {second, counter} = condition!(right, otherwise, allocation, statement, counter)
+
+    {first ++
+       [{:jp, {:label, body}}, {:label, next}] ++
+       second ++ [{:label, body}], counter}
+  end
+
   defp condition!(condition, _otherwise, _allocation, statement, _counter) do
     reject_condition!(condition, statement)
   end

@@ -381,6 +381,73 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # Five cells and five questions, between them every path an `and` or an `or`
+  # can take. Three of them are load-bearing and were not obvious:
+  #
+  #   * `or` where only the *left* side holds, which is the fall-through into
+  #     the body and the one shape this module had to invert a test for;
+  #   * `and` whose *second* test fails, which is the only case that notices an
+  #     `and` dropping its right operand — one whose first test fails is
+  #     satisfied by the first alone, and a compiler that forgot the rest of the
+  #     sentence would pass it;
+  #   * `and` whose first test fails, for the plain short circuit.
+  #
+  # The middle one is here because it was missing, and its absence was found by
+  # deleting the concatenation and watching every assertion still hold.
+  defmodule Gate do
+    @moduledoc false
+    use Potion
+
+    defactor :gate do
+      variables a: 5, b: 3, both: 0, right_only: 0, left_only: 0, neither: 0, half: 0
+
+      every_frame do
+        if a == 5 and b == 3, do: both = 1
+        if a == 9 or b == 3, do: right_only = 1
+        if a == 5 or b == 9, do: left_only = 1
+        if a == 9 and b == 3, do: neither = 1
+        if a == 5 and b == 9, do: half = 1
+      end
+    end
+  end
+
+  describe "`and` and `or`" do
+    test "every path through the two operators" do
+      addresses = Gate.addresses()
+      {_pixels, _state, ram} = run_frames(Gate, 10)
+
+      assert Map.get(ram, addresses.both) == 1, "`and` with both sides true"
+      assert Map.get(ram, addresses.right_only) == 1, "`or` where only the right side holds"
+      assert Map.get(ram, addresses.left_only) == 1, "`or` where only the left side holds"
+      assert Map.get(ram, addresses.neither) == 0, "`and` whose first test fails"
+      assert Map.get(ram, addresses.half) == 0, "`and` whose second test fails"
+    end
+
+    # The whole claim of `and`, and the reason it costs nothing: a condition
+    # already emits the jumps that leave when it is false, so two of them in a
+    # row leave when either is false. There is nothing to add and nothing to
+    # invert, and the proof is that the bytes do not move.
+    test "`and` is the nested ifs it replaces, byte for byte" do
+      allocation = Potion.Compiler.allocate(x: 0, y: 0, hit: 0)
+
+      assign = {:=, [], [{:hit, [], nil}, 1]}
+      left = {:<, [], [{:x, [], nil}, 5]}
+      right = {:>, [], [{:y, [], nil}, 3]}
+
+      joined = {:if, [], [{:and, [], [left, right]}, [do: assign]]}
+      nested = {:if, [], [left, [do: {:if, [], [right, [do: assign]]}]]}
+
+      bytes = fn tree ->
+        tree
+        |> Potion.Compiler.compile(allocation)
+        |> Potion.Runtime.program()
+        |> Potion.Assembler.assemble(origin: 0x0150)
+      end
+
+      assert bytes.(joined) == bytes.(nested)
+    end
+  end
+
   describe "the flags a comparison reads" do
     # `CP n` is a subtraction thrown away: Z if equal, C if A was the smaller.
     # Every comparison is a choice of jumps over those two bits, and the choice
