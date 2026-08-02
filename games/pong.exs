@@ -34,6 +34,11 @@ defmodule Pong do
   # harmony comes back at its next step. That is not a clash to fix: it is what
   # four channels and more than four things to say sounds like.
   #
+  # `vibrato: :gentle` makes a held note breathe. The kernel rewrites the pitch
+  # every frame with the trigger bit clear, so the note bends rather than
+  # starting again — and the wobble table opens on four zeros, so a note is
+  # struck in tune and walks into it.
+  #
   # `gap: 3` ends every note three frames early. That is the whole difference
   # between notes that run into one another and notes with a rhythm: without it
   # the channel is simply retriggered at each step and never stops, which is
@@ -46,6 +51,31 @@ defmodule Pong do
         ],
         beat: 10,
         duty: :eighth,
+        gap: 3,
+        vibrato: :gentle
+
+  # Kazumi Totaka's "Ballad of the Wind Fish" adapted for your Elixir Game Boy engine.
+  # Channels 1 and 2 utilize a thin 12.5% duty cycle (:eighth) for that signature nasal lead.
+  # Channel 3 (bass) provides the deep, smooth foundation.
+  music :wind_fish,
+        [
+          # Main vocal melody (Channel 1)
+          lead:
+            "e4 . g4 . a4 . . . c5 . . . a4 . . . g4 . e4 . d4 . e4 . g4 . . . . . . . e4 . g4 . a4 . . . c5 . d5 . e5 . . . d5 . . . c5 . . . . . . . - -",
+
+          # Parallel harmony a third/fifth below (Channel 2)
+          harmony:
+            "c4 . e4 . f4 . . . a4 . . . f4 . . . e4 . c4 . b3 . c4 . e4 . . . . . . . c4 . e4 . f4 . . . a4 . b4 . c5 . . . b4 . . . a4 . . . . . . . - -",
+
+          # Foundational root bass notes (Channel 3 - Wave)
+          bass:
+            "a2 . . . . . . . f2 . . . . . . . c2 . . . . . . . g2 . . . . . . . a2 . . . . . . . f2 . . . . . . . c2 . . . . . . . g2 . . . . . . . - -"
+        ],
+        # Slightly slower pace to capture the dreamy, melancholy atmosphere
+        beat: 12,
+        # 12.5% square wave for authentic Game Boy lead texture
+        duty: :eighth,
+        # Essential 3-frame gap to give the 8-bit envelopes "breathing room"
         gap: 3
 
   # ── The director ───────────────────────────────────────────────────────────
@@ -76,7 +106,7 @@ defmodule Pong do
         text(4, 2, " ")
         text(15, 2, " ")
 
-        play(:attract)
+        play(:wind_fish)
 
         sprite(0, x: 0, y: 160, tile: :paddle)
         sprite(1, x: 0, y: 160, tile: :paddle)

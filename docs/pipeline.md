@@ -206,8 +206,11 @@ one step a frame between the pad and the actors. A game says `play(:theme)`
 once and never feeds it. A hold is a longer step rather than a repeated one,
 because retriggering a note restarts it and the ear hears that as a stutter. `gap:` is cut here rather than played: a note of ten frames with a gap of three
 becomes a note of seven and a rest of three, so the kernel plays what it always
-played and a tune costs twice the bytes. `duty:` travels in a kernel cell that
-`play` writes, because the player rewrites the duty register on every note. The
+played and a tune costs twice the bytes. `vibrato:` is the one thing here that runs every frame: the kernel keeps the
+frequency a note was struck at, walks a sixteen-entry table of deviations, and
+rewrites the register with the trigger bit clear — so the note bends instead of
+starting again. The table opens on four zeros, which is the delay without a
+counter. `duty:` travels in a kernel cell that `play` writes, because the player rewrites the duty register on every note. The
 bass is compiled against its own table: the wave channel counts its period twice
 as slowly, so the same note is a different number there — and it reaches an
 octave lower, which is why a bass may say `c1` and a lead may not.

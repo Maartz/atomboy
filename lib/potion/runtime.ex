@@ -153,6 +153,15 @@ defmodule Potion.Runtime do
   @harmony_base 0xC0B0
   @harmony_wait 0xC0B2
 
+  # The vibrato. `@wobble` holds which table of deviations is in use, or zero for
+  # none; each pulse voice keeps the frequency its note was struck at and how far
+  # into the wobble it has walked.
+  @wobble 0xC0B3
+  @lead_pitch 0xC0B5
+  @lead_phase 0xC0B7
+  @harm_pitch 0xC0B8
+  @harm_phase 0xC0BA
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -297,6 +306,8 @@ defmodule Potion.Runtime do
       [{:label, :font_data}, {:bytes, font_bytes()}] ++
       [{:label, :letter_data}, {:bytes, letter_bytes()}] ++
       [{:label, :wave_data}, {:bytes, wave_bytes()}] ++
+      [{:label, :wobble_gentle}, {:bytes, wobble_bytes(:gentle)}] ++
+      [{:label, :wobble_deep}, {:bytes, wobble_bytes(:deep)}] ++
       art_data(art) ++
       Enum.flat_map(tunes, fn {name, voices} ->
         [{:label, :"potion_tune_#{name}"}, {:bytes, voices.lead}] ++
@@ -670,6 +681,41 @@ defmodule Potion.Runtime do
   @spec harmony_cells() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
   def harmony_cells, do: {@harmony, @harmony_base, @harmony_wait}
 
+  @doc "The cell naming which wobble table is in use, or zero for none."
+  @spec wobble_cell() :: non_neg_integer()
+  def wobble_cell, do: @wobble
+
+  @doc """
+  The two wobble tables, sixteen signed frames each.
+
+  They open on four zeros, and that is the delay rather than a counter: a note
+  is struck in tune, walks into the wobble, and comes back. A note shorter than
+  four frames never leaves the zeros, which is what keeps a run of short notes
+  from sounding seasick.
+
+  The register is a period and not a pitch, so the same deviation is a different
+  interval at every note — two units is some four hertz at c5 and a third of one
+  at c2. That is why a game names a wobble instead of giving a number, and why
+  the bass has none: on a low note these would be inaudible, and a table deep
+  enough to hear down there would be a siren up top.
+  """
+  @spec wobble_bytes(:gentle | :deep) :: binary()
+  def wobble_bytes(:gentle), do: wobble(2)
+  def wobble_bytes(:deep), do: wobble(5)
+
+  defp wobble(depth) do
+    for step <- 0..15, into: <<>> do
+      value =
+        if step < 4 do
+          0
+        else
+          round(depth * :math.sin((step - 4) / 12 * 2 * :math.pi()))
+        end
+
+      <<value::signed-8>>
+    end
+  end
+
   @doc "Channel 2's four, which the harmony and `beep` share."
   @spec pulse_two() :: {byte(), byte(), byte(), byte()}
   def pulse_two, do: {@nr21, @nr22, @nr23, @nr24}
@@ -703,7 +749,9 @@ defmodule Potion.Runtime do
   defp play_music do
     voice(:play_music, {@tune, @tune_base, @tune_wait}, :pulse) ++
       voice(:play_harmony, {@harmony, @harmony_base, @harmony_wait}, :pulse_two) ++
-      voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave)
+      voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave) ++
+      vibrato(:vibrato_lead, @lead_pitch, @lead_phase, {@nr13, @nr14}) ++
+      vibrato(:vibrato_harmony, @harm_pitch, @harm_phase, {@nr23, @nr24})
   end
 
   defp voice(label, {tune, tune_base, tune_wait}, kind) do
@@ -778,8 +826,14 @@ defmodule Potion.Runtime do
   # A rest, which on either channel is the same idea said to a different
   # register: take the volume to nothing, without triggering anything, so the
   # note already sounding stops rather than being replaced.
-  defp hush(:pulse), do: [{:xor, :a, :a}, {:ldh, {:high, @nr12}, :a}]
-  defp hush(:pulse_two), do: [{:xor, :a, :a}, {:ldh, {:high, @nr22}, :a}]
+  # A rest clears the remembered pitch as well, so the vibrato has nothing to
+  # wobble until the next note gives it something.
+  defp hush(:pulse),
+    do: [{:xor, :a, :a}, {:ldh, {:high, @nr12}, :a}, {:ld, {:mem, @lead_pitch + 1}, :a}]
+
+  defp hush(:pulse_two),
+    do: [{:xor, :a, :a}, {:ldh, {:high, @nr22}, :a}, {:ld, {:mem, @harm_pitch + 1}, :a}]
+
   defp hush(:wave), do: [{:xor, :a, :a}, {:ldh, {:high, @nr32}, :a}]
 
   # A note. C holds the frequency's low byte and B its high byte with the
@@ -801,9 +855,8 @@ defmodule Potion.Runtime do
       {:ld, :a, :c},
       {:ldh, {:high, @nr13}, :a},
       {:ld, :a, :b},
-      {:ldh, {:high, @nr14}, :a},
-      {:ret}
-    ]
+      {:ldh, {:high, @nr14}, :a}
+    ] ++ remember(@lead_pitch, @lead_phase)
   end
 
   # Channel 2 is channel 1 without the sweep register, and it shares the duty
@@ -819,9 +872,8 @@ defmodule Potion.Runtime do
       {:ld, :a, :c},
       {:ldh, {:high, @nr23}, :a},
       {:ld, :a, :b},
-      {:ldh, {:high, @nr24}, :a},
-      {:ret}
-    ]
+      {:ldh, {:high, @nr24}, :a}
+    ] ++ remember(@harm_pitch, @harm_phase)
   end
 
   # The wave channel has no envelope: its volume is a shift, and the DAC has to
@@ -836,6 +888,79 @@ defmodule Potion.Runtime do
       {:ldh, {:high, @nr33}, :a},
       {:ld, :a, :b},
       {:ldh, {:high, @nr34}, :a},
+      {:ret}
+    ]
+  end
+
+  # What the vibrato needs from a note: the frequency it was struck at, and a
+  # phase back at the start of the table -- so every note is struck in tune and
+  # walks into the wobble the same way.
+  defp remember(pitch, phase) do
+    [
+      {:ld, :a, :c},
+      {:ld, {:mem, pitch}, :a},
+      {:ld, :a, :b},
+      {:ld, {:mem, pitch + 1}, :a},
+      {:xor, :a, :a},
+      {:ld, {:mem, phase}, :a},
+      {:ret}
+    ]
+  end
+
+  # One pulse voice's wobble, a frame at a time. The frequency is rewritten with
+  # the trigger bit clear, which changes the pitch of the note already sounding
+  # rather than starting it again -- that distinction is the whole feature.
+  defp vibrato(label, pitch, phase, {lo_reg, hi_reg}) do
+    [
+      {:label, label},
+
+      # No table, no wobble.
+      {:ld, :a, {:mem, @wobble}},
+      {:ld, :b, :a},
+      {:ld, :a, {:mem, @wobble + 1}},
+      {:or, :a, :b},
+      {:ret, :z},
+
+      # Nothing struck: a rest cleared the high byte, trigger bit and all.
+      {:ld, :a, {:mem, pitch + 1}},
+      {:and, :a, 0x80},
+      {:ret, :z},
+
+      # One step round the sixteen.
+      {:ld, :a, {:mem, phase}},
+      {:inc, :a},
+      {:and, :a, 0x0F},
+      {:ld, {:mem, phase}, :a},
+
+      # HL = table + phase, and A the deviation it holds.
+      {:ld, :l, :a},
+      {:ld, :h, 0},
+      {:ld, :a, {:mem, @wobble}},
+      {:ld, :c, :a},
+      {:ld, :a, {:mem, @wobble + 1}},
+      {:ld, :b, :a},
+      {:add, :hl, :bc},
+      {:ld, :a, {:mem, :hl}},
+
+      # DE = that deviation, sign-extended: doubling sets carry from bit 7, and
+      # subtracting with borrow turns it into 0x00 or 0xFF.
+      {:ld, :e, :a},
+      {:add, :a, :a},
+      {:sbc, :a, :a},
+      {:ld, :d, :a},
+
+      # HL = the note's own frequency, without the trigger, plus the deviation.
+      {:ld, :a, {:mem, pitch}},
+      {:ld, :l, :a},
+      {:ld, :a, {:mem, pitch + 1}},
+      {:and, :a, 0x07},
+      {:ld, :h, :a},
+      {:add, :hl, :de},
+      {:ld, :a, :l},
+      {:ldh, {:high, lo_reg}, :a},
+      {:ld, :a, :h},
+      {:and, :a, 0x07},
+      {:ldh, {:high, hi_reg}, :a},
       {:ret}
     ]
   end
@@ -1076,6 +1201,8 @@ defmodule Potion.Runtime do
       {:call, {:label, :play_music}},
       {:call, {:label, :play_harmony}},
       {:call, {:label, :play_bass}},
+      {:call, {:label, :vibrato_lead}},
+      {:call, {:label, :vibrato_harmony}},
       calls,
       {:jr, {:label, :main_loop}}
     ]

@@ -544,7 +544,7 @@ defmodule Potion do
       music :theme, "c4 . e4 . g4 . c5 . . ."
       music :hurry, "c5 e5 c5 e5", beat: 4
       music :song, [lead: "c5 e5 g5", harmony: "e4 g4 c5", bass: "c2 . g1 ."],
-        beat: 10, duty: :eighth, gap: 3
+        beat: 10, duty: :eighth, gap: 3, vibrato: :gentle
 
   One line of text is the lead alone, on channel 1. `harmony:` is channel 2 and
   `bass:` the wave channel, which counts its period twice as slowly and so
@@ -554,6 +554,11 @@ defmodule Potion do
   long as it lasts and the harmony comes back at its next step. That is not a
   clash to be fixed but what a Game Boy sounds like: four channels, and a game
   with more than four things to say.
+
+  `vibrato:` is `:none`, `:gentle` or `:deep`: the kernel rewrites the pitch of
+  a sounding note every frame, with the trigger bit clear so it bends rather
+  than starting again. It reaches the two pulses and not the bass, since the
+  register holds a period and the same deviation is inaudible down there.
 
   `duty:` is which square the lead is — `:eighth`, `:quarter` or `:half`, the
   fraction of each period the wave is high, and the difference between one
@@ -597,7 +602,13 @@ defmodule Potion do
   # What `play` needs to know about a tune: which voices it carries and which
   # square its pulses are. The bytes stay with the kernel.
   defp described({name, voices}) do
-    {name, %{harmony?: voices.harmony != <<>>, bass?: voices.bass != <<>>, duty: voices.duty}}
+    {name,
+     %{
+       harmony?: voices.harmony != <<>>,
+       bass?: voices.bass != <<>>,
+       duty: voices.duty,
+       vibrato: voices.vibrato
+     }}
   end
 
   # ══ Reading the actor's tree ═════════════════════════════════════════════════

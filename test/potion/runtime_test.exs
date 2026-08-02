@@ -80,6 +80,8 @@ defmodule Potion.RuntimeTest do
                {:call, {:label, :play_music}},
                {:call, {:label, :play_harmony}},
                {:call, {:label, :play_bass}},
+               {:call, {:label, :vibrato_lead}},
+               {:call, {:label, :vibrato_harmony}},
                {:call, {:label, :actor_0}},
                {:call, {:label, :actor_1}}
              ]

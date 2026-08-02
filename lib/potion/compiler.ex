@@ -943,6 +943,7 @@ defmodule Potion.Compiler do
     voices = tune!(name, allocation, statement)
 
     {[{:ld, :a, voices.duty}, {:ld, {:mem, Runtime.duty_cell()}, :a}] ++
+       wobble(voices.vibrato) ++
        arm(Runtime.music_cells(), :"potion_tune_#{name}") ++
        start(voices.harmony?, Runtime.harmony_cells(), :"potion_harmony_#{name}", :pulse_two) ++
        start(voices.bass?, Runtime.bass_cells(), :"potion_bass_#{name}", :wave), counter}
@@ -1143,6 +1144,25 @@ defmodule Potion.Compiler do
       {:ld, {:mem, tune}, :a},
       {:ld, {:mem, tune + 1}, :a},
       {:ldh, {:high, register}, :a}
+    ]
+  end
+
+  # Which table the kernel walks, as an address -- or nothing at all, which is
+  # what a zero there means.
+  defp wobble(:none) do
+    cell = Runtime.wobble_cell()
+    [{:xor, :a, :a}, {:ld, {:mem, cell}, :a}, {:ld, {:mem, cell + 1}, :a}]
+  end
+
+  defp wobble(kind) do
+    cell = Runtime.wobble_cell()
+
+    [
+      {:ld, :hl, {:label, :"wobble_#{kind}"}},
+      {:ld, :a, :l},
+      {:ld, {:mem, cell}, :a},
+      {:ld, :a, :h},
+      {:ld, {:mem, cell + 1}, :a}
     ]
   end
 

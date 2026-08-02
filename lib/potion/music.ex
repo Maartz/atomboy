@@ -142,6 +142,7 @@ defmodule Potion.Music do
     {beat, voices} = Keyword.pop(voices ++ opts, :beat, @default_beat)
     {gap, voices} = Keyword.pop(voices, :gap, 0)
     {duty, voices} = Keyword.pop(voices, :duty, :half)
+    {wobble, voices} = Keyword.pop(voices, :vibrato, :none)
 
     beat!(beat, name)
     gap!(gap, beat, name)
@@ -164,7 +165,8 @@ defmodule Potion.Music do
       lead: voice!(Keyword.get(voices, :lead), name, @notes, beat, gap),
       harmony: voice!(Keyword.get(voices, :harmony), name, @notes, beat, gap),
       bass: voice!(Keyword.get(voices, :bass), name, @wave_notes, beat, gap),
-      duty: duty!(duty, name)
+      duty: duty!(duty, name),
+      vibrato: vibrato!(wobble, name)
     }
   end
 
@@ -183,6 +185,21 @@ defmodule Potion.Music do
         a square.
         """
     end
+  end
+
+  # A wobble is named and not measured, and the reason is in `Potion.Runtime`:
+  # the register holds a period, so the same deviation is a different interval at
+  # every note. A number would mean something else on each one.
+  defp vibrato!(wobble, _name) when wobble in [:none, :gentle, :deep], do: wobble
+
+  defp vibrato!(wobble, name) do
+    raise Potion.CompileError, """
+    the tune #{inspect(name)} asks for a vibrato of #{inspect(wobble)}.
+
+    There are three: `:none`, `:gentle` and `:deep`. It reaches the two pulse \
+    voices and not the bass — down there the same deviation is inaudible, and one \
+    deep enough to hear would be a siren on the lead.
+    """
   end
 
   defp gap!(gap, beat, name) do

@@ -837,6 +837,85 @@ defmodule Potion.DSLTest do
     end
   end
 
+  describe "a wobble" do
+    # The point of the whole thing, and the only part that could have been got
+    # wrong quietly: the frequency is rewritten with the trigger bit clear, so
+    # the note already sounding changes pitch instead of starting again. A
+    # retrigger would sound like a stutter and look like a vibrato in a graph.
+    test "the pitch moves and the note is never struck again" do
+      {pitches, retriggers, loud} = wobbled(:gentle)
+
+      assert length(pitches) > 1, "the pitch never moved"
+      assert Enum.max(pitches) - Enum.min(pitches) == 4
+      assert retriggers == 0, "the note was struck again mid-wobble"
+      assert loud > 0, "the note stopped sounding"
+    end
+
+    test "no wobble means no movement at all" do
+      {pitches, _retriggers, _loud} = wobbled(:none)
+
+      assert pitches == [Potion.Music.notes()[:a4]]
+    end
+
+    test "the deep one is deeper" do
+      {gentle, _, _} = wobbled(:gentle)
+      {deep, _, _} = wobbled(:deep)
+
+      assert Enum.max(deep) - Enum.min(deep) > Enum.max(gentle) - Enum.min(gentle)
+    end
+
+    test "a wobble nobody has heard of is refused, with the three" do
+      assert_raise Potion.CompileError, ~r/vibrato of :wild.*:none.*:gentle.*:deep/s, fn ->
+        Potion.Music.compile!("c4", :t, vibrato: :wild)
+      end
+    end
+  end
+
+  # One long note, and what happens to it: every pitch the register held, how
+  # often the trigger bit came back, and whether anything was still heard.
+  defp wobbled(kind) do
+    [{module, _} | _] =
+      Code.compile_string("""
+      defmodule Wobbling.#{kind |> Atom.to_string() |> String.capitalize()} do
+        use Potion
+
+        music :song, "a4 . . . . . . .", beat: 6, vibrato: :#{kind}
+
+        defactor :voice do
+          variables t: 0
+
+          every_frame do
+            t = t + 1
+            if t == 3, do: play(:song)
+          end
+        end
+      end
+      """)
+
+    rom = module.rom()
+
+    {_state, _ram, _apu, log} =
+      Enum.reduce(1..30, {Screen.boot_state(rom), Screen.boot_ram(rom), %Atomboy.APU{}, []}, fn
+        _n, {state, ram, apu, acc} ->
+          {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+          {samples, ram, apu} = Atomboy.APU.frame(ram, apu)
+
+          x = Map.get(ram, 0xFF13, 0) + Bitwise.band(Map.get(ram, 0xFF14, 0), 0x07) * 256
+          struck = Bitwise.band(Map.get(ram, 0xFF14, 0), 0x80)
+          peak = for(<<v::little-signed-16 <- samples>>, do: abs(v)) |> Enum.max(fn -> 0 end)
+
+          {state, ram, apu, [{x, struck, peak} | acc]}
+      end)
+
+    # The first frames are the init and the note being struck; the wobble is
+    # what happens after.
+    log = log |> Enum.reverse() |> Enum.drop(6)
+
+    {log |> Enum.map(&elem(&1, 0)) |> Enum.reject(&(&1 == 0)) |> Enum.uniq() |> Enum.sort(),
+     Enum.count(log, fn {_x, struck, _peak} -> struck != 0 end),
+     log |> Enum.map(&elem(&1, 2)) |> Enum.max()}
+  end
+
   describe "three voices" do
     # Each channel's frequency register is read back on its own, because the
     # mixed samples cannot say which channel a sound came from — and "both are
@@ -1819,6 +1898,8 @@ defmodule Potion.DSLTest do
                {:call, {:label, :play_music}},
                {:call, {:label, :play_harmony}},
                {:call, {:label, :play_bass}},
+               {:call, {:label, :vibrato_lead}},
+               {:call, {:label, :vibrato_harmony}},
                {:call, {:label, :actor_0}},
                {:call, {:label, :actor_1}}
              ]
