@@ -37,6 +37,24 @@ defmodule Walk do
            [@top])
         |> Enum.join("\n")
 
+  # The Ballad of the Wind Fish -- the real one this time, from a note-for-note
+  # transcription of the game's arrangement rather than from memory. The lead is
+  # the sung melody: b-c#-d held, twice, then the falling answer. The harmony is
+  # the Dmaj7 arpeggio (d-f#-c#-a) that is the piece's whole identity, turning
+  # to Em7 under the answer. The bass holds the roots.
+  music :ballad,
+        [
+          lead:
+            "b4 cs5 d5 . . . . . | b4 cs5 d5 . . . . . | cs5 b4 fs4 a4 . d5 b4 e5 | . b4 . a4 . d5 . .",
+          harmony:
+            "d3 fs3 cs4 a3 d3 fs3 cs4 a3 | d3 fs3 cs4 a3 d3 fs3 cs4 a3 | d4 b3 e3 g3 d4 b3 e3 g3 | d4 b3 e3 g3 d4 b3 e3 g3",
+          bass: "d2 . . . . . . . | . . . . . . . . | e2 . . . . . . . | . . . . . . . ."
+        ],
+        beat: 12,
+        duty: :eighth,
+        gap: 2,
+        vibrato: :gentle
+
   room :meadow, @meadow, tiles: %{?# => 0}
   room :cave, @cave, tiles: %{?# => 0}
 
@@ -50,6 +68,7 @@ defmodule Walk do
       if arrived == 0 do
         arrived = 1
         show(:meadow)
+        play(:ballad)
       end
 
       # The position before the step, kept so the step can be unmade. Cheaper

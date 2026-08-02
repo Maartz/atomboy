@@ -43,43 +43,22 @@ defmodule Pong do
   # between notes that run into one another and notes with a rhythm: without it
   # the channel is simply retriggered at each step and never stops, which is
   # what a sequencer sounds like and not what an instrument does.
-  # The bar lines are ink for the reader -- the parser walks past them -- and
-  # they are why the three voices can be checked against each other by eye.
-  # `envelope: :pluck` lets each note die away on its own, the way a struck
-  # string does, instead of holding like an organ until the next one.
-  music :attract,
+  # The Ballad of the Wind Fish -- the real one this time, from a note-for-note
+  # transcription of the game's arrangement rather than from memory. The lead is
+  # the sung melody: b-c#-d held, twice, then the falling answer. The harmony is
+  # the Dmaj7 arpeggio (d-f#-c#-a) that is the piece's whole identity, turning
+  # to Em7 under the answer. The bass holds the roots.
+  music :ballad,
         [
-          lead: "c4 e4 g4 c5 | . . g4 e4 | c4 . . . | - -",
-          harmony: "e3 g3 c4 e4 | . . c4 g3 | e3 . . . | - -",
-          bass: "c2 . . . | g1 . . . | c2 . . . | - ."
-        ],
-        beat: 10,
-        duty: :eighth,
-        gap: 3,
-        vibrato: :gentle,
-        envelope: :pluck
-
-  # Kazumi Totaka's "Ballad of the Wind Fish" (Zelda: Link's Awakening)
-  # Adjusted for Potion's note naming (sharps via 's', '-' for rests) 
-  # and safe Game Boy frequency constraints (all bass notes >= c2).
-  music :wind_fish,
-        [
-          # Channel 1: Main Melody
           lead:
-            "e4 . g4 . as4 . . . d5 . . . as4 . . . a4 . f4 . e4 . f4 . g4 . . . . . . . e4 . g4 . as4 . . . d5 . e5 . f5 . . . e5 . . . d5 . . . . . . . - -",
-
-          # Channel 2: Parallel Harmony
+            "b4 cs5 d5 . . . . . | b4 cs5 d5 . . . . . | cs5 b4 fs4 a4 . d5 b4 e5 | . b4 . a4 . d5 . .",
           harmony:
-            "d4 . f4 . g4 . . . as4 . . . g4 . . . f4 . d4 . c4 . d4 . e4 . . . . . . . d4 . f4 . g4 . . . as4 . c5 . d5 . . . c5 . . . as4 . . . . . . . - -",
-
-          # Channel 3: Wave Bass (Shifted up to octave 2 to stay above the 64Hz threshold)
-          # Sequence: d2 -> as2 -> f2 -> c2
-          bass:
-            "d2 . . . . . . . as2 . . . . . . . f2 . . . . . . . c2 . . . . . . . d2 . . . . . . . as2 . . . . . . . f2 . . . . . . . c2 . . . . . . . - -"
+            "d3 fs3 cs4 a3 d3 fs3 cs4 a3 | d3 fs3 cs4 a3 d3 fs3 cs4 a3 | d4 b3 e3 g3 d4 b3 e3 g3 | d4 b3 e3 g3 d4 b3 e3 g3",
+          bass: "d2 . . . . . . . | . . . . . . . . | e2 . . . . . . . | . . . . . . . ."
         ],
-        beat: 14,
+        beat: 12,
         duty: :eighth,
-        gap: 3,
+        gap: 2,
         vibrato: :gentle
 
   # ── The director ───────────────────────────────────────────────────────────
@@ -110,7 +89,7 @@ defmodule Pong do
         text(4, 2, " ")
         text(15, 2, " ")
 
-        play(:attract)
+        play(:ballad)
 
         sprite(0, x: 0, y: 160, tile: :paddle)
         sprite(1, x: 0, y: 160, tile: :paddle)
