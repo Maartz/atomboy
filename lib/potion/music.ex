@@ -70,6 +70,17 @@ defmodule Potion.Music do
 
   @voices [:lead, :bass]
 
+  # The pulse's duty is what fraction of each period the wave is high, and it is
+  # the difference between one square-wave instrument and another. Named by the
+  # fraction rather than by a mood, because that is what the register holds.
+  #
+  #     :eighth   12.5%  thin and nasal — the classic Game Boy lead
+  #     :quarter  25%    fuller, still bright
+  #     :half     50%    the plainest square there is
+  #
+  # 75% exists and is not here: it is 25% turned inside out and sounds the same.
+  @duties %{eighth: 0x00, quarter: 0x40, half: 0x80}
+
   @default_beat 12
 
   @doc """
@@ -120,7 +131,11 @@ defmodule Potion.Music do
 
   def compile!(voices, name, opts) when is_list(voices) do
     {beat, voices} = Keyword.pop(voices ++ opts, :beat, @default_beat)
+    {gap, voices} = Keyword.pop(voices, :gap, 0)
+    {duty, voices} = Keyword.pop(voices, :duty, :half)
+
     beat!(beat, name)
+    gap!(gap, beat, name)
 
     case Keyword.keys(voices) -- @voices do
       [] ->
@@ -137,9 +152,40 @@ defmodule Potion.Music do
     end
 
     %{
-      lead: voice!(Keyword.get(voices, :lead), name, @notes, beat),
-      bass: voice!(Keyword.get(voices, :bass), name, @wave_notes, beat)
+      lead: voice!(Keyword.get(voices, :lead), name, @notes, beat, gap),
+      bass: voice!(Keyword.get(voices, :bass), name, @wave_notes, beat, gap),
+      duty: duty!(duty, name)
     }
+  end
+
+  defp duty!(duty, name) do
+    case Map.fetch(@duties, duty) do
+      {:ok, bits} ->
+        bits
+
+      :error ->
+        raise Potion.CompileError, """
+        the tune #{inspect(name)} asks for a duty of #{inspect(duty)}.
+
+        There are three: #{@duties |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)} \
+        — the fraction of each period the square wave is high, and so which \
+        instrument the lead sounds like. It does not reach the bass, which is not \
+        a square.
+        """
+    end
+  end
+
+  defp gap!(gap, beat, name) do
+    unless is_integer(gap) and gap >= 0 and gap < beat do
+      raise Potion.CompileError, """
+      the tune #{inspect(name)} asks for a gap of #{inspect(gap)} against a beat of #{beat}.
+
+      A gap is how many frames of silence end every note, and it has to leave \
+      something of the shortest one — so it runs from 0 to #{beat - 1}. Two or \
+      three is the difference between notes that run into each other and notes \
+      that have a rhythm.
+      """
+    end
   end
 
   defp beat!(beat, name) do
@@ -153,15 +199,27 @@ defmodule Potion.Music do
     end
   end
 
-  defp voice!(nil, _name, _notes, _beat), do: <<>>
+  defp voice!(nil, _name, _notes, _beat, _gap), do: <<>>
 
-  defp voice!(notation, name, notes, beat) do
+  defp voice!(notation, name, notes, beat, gap) do
     notation
     |> String.split()
     |> steps!(name, beat, notes)
+    |> Enum.flat_map(&articulate(&1, gap))
     |> Enum.map_join(fn {x, frames} -> step(x, frames) end)
     |> Kernel.<>(<<0x00, 0x00, 0x00>>)
   end
+
+  # The gap is cut here rather than played: a note of ten frames with a gap of
+  # two becomes a note of eight and a rest of two, and the kernel plays what it
+  # always played. Nothing new runs, and a tune costs twice the bytes it did.
+  #
+  # It goes on the *note* and not on the beat, so a held note gives up the same
+  # two frames a short one does -- which is what an instrument does, and what
+  # makes a long note read as long rather than as four short ones.
+  defp articulate(step, 0), do: [step]
+  defp articulate({:rest, _frames} = step, _gap), do: [step]
+  defp articulate({x, frames}, gap), do: [{x, frames - gap}, {:rest, gap}]
 
   # Tokens into runs. A hold lengthens the step before it rather than making a
   # new one, and a hold with nothing before it is a mistake worth naming: it

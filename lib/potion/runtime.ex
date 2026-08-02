@@ -140,6 +140,9 @@ defmodule Potion.Runtime do
   @bass_base 0xC0AA
   @bass_wait 0xC0AC
 
+  # Which square the lead is: `play` writes it, the player reads it on every note.
+  @tune_duty 0xC0AD
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -649,6 +652,10 @@ defmodule Potion.Runtime do
   @spec bass_cells() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
   def bass_cells, do: {@bass, @bass_base, @bass_wait}
 
+  @doc "The cell holding the lead's duty, which `play` sets from the tune."
+  @spec duty_cell() :: non_neg_integer()
+  def duty_cell, do: @tune_duty
+
   @doc "The wave channel's registers: DAC, volume, frequency, trigger."
   @spec wave() :: {byte(), byte(), byte(), byte()}
   def wave, do: {@nr30, @nr32, @nr33, @nr34}
@@ -765,7 +772,9 @@ defmodule Potion.Runtime do
     [
       {:xor, :a, :a},
       {:ldh, {:high, @nr10}, :a},
-      {:ld, :a, 0x80},
+      # The duty the tune asked for, rather than a fixed square. It is read every
+      # note because a game may start another tune between two of them.
+      {:ld, :a, {:mem, @tune_duty}},
       {:ldh, {:high, @nr11}, :a},
       {:ld, :a, 0xF0},
       {:ldh, {:high, @nr12}, :a},

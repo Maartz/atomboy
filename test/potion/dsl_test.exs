@@ -804,7 +804,7 @@ defmodule Potion.DSLTest do
     @moduledoc false
     use Potion
 
-    music(:song, [lead: "c5 e5 g5 c6", bass: "c2 . g1 ."], beat: 6)
+    music :song, [lead: "c5 e5 g5 c6", bass: "c2 . g1 ."], beat: 6, duty: :eighth
 
     defactor :voice do
       variables t: 0
@@ -839,6 +839,21 @@ defmodule Potion.DSLTest do
     # The wave channel counts its period twice as slowly, so the same note is a
     # different number there. Reading the bass against the lead's table would put
     # it an octave out, and both would still look like notes.
+    # The duty travels in a kernel cell that `play` writes, because the player
+    # rewrites NR11 on every note and would otherwise put a plain square there.
+    test "the tune's duty reaches the channel" do
+      rom = Duet.rom()
+
+      {_state, _ram, nr11} =
+        Enum.reduce(1..12, {Screen.boot_state(rom), Screen.boot_ram(rom), nil}, fn
+          _n, {state, ram, seen} ->
+            {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+            {state, ram, seen || Map.get(ram, 0xFF11)}
+        end)
+
+      assert Bitwise.bsr(nr11, 6) == 0, "the lead is a plain square, not the eighth it asked for"
+    end
+
     test "the bass is not the lead's numbers" do
       assert Potion.Music.wave_notes()[:c2] != Potion.Music.notes()[:c2]
     end

@@ -98,6 +98,54 @@ defmodule Potion.MusicTest do
     end
   end
 
+  describe "the shape of a note" do
+    # The gap is cut at compile time: a note becomes a shorter note and a rest,
+    # so the kernel plays what it always played and nothing new runs.
+    test "a gap turns one note into a note and a silence" do
+      assert steps(lead!("c4", :t, beat: 10)) == 1
+      assert steps(lead!("c4", :t, beat: 10, gap: 3)) == 2
+
+      <<_lo, _hi, sounding, 0x00, 0x00, silent, _::binary>> = lead!("c4", :t, beat: 10, gap: 3)
+
+      assert sounding == 7
+      assert silent == 3
+    end
+
+    # A rest is already silence; giving it a gap would only make it two.
+    test "a rest is left alone" do
+      assert steps(lead!("-", :t, beat: 10, gap: 3)) == 1
+    end
+
+    # The gap goes on the note, not on the beat. A note held four beats gives up
+    # the same three frames a short one does -- which is what an instrument does,
+    # and what makes a long note read as long rather than as four short ones.
+    test "a held note gives up the same three frames a short one does" do
+      <<_lo, _hi, sounding, 0x00, 0x00, silent, _::binary>> =
+        lead!("c4 . . .", :t, beat: 10, gap: 3)
+
+      assert sounding == 37
+      assert silent == 3
+    end
+
+    test "a gap that would leave nothing of the shortest note is refused" do
+      assert_raise Potion.CompileError, ~r/gap of 10 against a beat of 10.*0 to 9/s, fn ->
+        Music.compile!("c4", :t, beat: 10, gap: 10)
+      end
+    end
+
+    test "the duty is the fraction the square is high, and reaches the register" do
+      assert Music.compile!("c4", :t, duty: :eighth).duty == 0x00
+      assert Music.compile!("c4", :t, duty: :quarter).duty == 0x40
+      assert Music.compile!("c4", :t).duty == 0x80
+    end
+
+    test "a duty nobody has heard of is refused, with the three" do
+      assert_raise Potion.CompileError, ~r/duty of :fat.*:eighth, :half, :quarter/s, fn ->
+        Music.compile!("c4", :t, duty: :fat)
+      end
+    end
+  end
+
   describe "what it refuses" do
     test "a token that is not a note" do
       assert_raise Potion.CompileError, ~r/names "h4", which is not a note/, fn ->

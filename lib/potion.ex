@@ -292,7 +292,10 @@ defmodule Potion do
         count: count,
         states: state_names(behaviour),
         routines: Enum.map(routines, fn {name, _} -> name end),
-        tunes: Enum.map(tunes(module), fn {name, voices} -> {name, voices.bass != <<>>} end)
+        tunes:
+          Enum.map(tunes(module), fn {name, voices} ->
+            {name, {voices.bass != <<>>, voices.duty}}
+          end)
       )
 
     shared_names!(module, allocation, name)
@@ -417,7 +420,10 @@ defmodule Potion do
               | cells: cells,
                 arrays: arrays,
                 tiles: art.names,
-                tunes: Map.new(songs, fn {name, voices} -> {name, voices.bass != <<>>} end)
+                tunes:
+                  Map.new(songs, fn {name, voices} ->
+                    {name, {voices.bass != <<>>, voices.duty}}
+                  end)
             }
 
             fragment =
@@ -543,11 +549,17 @@ defmodule Potion do
 
       music :theme, "c4 . e4 . g4 . c5 . . ."
       music :hurry, "c5 e5 c5 e5", beat: 4
-      music :song, lead: "c5 e5 g5", bass: "c2 . g1 ."
+      music :song, [lead: "c5 e5 g5", bass: "c2 . g1 ."],
+        beat: 10, duty: :eighth, gap: 3
 
   One line of text is the lead alone, on channel 1. `bass:` puts a second voice
   on the wave channel, which counts its period twice as slowly and so reaches an
   octave lower — `c1` is a note there and not on the lead.
+
+  `duty:` is which square the lead is — `:eighth`, `:quarter` or `:half`, the
+  fraction of each period the wave is high, and the difference between one
+  instrument and another. `gap:` ends every note that many frames early, which
+  is what turns notes running into one another into notes with a rhythm.
 
   Compiled here, into the bytes the cartridge carries — `Potion.Music` sets out
   the notation and the format. The kernel reads a step a frame, so a game starts

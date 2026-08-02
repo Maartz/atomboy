@@ -204,7 +204,10 @@ sees those same names as ordinary arrays, which is how one gets spawned.
 frequency-with-trigger, frames — laid into the cartridge, and the kernel reads
 one step a frame between the pad and the actors. A game says `play(:theme)`
 once and never feeds it. A hold is a longer step rather than a repeated one,
-because retriggering a note restarts it and the ear hears that as a stutter. The
+because retriggering a note restarts it and the ear hears that as a stutter. `gap:` is cut here rather than played: a note of ten frames with a gap of three
+becomes a note of seven and a rest of three, so the kernel plays what it always
+played and a tune costs twice the bytes. `duty:` travels in a kernel cell that
+`play` writes, because the player rewrites the duty register on every note. The
 bass is compiled against its own table: the wave channel counts its period twice
 as slowly, so the same note is a different number there — and it reaches an
 octave lower, which is why a bass may say `c1` and a lead may not.

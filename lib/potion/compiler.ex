@@ -940,9 +940,11 @@ defmodule Potion.Compiler do
   # loop -- the player, reaching a step of length zero, goes back to where the
   # base says it started.
   defp statement({:play, _, [name]} = statement, allocation, counter) when is_atom(name) do
-    {label, bass?} = tune!(name, allocation, statement)
+    {label, bass?, duty} = tune!(name, allocation, statement)
 
-    lead = arm(Runtime.music_cells(), label)
+    lead =
+      [{:ld, :a, duty}, {:ld, {:mem, Runtime.duty_cell()}, :a}] ++
+        arm(Runtime.music_cells(), label)
 
     bass =
       if bass? do
@@ -1156,7 +1158,8 @@ defmodule Potion.Compiler do
     tunes = Map.get(allocation, :tunes, %{})
 
     if Map.has_key?(tunes, name) do
-      {:"potion_tune_#{name}", Map.fetch!(tunes, name)}
+      {bass?, duty} = Map.fetch!(tunes, name)
+      {:"potion_tune_#{name}", bass?, duty}
     else
       known = tunes |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
 

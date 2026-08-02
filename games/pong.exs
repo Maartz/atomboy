@@ -23,20 +23,24 @@ defmodule Pong do
   # The title's tune, on channel 1 — `beep` has channel 2, so a paddle can be
   # struck over a bar without either cutting the other. It loops on its own: the
   # player reads a length of zero and goes back to the start.
-  # The opening of the Ballad of the Wind Fish, as far as two voices reach: the
-  # lead climbing e4-g4-a4-c5, the bass walking a3-f3-d3-e3 underneath. The
-  # harmony and the percussion the original carries would want channels 2 and 4,
-  # which `beep` and `noise` have.
+  # An arpeggio, which is what it is and claims nothing more.
   #
-  # The two are the same number of beats on purpose. Each loops on its own
-  # terminator, so a lead of eighteen against a bass of sixteen would slip a
-  # beat every time round and be a different tune by the fourth pass.
+  # `duty: :eighth` is the twelve-and-a-half percent square — thin and nasal,
+  # the sound a Game Boy lead usually has. At fifty percent it is a plain square
+  # and sounds like a test tone.
+  #
+  # `gap: 3` ends every note three frames early. That is the whole difference
+  # between notes that run into one another and notes with a rhythm: without it
+  # the channel is simply retriggered at each step and never stops, which is
+  # what a sequencer sounds like and not what an instrument does.
   music :attract,
         [
-          lead: "e4 . g4 . a4 . c5 . . . a4 . g4 . e4 . . . - -",
-          bass: "a3 . . . f3 . . . d3 . . . e3 . . . a3 . - -"
+          lead: "c4 e4 g4 c5 . . g4 e4 c4 . . . - -",
+          bass: "c2 . . . g1 . . . c2 . . . - ."
         ],
-        beat: 10
+        beat: 10,
+        duty: :eighth,
+        gap: 3
 
   # ── The director ───────────────────────────────────────────────────────────
   #
