@@ -292,7 +292,7 @@ defmodule Potion do
         count: count,
         states: state_names(behaviour),
         routines: Enum.map(routines, fn {name, _} -> name end),
-        tunes: Enum.map(tunes(module), fn {name, _} -> name end)
+        tunes: Enum.map(tunes(module), fn {name, voices} -> {name, voices.bass != <<>>} end)
       )
 
     shared_names!(module, allocation, name)
@@ -417,7 +417,7 @@ defmodule Potion do
               | cells: cells,
                 arrays: arrays,
                 tiles: art.names,
-                tunes: MapSet.new(songs, fn {name, _bytes} -> name end)
+                tunes: Map.new(songs, fn {name, voices} -> {name, voices.bass != <<>>} end)
             }
 
             fragment =
@@ -543,6 +543,11 @@ defmodule Potion do
 
       music :theme, "c4 . e4 . g4 . c5 . . ."
       music :hurry, "c5 e5 c5 e5", beat: 4
+      music :song, lead: "c5 e5 g5", bass: "c2 . g1 ."
+
+  One line of text is the lead alone, on channel 1. `bass:` puts a second voice
+  on the wave channel, which counts its period twice as slowly and so reaches an
+  octave lower — `c1` is a note there and not on the lead.
 
   Compiled here, into the bytes the cartridge carries — `Potion.Music` sets out
   the notation and the format. The kernel reads a step a frame, so a game starts
@@ -552,11 +557,13 @@ defmodule Potion do
     module = __CALLER__.module
     name = literal_name!(name, module)
 
-    unless is_binary(notation) do
+    unless is_binary(notation) or Keyword.keyword?(notation) do
       raise CompileError, """
-      the tune #{inspect(name)} is written as a line of text: #{Macro.to_string(notation)}
+      the tune #{inspect(name)} is written as a line of text, or as its voices: \
+      #{Macro.to_string(notation)}
 
           music :theme, "c4 . e4 . g4 ."
+          music :theme, lead: "c4 . e4 .", bass: "c2 . . ."
       """
     end
 

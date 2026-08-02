@@ -3,6 +3,7 @@ defmodule Potion.Music do
   A tune, written as a line of text and laid into the cartridge as bytes.
 
       music :theme, "c4 . e4 . g4 . c5 . . . - -"
+      music :theme, lead: "c4 . e4 . g4 .", bass: "c2 . . . g1 . . ."
 
   Three kinds of token and nothing else:
 
@@ -50,8 +51,24 @@ defmodule Potion.Music do
             hertz = @concert * :math.pow(2, (midi - 69) / 12)
             {:"#{name}#{octave}", 2048 - round(131_072 / hertz)}
           end)
-        |> Enum.reject(fn {_name, x} -> x < 0 end)
-        |> Map.new()
+         |> Enum.reject(fn {_name, x} -> x < 0 end)
+         |> Map.new()
+
+  # Channel 3 counts its period differently: it steps a 32-sample table where a
+  # pulse toggles a duty, so its frequency is 65536/(2048 - x) against the
+  # pulse's 131072. Half the number for the same note -- and an octave further
+  # down at the bottom, which is why the bass may say `c1` and the lead may not.
+  @wave_notes (for octave <- 1..7,
+                   {name, index} <- Enum.with_index(@semitones),
+                   into: %{} do
+                 midi = (octave + 1) * 12 + index
+                 hertz = @concert * :math.pow(2, (midi - 69) / 12)
+                 {:"#{name}#{octave}", 2048 - round(65_536 / hertz)}
+               end)
+              |> Enum.reject(fn {_name, x} -> x < 0 end)
+              |> Map.new()
+
+  @voices [:lead, :bass]
 
   @default_beat 12
 
@@ -67,6 +84,18 @@ defmodule Potion.Music do
   @spec notes() :: %{atom() => 0..2047}
   def notes, do: @notes
 
+  @doc """
+  The same, for the wave channel the bass plays on.
+
+      iex> Potion.Music.wave_notes()[:a4]
+      1899
+
+  Half the pulse's number for the same note, because the channel counts twice as
+  slowly per step — and it reaches `c1`, which the pulse cannot.
+  """
+  @spec wave_notes() :: %{atom() => 0..2047}
+  def wave_notes, do: @wave_notes
+
   @doc "How many frames a beat lasts when a tune does not say."
   @spec default_beat() :: pos_integer()
   def default_beat, do: @default_beat
@@ -74,7 +103,7 @@ defmodule Potion.Music do
   @doc """
   A line of notation into the bytes a cartridge carries.
 
-      iex> Potion.Music.compile!("c4 -", :theme, beat: 4)
+      iex> Potion.Music.compile!("c4 -", :theme, beat: 4).lead
       <<0x0B, 0x86, 4, 0x00, 0x00, 4, 0x00, 0x00, 0x00>>
 
   0x0B and the low three bits of 0x86 make 1547, which is `2048 - 131072/261.6`
@@ -83,10 +112,37 @@ defmodule Potion.Music do
   The last three bytes are the terminator: the player reads a length of zero and
   goes back to the beginning.
   """
-  @spec compile!(String.t(), atom(), keyword()) :: binary()
-  def compile!(notation, name, opts \\ []) do
-    beat = Keyword.get(opts, :beat, @default_beat)
+  @spec compile!(String.t() | keyword(), atom(), keyword()) :: %{lead: binary(), bass: binary()}
+  def compile!(notation, name, opts \\ [])
 
+  def compile!(notation, name, opts) when is_binary(notation),
+    do: compile!([lead: notation], name, opts)
+
+  def compile!(voices, name, opts) when is_list(voices) do
+    {beat, voices} = Keyword.pop(voices ++ opts, :beat, @default_beat)
+    beat!(beat, name)
+
+    case Keyword.keys(voices) -- @voices do
+      [] ->
+        :ok
+
+      unknown ->
+        raise Potion.CompileError, """
+        the tune #{inspect(name)} has a voice called #{unknown |> hd() |> inspect()}.
+
+        There are two: `lead:` on channel 1 and `bass:` on the wave channel, \
+        which reaches an octave lower. A tune written as one line of text is the \
+        lead alone.
+        """
+    end
+
+    %{
+      lead: voice!(Keyword.get(voices, :lead), name, @notes, beat),
+      bass: voice!(Keyword.get(voices, :bass), name, @wave_notes, beat)
+    }
+  end
+
+  defp beat!(beat, name) do
     unless is_integer(beat) and beat in 1..255 do
       raise Potion.CompileError, """
       the tune #{inspect(name)} asks for a beat of #{inspect(beat)}.
@@ -95,10 +151,14 @@ defmodule Potion.Music do
       runs from 1 to 255 — a fifth of a second is 12, and a whole second is 60.
       """
     end
+  end
 
+  defp voice!(nil, _name, _notes, _beat), do: <<>>
+
+  defp voice!(notation, name, notes, beat) do
     notation
     |> String.split()
-    |> steps!(name, beat)
+    |> steps!(name, beat, notes)
     |> Enum.map_join(fn {x, frames} -> step(x, frames) end)
     |> Kernel.<>(<<0x00, 0x00, 0x00>>)
   end
@@ -106,7 +166,7 @@ defmodule Potion.Music do
   # Tokens into runs. A hold lengthens the step before it rather than making a
   # new one, and a hold with nothing before it is a mistake worth naming: it
   # reads as a rest and is not one.
-  defp steps!(tokens, name, beat) do
+  defp steps!(tokens, name, beat, notes) do
     tokens
     |> Enum.reduce([], fn token, steps ->
       case {token, steps} do
@@ -124,15 +184,15 @@ defmodule Potion.Music do
           [{:rest, beat} | steps]
 
         {note, steps} ->
-          [{note!(note, name), beat} | steps]
+          [{note!(note, name, notes), beat} | steps]
       end
     end)
     |> Enum.reverse()
     |> Enum.map(&fits!(&1, name))
   end
 
-  defp note!(token, name) do
-    case Map.fetch(@notes, String.to_atom(token)) do
+  defp note!(token, name, notes) do
+    case Map.fetch(notes, String.to_atom(token)) do
       {:ok, x} ->
         x
 

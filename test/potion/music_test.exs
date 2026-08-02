@@ -10,13 +10,17 @@ defmodule Potion.MusicTest do
   # what holds do: they lengthen a step instead of making one.
   defp steps(bytes), do: div(byte_size(bytes), 3) - 1
 
+  # A tune has two voices now and every assertion below is about one of them, so
+  # the lead is taken here rather than at each call.
+  defp lead!(notation, name, opts \\ []), do: Music.compile!(notation, name, opts).lead
+
   describe "the notation" do
     test "one token is one step" do
-      assert steps(Music.compile!("c4 e4 g4", :t)) == 3
+      assert steps(lead!("c4 e4 g4", :t)) == 3
     end
 
     test "a hold lengthens the step before it rather than repeating it" do
-      held = Music.compile!("c4 . . .", :t, beat: 5)
+      held = lead!("c4 . . .", :t, beat: 5)
 
       assert steps(held) == 1
       assert <<_lo, _hi, frames, _::binary>> = held
@@ -27,33 +31,70 @@ defmodule Potion.MusicTest do
     # than a held note. So this is not a nicety of the notation: four steps of
     # `c4` and one step of four beats are different sounds.
     test "a repeated note is not the same as a held one" do
-      assert steps(Music.compile!("c4 c4 c4 c4", :t)) == 4
-      assert steps(Music.compile!("c4 . . .", :t)) == 1
+      assert steps(lead!("c4 c4 c4 c4", :t)) == 4
+      assert steps(lead!("c4 . . .", :t)) == 1
     end
 
     test "a rest carries no trigger, which is what makes it silence" do
-      <<_lo, hi, _frames, _::binary>> = Music.compile!("-", :t)
+      <<_lo, hi, _frames, _::binary>> = lead!("-", :t)
       assert hi == 0x00
     end
 
     test "a note carries the trigger bit and the console's own number" do
-      <<lo, hi, _frames, _::binary>> = Music.compile!("a4", :t)
+      <<lo, hi, _frames, _::binary>> = lead!("a4", :t)
 
       assert lo + (hi - 0x80) * 256 == Music.notes()[:a4]
       assert Bitwise.band(hi, 0x80) == 0x80
     end
 
     test "it ends with a length of zero, which is what sends the tune round again" do
-      bytes = Music.compile!("c4", :t)
+      bytes = lead!("c4", :t)
       assert binary_part(bytes, byte_size(bytes) - 3, 3) == <<0x00, 0x00, 0x00>>
     end
 
     test "the beat is a count of frames, and the default is stated once" do
-      <<_lo, _hi, frames, _::binary>> = Music.compile!("c4", :t)
+      <<_lo, _hi, frames, _::binary>> = lead!("c4", :t)
       assert frames == Music.default_beat()
 
-      <<_lo, _hi, quick, _::binary>> = Music.compile!("c4", :t, beat: 3)
+      <<_lo, _hi, quick, _::binary>> = lead!("c4", :t, beat: 3)
       assert quick == 3
+    end
+  end
+
+  describe "the second voice" do
+    # The wave channel counts its period twice as slowly, so the same note is a
+    # different number there. A bass compiled against the lead's table would be
+    # an octave out and nothing would say so.
+    test "the bass is written against the wave channel's own numbers" do
+      %{lead: lead, bass: bass} = Music.compile!([lead: "a4", bass: "a4"], :t)
+
+      <<lo, hi, _f, _::binary>> = lead
+      <<blo, bhi, _bf, _::binary>> = bass
+
+      assert lo + (hi - 0x80) * 256 == Music.notes()[:a4]
+      assert blo + (bhi - 0x80) * 256 == Music.wave_notes()[:a4]
+      refute lead == bass
+    end
+
+    # And it reaches an octave lower, which is the whole reason a bass goes
+    # there: the pulse's number for c1 would be negative.
+    test "the bass can name notes the lead cannot" do
+      assert Music.wave_notes()[:c1]
+      refute Music.notes()[:c1]
+
+      assert %{bass: bass} = Music.compile!([bass: "c1"], :t)
+      assert byte_size(bass) == 6
+    end
+
+    test "a tune written as one line is the lead alone" do
+      assert %{lead: lead, bass: <<>>} = Music.compile!("c4", :t)
+      assert byte_size(lead) == 6
+    end
+
+    test "a voice nobody has heard of is refused, with the two there are" do
+      assert_raise Potion.CompileError, ~r/voice called :drums.*`lead:`.*`bass:`/s, fn ->
+        Music.compile!([lead: "c4", drums: "c4"], :t)
+      end
     end
   end
 
@@ -68,7 +109,7 @@ defmodule Potion.MusicTest do
     # kind of forgiving.
     test "a hold with nothing to hold" do
       assert_raise Potion.CompileError, ~r/opens with `\.`/, fn ->
-        Music.compile!(". c4", :t)
+        lead!(". c4", :t)
       end
     end
 

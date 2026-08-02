@@ -16,9 +16,16 @@ defmodule Potion.DSLTest do
   rot.
 
   The startup timetable is the kernel's (see `Potion.RuntimeTest`): the init
-  takes two frames, the actor runs for the first time at the third one's vblank,
-  and the DMA publishes its OAM at the next. We unroll five frames before looking
-  at the state, six before looking at the screen.
+  takes three frames, the actor runs for the first time at the fourth one's
+  vblank, and the DMA publishes its OAM at the next. We unroll six frames before
+  looking at the state, seven before looking at the screen.
+
+  That was two frames until the wave channel's table joined the init. The
+  timetable is not a promise the kernel makes — it is however long the init
+  happens to be, measured between the vblank it waits for and the one the first
+  `HALT` catches — so a test that counts frames is counting that, and adding
+  work to the init moves it. Which is worth knowing before the numbers below
+  look arbitrary.
   """
 
   use ExUnit.Case, async: true
@@ -717,7 +724,7 @@ defmodule Potion.DSLTest do
     # and 3 have not. That the untouched two still read 30 and 40 is the
     # assertion: one `variables` line laid down four different values.
     test "each cell gets its own starting value" do
-      {_pixels, _state, ram} = run_frames(Volley, 4)
+      {_pixels, _state, ram} = run_frames(Volley, 5)
       base = Volley.addresses().bullets
 
       assert for(i <- 0..3, do: Map.get(ram, base + i)) == [11, 21, 30, 40]
@@ -730,7 +737,7 @@ defmodule Potion.DSLTest do
       # Six frames is four turns, which is once round. Every cell moved exactly
       # once, which is what says the address really followed `n` -- a broken add
       # would move one of them four times.
-      {_pixels, _state, ram} = run_frames(Volley, 6)
+      {_pixels, _state, ram} = run_frames(Volley, 7)
       base = Volley.addresses().bullets
 
       assert for(i <- 0..3, do: Map.get(ram, base + i)) == [11, 21, 31, 41]
@@ -789,6 +796,71 @@ defmodule Potion.DSLTest do
 
   defp index(array, subscript) do
     {{:., [], [Access, :get]}, [], [{array, [], nil}, subscript]}
+  end
+
+  # A tune with both voices: a melody on the pulse and a bass under it on the
+  # wave channel.
+  defmodule Duet do
+    @moduledoc false
+    use Potion
+
+    music(:song, [lead: "c5 e5 g5 c6", bass: "c2 . g1 ."], beat: 6)
+
+    defactor :voice do
+      variables t: 0
+
+      every_frame do
+        t = t + 1
+        if t == 3, do: play(:song)
+      end
+    end
+  end
+
+  describe "two voices" do
+    # Each channel's frequency register is read back on its own, because the
+    # mixed samples cannot say which channel a sound came from — and "both are
+    # playing" is the only thing this feature claims.
+    test "the melody and the bass play at once, each on its own channel" do
+      heard = duet(Duet, 30)
+
+      lead = heard |> Enum.map(&elem(&1, 0)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+      bass = heard |> Enum.map(&elem(&1, 1)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+
+      notes = Potion.Music.notes()
+      wave = Potion.Music.wave_notes()
+
+      assert lead == [notes[:c5], notes[:e5], notes[:g5], notes[:c6]]
+      assert bass == [wave[:c2], wave[:g1]]
+
+      together = Enum.count(heard, fn {l, b} -> l != 0 and b != 0 end)
+      assert together > 15, "the two voices barely overlapped: #{together} frames of 30"
+    end
+
+    # The wave channel counts its period twice as slowly, so the same note is a
+    # different number there. Reading the bass against the lead's table would put
+    # it an octave out, and both would still look like notes.
+    test "the bass is not the lead's numbers" do
+      assert Potion.Music.wave_notes()[:c2] != Potion.Music.notes()[:c2]
+    end
+  end
+
+  # The two frequency registers, frame by frame: channel 1's and channel 3's.
+  defp duet(game, count) do
+    rom = game.rom()
+
+    {_state, _ram, _apu, heard} =
+      Enum.reduce(1..count, {Screen.boot_state(rom), Screen.boot_ram(rom), %Atomboy.APU{}, []}, fn
+        _n, {state, ram, apu, acc} ->
+          {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+          {_samples, ram, apu} = Atomboy.APU.frame(ram, apu)
+
+          lead = Map.get(ram, 0xFF13, 0) + Bitwise.band(Map.get(ram, 0xFF14, 0), 0x07) * 256
+          bass = Map.get(ram, 0xFF1D, 0) + Bitwise.band(Map.get(ram, 0xFF1E, 0), 0x07) * 256
+
+          {state, ram, apu, [{lead, bass} | acc]}
+      end)
+
+    Enum.reverse(heard)
   end
 
   describe "a tune" do
@@ -1474,7 +1546,7 @@ defmodule Potion.DSLTest do
       addresses = Drifter.addresses()
 
       # Three turns of the actor: 40, 43, 46.
-      {_pixels, _state, ram} = run_frames(Drifter, 5)
+      {_pixels, _state, ram} = run_frames(Drifter, 6)
 
       assert Map.get(ram, addresses.x) == 40 + 3 * 3
       assert Map.get(ram, addresses.step) == 3
@@ -1529,21 +1601,21 @@ defmodule Potion.DSLTest do
       addresses = Rebound.addresses()
 
       # Three turns of the actor, all forward.
-      {_pixels, _state, ram} = run_frames(Rebound, 5)
+      {_pixels, _state, ram} = run_frames(Rebound, 6)
       assert Map.get(ram, addresses.x) == 103
       assert Map.get(ram, addresses.vx) == 1
 
       # Past 120 the direction is reversed, and `x = x + vx` -- the very same
       # sentence -- now walks the other way. 121 was the far point, and by the
-      # 25th frame the ball has come back two steps.
-      {_pixels, _state, ram} = run_frames(Rebound, 25)
+      # 26th frame the ball has come back two steps.
+      {_pixels, _state, ram} = run_frames(Rebound, 26)
       assert Map.get(ram, addresses.x) == 119
       assert Map.get(ram, addresses.vx) == 0xFF, "vx should hold -1 in two's complement"
     end
 
     test "and turns around again at the other end, without ever leaving the court" do
-      # 19 is reached at the 125th frame, and reversed on the spot.
-      {_pixels, _state, ram} = run_frames(Rebound, 130)
+      # 19 is reached at the 126th frame, and reversed on the spot.
+      {_pixels, _state, ram} = run_frames(Rebound, 131)
       addresses = Rebound.addresses()
 
       assert Map.get(ram, addresses.x) == 24
@@ -1687,6 +1759,7 @@ defmodule Potion.DSLTest do
       assert calls == [
                {:call, {:label, :read_pad}},
                {:call, {:label, :play_music}},
+               {:call, {:label, :play_bass}},
                {:call, {:label, :actor_0}},
                {:call, {:label, :actor_1}}
              ]

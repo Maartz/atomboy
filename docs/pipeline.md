@@ -200,11 +200,14 @@ every mention of them into a subscript by `me` before anything else happens — 
 what loops is exactly the code a single actor would have been. Another actor
 sees those same names as ordinary arrays, which is how one gets spawned.
 
-**A tune.** `music :theme, "c4 . e4 -"` becomes three bytes a step — frequency,
+**A tune.** `music :theme, lead: "c4 . e4 -", bass: "c2 . . ."` becomes three bytes a step — frequency,
 frequency-with-trigger, frames — laid into the cartridge, and the kernel reads
 one step a frame between the pad and the actors. A game says `play(:theme)`
 once and never feeds it. A hold is a longer step rather than a repeated one,
-because retriggering a note restarts it and the ear hears that as a stutter.
+because retriggering a note restarts it and the ear hears that as a stutter. The
+bass is compiled against its own table: the wave channel counts its period twice
+as slowly, so the same note is a different number there — and it reaches an
+octave lower, which is why a bass may say `c1` and a lead may not.
 
 **A knock.** `noise(:hit)` is six writes to channel 4, which is a shift register
 rather than an oscillator — there is no pitch to name, only how coarsely it is

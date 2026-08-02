@@ -211,7 +211,12 @@ defmodule Potion.Compiler do
       # The names an instance carries, which the body reads without an index and
       # everyone else reads with one.
       pooled: if(count > 1, do: MapSet.new(names), else: MapSet.new()),
-      tunes: MapSet.new(Keyword.get(opts, :tunes, []))
+      # name => whether it has a bass voice.
+      tunes:
+        Map.new(Keyword.get(opts, :tunes, []), fn
+          {name, bass?} -> {name, bass?}
+          name -> {name, false}
+        end)
     }
   end
 
@@ -935,21 +940,28 @@ defmodule Potion.Compiler do
   # loop -- the player, reaching a step of length zero, goes back to where the
   # base says it started.
   defp statement({:play, _, [name]} = statement, allocation, counter) when is_atom(name) do
-    {tune, base, wait} = Runtime.music_cells()
-    label = tune!(name, allocation, statement)
+    {label, bass?} = tune!(name, allocation, statement)
 
-    {[
-       {:ld, :hl, {:label, label}},
-       {:ld, :a, :l},
-       {:ld, {:mem, tune}, :a},
-       {:ld, {:mem, base}, :a},
-       {:ld, :a, :h},
-       {:ld, {:mem, tune + 1}, :a},
-       {:ld, {:mem, base + 1}, :a},
-       # Nothing to wait for: the next frame reads the first step.
-       {:xor, :a, :a},
-       {:ld, {:mem, wait}, :a}
-     ], counter}
+    lead = arm(Runtime.music_cells(), label)
+
+    bass =
+      if bass? do
+        arm(Runtime.bass_cells(), :"potion_bass_#{name}")
+      else
+        # A tune with no bass silences the wave channel rather than leaving
+        # whatever the last one was still running under it.
+        {tune, _base, _wait} = Runtime.bass_cells()
+        {_nr30, nr32, _nr33, _nr34} = Runtime.wave()
+
+        [
+          {:xor, :a, :a},
+          {:ld, {:mem, tune}, :a},
+          {:ld, {:mem, tune + 1}, :a},
+          {:ldh, {:high, nr32}, :a}
+        ]
+      end
+
+    {lead ++ bass, counter}
   end
 
   defp statement({:play, _, [other]} = statement, _allocation, _counter) do
@@ -968,13 +980,18 @@ defmodule Potion.Compiler do
   # hanging on until something else triggers the channel.
   defp statement({:silence, _, []}, _allocation, counter) do
     {tune, _base, _wait} = Runtime.music_cells()
+    {bass, _bass_base, _bass_wait} = Runtime.bass_cells()
     {_nr10, _nr11, nr12, _nr13, _nr14} = Runtime.pulse_one()
+    {_nr30, nr32, _nr33, _nr34} = Runtime.wave()
 
     {[
        {:xor, :a, :a},
        {:ld, {:mem, tune}, :a},
        {:ld, {:mem, tune + 1}, :a},
-       {:ldh, {:high, nr12}, :a}
+       {:ld, {:mem, bass}, :a},
+       {:ld, {:mem, bass + 1}, :a},
+       {:ldh, {:high, nr12}, :a},
+       {:ldh, {:high, nr32}, :a}
      ], counter}
   end
 
@@ -1120,13 +1137,28 @@ defmodule Potion.Compiler do
 
   defp statement(other, _allocation, _counter), do: reject!(other)
 
-  defp tune!(name, allocation, statement) do
-    tunes = Map.get(allocation, :tunes, MapSet.new())
+  defp arm({tune, base, wait}, label) do
+    [
+      {:ld, :hl, {:label, label}},
+      {:ld, :a, :l},
+      {:ld, {:mem, tune}, :a},
+      {:ld, {:mem, base}, :a},
+      {:ld, :a, :h},
+      {:ld, {:mem, tune + 1}, :a},
+      {:ld, {:mem, base + 1}, :a},
+      # Nothing to wait for: the next frame reads the first step.
+      {:xor, :a, :a},
+      {:ld, {:mem, wait}, :a}
+    ]
+  end
 
-    if MapSet.member?(tunes, name) do
-      :"potion_tune_#{name}"
+  defp tune!(name, allocation, statement) do
+    tunes = Map.get(allocation, :tunes, %{})
+
+    if Map.has_key?(tunes, name) do
+      {:"potion_tune_#{name}", Map.fetch!(tunes, name)}
     else
-      known = tunes |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+      known = tunes |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
 
       raise CompileError, """
       no tune is called #{inspect(name)}.

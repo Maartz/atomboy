@@ -99,6 +99,12 @@ defmodule Potion.Runtime do
   @nr13 0x13
   @nr14 0x14
 
+  @nr30 0x1A
+  @nr32 0x1C
+  @nr33 0x1D
+  @nr34 0x1E
+  @wave 0xFF30
+
   @nr41 0x20
   @nr42 0x21
   @nr43 0x22
@@ -128,6 +134,11 @@ defmodule Potion.Runtime do
   @tune 0xC0A3
   @tune_base 0xC0A5
   @tune_wait 0xC0A7
+
+  # The bass, on the wave channel: the same three, a second time.
+  @bass 0xC0A8
+  @bass_base 0xC0AA
+  @bass_wait 0xC0AC
 
   @state 0xC100
   @hram_dma 0xFF80
@@ -272,9 +283,15 @@ defmodule Potion.Runtime do
       [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
       [{:label, :font_data}, {:bytes, font_bytes()}] ++
       [{:label, :letter_data}, {:bytes, letter_bytes()}] ++
+      [{:label, :wave_data}, {:bytes, wave_bytes()}] ++
       art_data(art) ++
-      Enum.flat_map(tunes, fn {name, bytes} ->
-        [{:label, :"potion_tune_#{name}"}, {:bytes, bytes}]
+      Enum.flat_map(tunes, fn {name, voices} ->
+        [{:label, :"potion_tune_#{name}"}, {:bytes, voices.lead}] ++
+          if voices.bass == <<>> do
+            []
+          else
+            [{:label, :"potion_bass_#{name}"}, {:bytes, voices.bass}]
+          end
       end) ++
       Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
         [{:label, actor_label(slot)}] ++ fragment
@@ -431,7 +448,8 @@ defmodule Potion.Runtime do
       letters() ++
       art(art) ++
       copy_dma() ++
-      sound() ++
+      sound_on() ++
+      wave_table() ++
       [
         {:ld, :a, @palette},
         {:ldh, {:high, @bgp}, :a},
@@ -627,6 +645,29 @@ defmodule Potion.Runtime do
   @spec music_cells() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
   def music_cells, do: {@tune, @tune_base, @tune_wait}
 
+  @doc "The same three for the bass, which plays on the wave channel."
+  @spec bass_cells() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
+  def bass_cells, do: {@bass, @bass_base, @bass_wait}
+
+  @doc "The wave channel's registers: DAC, volume, frequency, trigger."
+  @spec wave() :: {byte(), byte(), byte(), byte()}
+  def wave, do: {@nr30, @nr32, @nr33, @nr34}
+
+  @doc """
+  The 32 nibbles the wave channel steps through: a triangle, up and back down.
+
+  Sixteen bytes, and the only shape the v0 offers. A triangle rather than a saw
+  because a bass sits under a square lead and a saw fights it — and because the
+  table is one constant, so the day a game wants to choose, this is what it
+  chooses instead of.
+  """
+  @spec wave_bytes() :: binary()
+  def wave_bytes do
+    ramp = Enum.to_list(0..15) ++ Enum.to_list(15..0//-1)
+
+    for [high, low] <- Enum.chunk_every(ramp, 2), into: <<>>, do: <<high::4, low::4>>
+  end
+
   @doc "The cell holding which instance of a pooled actor is running."
   @spec me() :: non_neg_integer()
   def me, do: @me
@@ -635,27 +676,32 @@ defmodule Potion.Runtime do
   # a count of frames. A length of zero is the end and sends the pointer back to
   # where it started, which is why a tune loops without saying so.
   defp play_music do
+    voice(:play_music, {@tune, @tune_base, @tune_wait}, :pulse) ++
+      voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave)
+  end
+
+  defp voice(label, {tune, tune_base, tune_wait}, kind) do
     [
-      {:label, :play_music},
+      {:label, label},
       # A pointer of zero means no tune. Both halves, because a tune could sit
       # at 0x0100-something and have a zero low byte.
-      {:ld, :a, {:mem, @tune}},
+      {:ld, :a, {:mem, tune}},
       {:ld, :b, :a},
-      {:ld, :a, {:mem, @tune + 1}},
+      {:ld, :a, {:mem, tune + 1}},
       {:or, :a, :b},
       {:ret, :z},
 
       # Still inside the current step? Count down and leave.
-      {:ld, :a, {:mem, @tune_wait}},
+      {:ld, :a, {:mem, tune_wait}},
       {:and, :a, :a},
-      {:jr, :z, {:label, :music_step}},
+      {:jr, :z, {:label, :"#{label}_step"}},
       {:dec, :a},
-      {:ld, {:mem, @tune_wait}, :a},
+      {:ld, {:mem, tune_wait}, :a},
       {:ret},
-      {:label, :music_step},
-      {:ld, :a, {:mem, @tune}},
+      {:label, :"#{label}_step"},
+      {:ld, :a, {:mem, tune}},
       {:ld, :l, :a},
-      {:ld, :a, {:mem, @tune + 1}},
+      {:ld, :a, {:mem, tune + 1}},
       {:ld, :h, :a},
 
       # The third byte first: a zero length is the terminator, and the tune goes
@@ -664,20 +710,20 @@ defmodule Potion.Runtime do
       {:inc, :hl},
       {:ld, :a, {:mem, :hl}},
       {:and, :a, :a},
-      {:jr, :nz, {:label, :music_sound}},
-      {:ld, :a, {:mem, @tune_base}},
-      {:ld, {:mem, @tune}, :a},
+      {:jr, :nz, {:label, :"#{label}_sound"}},
+      {:ld, :a, {:mem, tune_base}},
+      {:ld, {:mem, tune}, :a},
       {:ld, :l, :a},
-      {:ld, :a, {:mem, @tune_base + 1}},
-      {:ld, {:mem, @tune + 1}, :a},
+      {:ld, :a, {:mem, tune_base + 1}},
+      {:ld, {:mem, tune + 1}, :a},
       {:ld, :h, :a},
       {:inc, :hl},
       {:inc, :hl},
       {:ld, :a, {:mem, :hl}},
-      {:label, :music_sound},
+      {:label, :"#{label}_sound"},
 
       # `frames` is in A. Keep it, then walk HL back to the step's first byte.
-      {:ld, {:mem, @tune_wait}, :a},
+      {:ld, {:mem, tune_wait}, :a},
       {:dec, :hl},
       {:dec, :hl},
       {:ld, :a, {:mem, :hl_inc}},
@@ -688,23 +734,35 @@ defmodule Potion.Runtime do
 
       # HL now points at the next step: put it back before touching the channel.
       {:ld, :a, :l},
-      {:ld, {:mem, @tune}, :a},
+      {:ld, {:mem, tune}, :a},
       {:ld, :a, :h},
-      {:ld, {:mem, @tune + 1}, :a},
+      {:ld, {:mem, tune + 1}, :a},
 
       # B holds the high byte. Without the trigger bit this step is a rest, and
       # a rest is the envelope taken to zero -- silence that does not restart
       # anything when the next note arrives.
       {:bit, 7, :b},
-      {:jr, :nz, {:label, :music_note}},
-      {:xor, :a, :a},
-      {:ldh, {:high, @nr12}, :a},
-      {:ret},
-      {:label, :music_note},
+      {:jr, :nz, {:label, :"#{label}_note"}}
+    ] ++
+      hush(kind) ++
+      [{:ret}, {:label, :"#{label}_note"}] ++
+      sound(kind)
+  end
 
-      # No sweep, 50% duty, and a volume that does not decay: a tune wants a
-      # note that lasts until the next one, which is the opposite of what `beep`
-      # asks of channel 2.
+  # A rest, which on either channel is the same idea said to a different
+  # register: take the volume to nothing, without triggering anything, so the
+  # note already sounding stops rather than being replaced.
+  defp hush(:pulse), do: [{:xor, :a, :a}, {:ldh, {:high, @nr12}, :a}]
+  defp hush(:wave), do: [{:xor, :a, :a}, {:ldh, {:high, @nr32}, :a}]
+
+  # A note. C holds the frequency's low byte and B its high byte with the
+  # trigger already on it, which is the one thing the two channels share.
+  #
+  # No sweep, 50% duty, and a volume that does not decay: a tune wants a note
+  # that lasts until the next one, which is the opposite of what `beep` asks of
+  # channel 2.
+  defp sound(:pulse) do
+    [
       {:xor, :a, :a},
       {:ldh, {:high, @nr10}, :a},
       {:ld, :a, 0x80},
@@ -716,6 +774,41 @@ defmodule Potion.Runtime do
       {:ld, :a, :b},
       {:ldh, {:high, @nr14}, :a},
       {:ret}
+    ]
+  end
+
+  # The wave channel has no envelope: its volume is a shift, and the DAC has to
+  # be switched back on because a rest muted it.
+  defp sound(:wave) do
+    [
+      {:ld, :a, 0x80},
+      {:ldh, {:high, @nr30}, :a},
+      {:ld, :a, 0x20},
+      {:ldh, {:high, @nr32}, :a},
+      {:ld, :a, :c},
+      {:ldh, {:high, @nr33}, :a},
+      {:ld, :a, :b},
+      {:ldh, {:high, @nr34}, :a},
+      {:ret}
+    ]
+  end
+
+  # The 32 nibbles the wave channel steps, into its own sixteen bytes at 0xFF30.
+  # A loop and a label, like the font and the art -- unrolled it was thirty-two
+  # instructions where this is eight, and the init's length is not free: it runs
+  # between the vblank it waits for and the one the first frame catches, so
+  # every instruction in here can push that first frame a whole frame later.
+  defp wave_table do
+    [
+      {:ld, :hl, {:label, :wave_data}},
+      {:ld, :de, @wave},
+      {:ld, :b, 16},
+      {:label, :copy_wave},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:dec, :b},
+      {:jr, :nz, {:label, :copy_wave}}
     ]
   end
 
@@ -747,7 +840,7 @@ defmodule Potion.Runtime do
   # NR52 first, and that ordering is load-bearing: with the power bit clear every
   # other sound register ignores writes, so a volume set before it would be a
   # volume set into nothing.
-  defp sound do
+  defp sound_on do
     [
       {:ld, :a, 0x80},
       {:ldh, {:high, @nr52}, :a},
@@ -934,6 +1027,7 @@ defmodule Potion.Runtime do
       {:ld, {:mem, @flag}, :a},
       {:call, {:label, :read_pad}},
       {:call, {:label, :play_music}},
+      {:call, {:label, :play_bass}},
       calls,
       {:jr, {:label, :main_loop}}
     ]
