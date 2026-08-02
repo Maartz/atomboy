@@ -133,6 +133,7 @@ defmodule Potion do
       x = y - 3
       x = x + vy                         a cell on the right-hand side too
       vx = -vx                           and the sentence a bounce is made of
+      x = random(16)                     0..15 — the bound a power of two, 2..256
 
   ### Asking
 

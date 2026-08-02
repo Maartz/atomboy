@@ -1824,6 +1824,33 @@ defmodule Potion.Compiler do
     load(operand, allocation, statement) ++ [{:cpl}, {:inc, :a}]
   end
 
+  # `x = random(16)`: a byte from the kernel's generator, cut down with one AND.
+  # The bound is a power of two because the cut is a mask -- without a divider
+  # there is no honest 0..5 in a byte, only a biased one that never says so --
+  # and 256 is the whole byte, no mask at all.
+  #
+  # The mask happens here and not in the kernel, so the state cell keeps all
+  # eight of its bits: a game that only ever flips coins still walks the full
+  # cycle, rather than a two-value one.
+  defp load({:random, _, [top]}, _allocation, _statement)
+       when top in [2, 4, 8, 16, 32, 64, 128, 256] do
+    [{:call, {:label, :random}}] ++ if top == 256, do: [], else: [{:and, :a, top - 1}]
+  end
+
+  defp load({:random, _, _args}, _allocation, statement) do
+    raise CompileError, """
+    `random` takes one bound, a power of two from 2 to 256, written out:
+
+        #{one_line(statement)}
+
+    `x = random(16)` is 0 to 15. The bound is a mask the compiler cuts the \
+    byte with, which is why it is a literal and a power of two: the console \
+    has no divider, and a 0..5 made by masking would favour some faces of \
+    the die without saying so. Take the next power up and re-roll what is \
+    out of range, or fold it: `random(8)` and an `if` make an honest 0..5.
+    """
+  end
+
   defp load({operator, _, [left, right]}, allocation, statement)
        when operator in [:+, :-] do
     {setup, operand} = term(right, allocation, statement)

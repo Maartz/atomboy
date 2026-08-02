@@ -1062,6 +1062,138 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # Five draws a frame, exercising every place a `random` can stand: masked,
+  # whole, inside an arithmetic, and on the left of a comparison.
+  defmodule Dice do
+    @moduledoc false
+    use Potion
+
+    defactor :dice do
+      variables face: 0, byte: 0, second: 0, offset: 0, coin: 0
+
+      every_frame do
+        face = random(16)
+        byte = random(256)
+        second = random(256)
+        offset = random(4) + 1
+        if random(2) == 0, do: coin = coin + 1
+      end
+    end
+  end
+
+  # One coin and nothing else, for the test that watches the state cell: any
+  # other draw in the frame would stir it too and hide a mask left in the
+  # kernel.
+  defmodule Coin do
+    @moduledoc false
+    use Potion
+
+    defactor :coin do
+      variables side: 0
+
+      every_frame do
+        side = random(2)
+      end
+    end
+  end
+
+  describe "a die" do
+    # The startup frames are dropped from every sample: the cells hold their
+    # cleared zeros until the actor's first turn, and that timetable is the
+    # init's business, tested elsewhere.
+
+    test "the bound is a ceiling, and most faces come up" do
+      faces = sample(Dice, [Dice.addresses().face], 64) |> List.flatten() |> Enum.drop(4)
+
+      assert Enum.all?(faces, &(&1 in 0..15))
+      assert length(Enum.uniq(faces)) >= 10
+    end
+
+    test "256 is the whole byte, and it spreads" do
+      bytes = sample(Dice, [Dice.addresses().byte], 64) |> List.flatten() |> Enum.drop(4)
+
+      assert length(Enum.uniq(bytes)) >= 30
+    end
+
+    test "two draws in one frame are two numbers" do
+      addresses = Dice.addresses()
+      pairs = sample(Dice, [addresses.byte, addresses.second], 64) |> Enum.drop(4)
+
+      differing = Enum.count(pairs, fn [byte, second] -> byte != second end)
+      assert differing >= 30
+    end
+
+    test "a draw composes with arithmetic: random(4) + 1 is a die from 1 to 4" do
+      offsets = sample(Dice, [Dice.addresses().offset], 64) |> List.flatten() |> Enum.drop(4)
+
+      assert Enum.all?(offsets, &(&1 in 1..4))
+      assert Enum.uniq(offsets) |> Enum.sort() == [1, 2, 3, 4]
+    end
+
+    test "a draw stands in a condition, and the coin is roughly fair" do
+      {_pixels, _state, ram} = run_frames(Dice, 64)
+      coin = Map.get(ram, Dice.addresses().coin)
+
+      assert coin in 10..50
+    end
+
+    test "the mask is cut at the call site: a game of coins still walks the full state" do
+      states = sample(Coin, [Potion.Runtime.rng_cell()], 44) |> List.flatten() |> Enum.drop(4)
+      sides = sample(Coin, [Coin.addresses().side], 44) |> List.flatten() |> Enum.drop(4)
+
+      assert Enum.all?(sides, &(&1 in 0..1))
+      assert Enum.uniq(sides) |> Enum.sort() == [0, 1]
+      assert length(Enum.uniq(states)) >= 10
+    end
+
+    test "the same boot deals the same hands: a game is a replay of its inputs" do
+      first = sample(Dice, [Dice.addresses().byte], 32)
+      again = sample(Dice, [Dice.addresses().byte], 32)
+
+      assert first == again
+    end
+
+    # The recipe, pinned. The bound and spread tests above hold for *any*
+    # decent generator, so a change to the mixing -- the rotation, the odd
+    # step, the stir of DIV -- would slip past them all. These seven numbers
+    # are the ones the current recipe deals from a cold boot; they also move
+    # if the init's length moves, since DIV is the seed. Either change is fine
+    # when it is meant: re-measure and update the list, on purpose.
+    test "the first hands from a cold boot, measured and pinned" do
+      states = sample(Coin, [Potion.Runtime.rng_cell()], 10) |> List.flatten() |> Enum.drop(3)
+
+      assert states == [167, 28, 42, 108, 20, 136, 149]
+    end
+
+    test "a bound that is not a power of two is refused, with the reason" do
+      message = reject!("Rejected.LoadedDie", "variables x: 0", "x = random(6)")
+
+      assert message =~ "power of two"
+      assert message =~ "favour some faces"
+    end
+
+    test "the degenerate bounds are refused the same way" do
+      for bound <- ["0", "1", "512"] do
+        message =
+          reject!("Rejected.Die#{bound}", "variables x: 0", "x = random(#{bound})")
+
+        assert message =~ "power of two", "random(#{bound}) got through"
+      end
+    end
+
+    test "a bound in a cell is refused: the mask is cut at compile time" do
+      message = reject!("Rejected.CellBound", "variables x: 0, n: 4", "x = random(n)")
+
+      assert message =~ "power of two"
+    end
+
+    test "a draw without a bound is refused" do
+      message = reject!("Rejected.Unbounded", "variables x: 0", "x = random()")
+
+      assert message =~ "takes one bound"
+    end
+  end
+
   describe "a motif reused" do
     # The whole point of evaluating the notation instead of pattern-matching it:
     # Elixir is already the pattern language. Two modules, one saying the phrase
@@ -2596,6 +2728,22 @@ defmodule Potion.DSLTest do
                                                                                     state, ram} ->
       Screen.frame(state, rom, ram, render? and n == count)
     end)
+  end
+
+  # The named cells read after every frame of a run, one row per frame: the way
+  # to watch a value that is supposed to change.
+  defp sample(game, addresses, count) do
+    rom = game.rom()
+
+    {values, _state, _ram} =
+      Enum.reduce(1..count, {[], Screen.boot_state(rom), Screen.boot_ram(rom)}, fn _,
+                                                                                   {values, state,
+                                                                                    ram} ->
+        {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+        {[Enum.map(addresses, &Map.get(ram, &1)) | values], state, ram}
+      end)
+
+    Enum.reverse(values)
   end
 
   # Further frames, from a state in flight and a RAM the outside world may just

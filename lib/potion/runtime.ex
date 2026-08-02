@@ -171,6 +171,10 @@ defmodule Potion.Runtime do
   @current_room 0xC0BC
   @probe 0xC0BE
 
+  # The `random` routine's state: one byte, stirred with DIV on every draw. The
+  # init's clearing seeds it with zero, and the hardware un-seeds it from there.
+  @rng 0xC0BF
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -710,6 +714,10 @@ defmodule Potion.Runtime do
   @spec probe_cell() :: non_neg_integer()
   def probe_cell, do: @probe
 
+  @doc "The cell the `random` routine keeps its state in."
+  @spec rng_cell() :: non_neg_integer()
+  def rng_cell, do: @rng
+
   @doc """
   The two wobble tables, sixteen signed frames each.
 
@@ -777,7 +785,7 @@ defmodule Potion.Runtime do
       voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave) ++
       vibrato(:vibrato_lead, @lead_pitch, @lead_phase, {@nr13, @nr14}) ++
       vibrato(:vibrato_harmony, @harm_pitch, @harm_phase, {@nr23, @nr24}) ++
-      show_room() ++ touching()
+      show_room() ++ touching() ++ random()
   end
 
   defp voice(label, {tune, tune_base, tune_wait}, kind) do
@@ -1018,6 +1026,31 @@ defmodule Potion.Runtime do
       {:ld, :b, :a},
       {:ld, :a, {:mem, @probe}},
       {:cp, :a, :b},
+      {:ret}
+    ]
+  end
+
+  # A byte of noise, answered in A.
+  #
+  # The state is one cell walked through a rotation and an odd step, and stirred
+  # on every draw with DIV -- the counter the hardware advances 16384 times a
+  # second whether anyone is looking or not. Between two frames DIV moves by
+  # 274 increments, 18 after the wrap, so *when* a draw happens decides what it
+  # says: the player's timing is the seed, which is where every small generator
+  # on this console got its numbers. Nothing runs per frame -- a game that never
+  # asks pays twelve bytes of ROM and no time at all.
+  #
+  # It is a stirred counter, not a proven generator: plenty to pick a direction,
+  # and unfit for anything that would mind the difference.
+  defp random do
+    [
+      {:label, :random},
+      {:ld, :hl, @rng},
+      {:ldh, :a, {:high, @div}},
+      {:add, :a, {:mem, :hl}},
+      {:rlca},
+      {:add, :a, 41},
+      {:ld, {:mem, :hl}, :a},
       {:ret}
     ]
   end
