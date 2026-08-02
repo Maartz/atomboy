@@ -110,7 +110,7 @@ defmodule Pong do
         text(4, 2, " ")
         text(15, 2, " ")
 
-        play(:wind_fish)
+        play(:attract)
 
         sprite(0, x: 0, y: 160, tile: :paddle)
         sprite(1, x: 0, y: 160, tile: :paddle)

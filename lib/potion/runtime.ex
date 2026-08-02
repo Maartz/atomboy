@@ -296,7 +296,8 @@ defmodule Potion.Runtime do
   illegal opcode thousands of cycles away from its cause.
   """
   @spec program([Assembler.element()], binary(), [{atom(), binary()}]) :: [Assembler.element()]
-  def program(actors, art \\ <<>>, tunes \\ []) when is_list(actors) and is_binary(art) do
+  def program(actors, art \\ <<>>, tunes \\ [], rooms \\ [])
+      when is_list(actors) and is_binary(art) do
     fragments = fragments(actors)
     Enum.each(fragments, &check_actor!/1)
     art!(art)
@@ -317,6 +318,9 @@ defmodule Potion.Runtime do
         [{:label, :"potion_tune_#{name}"}, {:bytes, voices.lead}] ++
           bytes_for(:"potion_harmony_#{name}", voices.harmony) ++
           bytes_for(:"potion_bass_#{name}", voices.bass)
+      end) ++
+      Enum.flat_map(rooms, fn {name, bytes} ->
+        [{:label, :"potion_room_#{name}"}, {:bytes, bytes}]
       end) ++
       Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
         [{:label, actor_label(slot)}] ++ fragment
@@ -759,7 +763,8 @@ defmodule Potion.Runtime do
       voice(:play_harmony, {@harmony, @harmony_base, @harmony_wait}, :pulse_two) ++
       voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave) ++
       vibrato(:vibrato_lead, @lead_pitch, @lead_phase, {@nr13, @nr14}) ++
-      vibrato(:vibrato_harmony, @harm_pitch, @harm_phase, {@nr23, @nr24})
+      vibrato(:vibrato_harmony, @harm_pitch, @harm_phase, {@nr23, @nr24}) ++
+      show_room()
   end
 
   defp voice(label, {tune, tune_base, tune_wait}, kind) do
@@ -896,6 +901,48 @@ defmodule Potion.Runtime do
       {:ldh, {:high, @nr33}, :a},
       {:ld, :a, :b},
       {:ldh, {:high, @nr34}, :a},
+      {:ret}
+    ]
+  end
+
+  # A room onto the panel: 360 bytes into the background map, with the LCD off
+  # for the length of the copy.
+  #
+  # Off, because the copy cannot fit in a vblank -- 360 bytes is three times the
+  # window -- and a write the PPU is scanning past is a write the real hardware
+  # drops. One dark frame instead of a torn room, which is exactly what a room
+  # change looked like on the consoles this one imitates. The emulator would
+  # have allowed the writes; the ROM is written for the machine, not for its
+  # emulator.
+  #
+  # HL arrives holding the room's first byte: the caller loads it, and HL is the
+  # register everything here already clobbers freely.
+  defp show_room do
+    [
+      {:label, :show_room},
+      {:xor, :a, :a},
+      {:ldh, {:high, @lcdc}, :a},
+      {:ld, :de, @background},
+      {:ld, :b, 18},
+      {:label, :room_row},
+      {:ld, :c, 20},
+      {:label, :room_cell},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:dec, :c},
+      {:jr, :nz, {:label, :room_cell}},
+      # The map is 32 wide and the screen 20: walk past the 12 nobody sees.
+      {:ld, :a, :e},
+      {:add, :a, 12},
+      {:ld, :e, :a},
+      {:ld, :a, :d},
+      {:adc, :a, 0},
+      {:ld, :d, :a},
+      {:dec, :b},
+      {:jr, :nz, {:label, :room_row}},
+      {:ld, :a, @lcdc_on},
+      {:ldh, {:high, @lcdc}, :a},
       {:ret}
     ]
   end

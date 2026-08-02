@@ -13,6 +13,8 @@
     state: 2,
     on_enter: 1,
     routine: 2,
+    room: 2,
+    room: 3,
     music: 2,
     music: 3
   ]

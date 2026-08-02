@@ -150,6 +150,10 @@ defmodule Potion do
       background(0, 0, tile: :wall)      a tile, by name or by index
       text(3, 7, "PRESS START")          words, turned into stores at compile time
 
+      room :cave, @drawing,              a screen: twenty columns, eighteen rows,
+        tiles: %{?# => :wall}            each character a tile of the sheet
+      show(:cave)                        painted whole, behind one dark frame
+
       tiles from: "art/pong.png",        a drawing, cut into tiles and named
         names: [:ball, :paddle]
 
@@ -233,6 +237,8 @@ defmodule Potion do
           state: 2,
           on_enter: 1,
           routine: 2,
+          room: 2,
+          room: 3,
           music: 2,
           music: 3
         ]
@@ -412,6 +418,11 @@ defmodule Potion do
 
         art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
 
+        screens =
+          Enum.map(rooms(env.module), fn {name, ascii, opts} ->
+            {name, compiled_room!(name, ascii, opts, art.names, env)}
+          end)
+
         songs =
           Enum.map(tunes(env.module), fn {name, notation, opts} ->
             {name, compiled_tune!(name, notation, opts, env)}
@@ -424,7 +435,8 @@ defmodule Potion do
               | cells: cells,
                 arrays: arrays,
                 tiles: art.names,
-                tunes: Map.new(songs, &described/1)
+                tunes: Map.new(songs, &described/1),
+                rooms: MapSet.new(screens, fn {name, _bytes} -> name end)
             }
 
             fragment =
@@ -436,7 +448,7 @@ defmodule Potion do
                   Compiler.compile_machine(states, allocation, routines)
               end
 
-            verify!(fragment, name, art.bytes, songs)
+            verify!(fragment, name, art.bytes, songs, screens)
             fragment
           end)
 
@@ -452,7 +464,8 @@ defmodule Potion do
             Potion.Runtime.program(
               unquote(Macro.escape(fragments)),
               unquote(Macro.escape(art.bytes)),
-              unquote(Macro.escape(songs))
+              unquote(Macro.escape(songs)),
+              unquote(Macro.escape(screens))
             )
           end
 
@@ -602,6 +615,75 @@ defmodule Potion do
     Module.put_attribute(module, :potion_tunes, tunes(module) ++ [{name, notation, opts}])
 
     :ok
+  end
+
+  @doc """
+  A screen, drawn where it is declared.
+
+      room :clearing,
+        \"\"\"
+        ####################
+        #..................#
+        ...eighteen rows...
+        ####################
+        \"\"\",
+        tiles: %{?# => :wall, ?. => :grass}
+
+  Twenty columns by eighteen rows -- the panel, exactly. A space is the empty
+  tile without being declared; every other character is named by `tiles:`, as a
+  name from the game's sheet or a bare index. `show(:clearing)` paints it: the
+  kernel turns the panel off, copies the 360 bytes, and turns it back on -- one
+  dark frame, which is what a room change has always looked like.
+
+  Like a tune, the drawing is kept as a tree and compiled in
+  `__before_compile__`, so a room may live in a module attribute and a set of
+  them may be stitched with ordinary Elixir.
+  """
+  defmacro room(name, ascii, opts \\ []) do
+    module = __CALLER__.module
+    name = literal_name!(name, module)
+
+    if Enum.any?(rooms(module), fn {taken, _ascii, _opts} -> taken == name end) do
+      raise CompileError, """
+      two rooms called #{inspect(name)} in #{inspect(module)}.
+
+      `show` names one of them, and two with one name is a question with no answer.
+      """
+    end
+
+    Module.put_attribute(module, :potion_rooms, rooms(module) ++ [{name, ascii, opts}])
+
+    :ok
+  end
+
+  defp rooms(module), do: Module.get_attribute(module, :potion_rooms) || []
+
+  defp compiled_room!(name, ascii, opts, art, env) do
+    {ascii, opts} =
+      try do
+        {ascii, _} = ascii |> attributes(env) |> Code.eval_quoted([], env)
+        {opts, _} = opts |> attributes(env) |> Code.eval_quoted([], env)
+        {ascii, opts}
+      rescue
+        error ->
+          raise CompileError, """
+          the room #{inspect(name)}'s drawing could not be worked out while compiling:
+
+              #{Exception.message(error) |> String.split("\n") |> hd()}
+
+          A room is built when the module compiles, so its drawing has to be \
+          reachable then: a string, a module attribute, or an expression of those.
+          """
+      end
+
+    unless is_binary(ascii) do
+      raise CompileError, """
+      the room #{inspect(name)} is drawn as a block of text, and this is not one: \
+      #{inspect(ascii)}
+      """
+    end
+
+    Compiler.room!(name, ascii, Keyword.get(opts, :tiles, %{}), art)
   end
 
   defp tunes(module), do: Module.get_attribute(module, :potion_tunes) || []
@@ -932,8 +1014,8 @@ defmodule Potion do
   # rather than on the first call to `rom/0` is the whole benefit of a compiled
   # language: a fragment that is not a program shows up in `mix compile`, not
   # three weeks later on a flashcart.
-  defp verify!(fragment, name, art, songs) do
-    Assembler.assemble(Runtime.program(fragment, art, songs), origin: 0x0150)
+  defp verify!(fragment, name, art, songs, screens) do
+    Assembler.assemble(Runtime.program(fragment, art, songs, screens), origin: 0x0150)
     :ok
   rescue
     error in ArgumentError ->

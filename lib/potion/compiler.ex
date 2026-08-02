@@ -211,6 +211,7 @@ defmodule Potion.Compiler do
       # The names an instance carries, which the body reads without an index and
       # everyone else reads with one.
       pooled: if(count > 1, do: MapSet.new(names), else: MapSet.new()),
+      rooms: MapSet.new(Keyword.get(opts, :rooms, [])),
       # name => whether it has a bass voice.
       tunes:
         Map.new(Keyword.get(opts, :tunes, []), fn
@@ -863,6 +864,56 @@ defmodule Potion.Compiler do
     """
   end
 
+  # ── A screen ────────────────────────────────────────────────────────────────
+  #
+  # `show(:clearing)` paints a whole room: the kernel turns the panel off,
+  # copies 360 bytes into the background map, and turns it back on. One dark
+  # frame -- which is exactly what a room change looked like on the machines
+  # this console imitates, and the honest alternative to writes the panel would
+  # drop mid-scan.
+  #
+  # HL carries the room's address into the call, which is the whole calling
+  # convention: HL is already the register every seam here clobbers freely.
+  defp statement({:show, _, [name]} = statement, allocation, counter) when is_atom(name) do
+    rooms = Map.get(allocation, :rooms, MapSet.new())
+
+    unless MapSet.member?(rooms, name) do
+      known = rooms |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+
+      raise CompileError, """
+      no room is called #{inspect(name)}.
+
+          #{one_line(statement)}
+
+      #{if known == "", do: "This game declares none.", else: "The ones it has: #{known}."}
+
+      A room is declared beside the actors and shown by name:
+
+          room :clearing, \"\"\"
+          ...twenty columns by eighteen rows...
+          \"\"\", tiles: %{?# => :wall}
+
+          show(:clearing)
+      """
+    end
+
+    {[
+       {:ld, :hl, {:label, :"potion_room_#{name}"}},
+       {:call, {:label, :show_room}}
+     ], counter}
+  end
+
+  defp statement({:show, _, [other]} = statement, _allocation, _counter) do
+    raise CompileError, """
+    `show` takes the name of a room, written out: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    A room is 360 bytes at a known place in the cartridge, and which place is \
+    decided while the game compiles.
+    """
+  end
+
   # ── A knock ─────────────────────────────────────────────────────────────────
   #
   # Channel 4 is a shift register, not an oscillator: there is no note to name.
@@ -1224,6 +1275,112 @@ defmodule Potion.Compiler do
   """
   @spec notes() :: %{atom() => 0..2047}
   defdelegate notes, to: Potion.Music
+
+  # The screen shows 20 columns of 18 rows, and a room is exactly a screen.
+  @room_w 20
+  @room_h 18
+
+  @doc """
+  A drawing of a screen into the 360 bytes the background map takes.
+
+  Twenty columns by eighteen rows -- the panel, exactly. A space is the empty
+  tile without being declared; every other character is named by the mapping,
+  as a tile of the game's sheet or a bare index.
+
+  A row shorter than twenty columns is padded with the empty tile, and that is
+  an allowance for editors rather than looseness: most strip trailing spaces on
+  save, and refusing what an editor silently did would be a fight nobody wins.
+  A missing *row* is refused -- there is no editor that eats lines.
+  """
+  @spec room!(atom(), String.t(), map(), %{atom() => non_neg_integer()}) :: binary()
+  def room!(name, ascii, mapping, tiles) do
+    unless is_map(mapping) do
+      raise CompileError, """
+      the room #{inspect(name)}'s tiles are a map from character to tile:
+
+          room #{inspect(name)}, "…", tiles: %{?# => :wall, ?~ => 0}
+      """
+    end
+
+    rows =
+      case ascii |> String.split("\n") |> Enum.reverse() do
+        ["" | rest] -> Enum.reverse(rest)
+        rest -> Enum.reverse(rest)
+      end
+
+    unless length(rows) == @room_h do
+      raise CompileError, """
+      the room #{inspect(name)} is #{length(rows)} rows tall, and a screen is #{@room_h}.
+
+      A room is exactly what the panel shows: #{@room_w} columns by #{@room_h} \
+      rows. Rows may run short -- editors strip trailing spaces -- but every one \
+      of the eighteen has to be there.
+      """
+    end
+
+    for {row, y} <- Enum.with_index(rows), into: <<>> do
+      length = String.length(row)
+
+      if length > @room_w do
+        raise CompileError, """
+        the room #{inspect(name)}'s row #{y} is #{length} columns wide, and a \
+        screen is #{@room_w}.
+        """
+      end
+
+      padded = String.pad_trailing(row, @room_w)
+
+      for <<character::utf8 <- padded>>, into: <<>> do
+        <<cell!(character, {name, y}, mapping, tiles)>>
+      end
+    end
+  end
+
+  # A space is the empty tile the init already filled the map with -- the same
+  # bargain `text` strikes -- so the unmarked parts of a drawing cost nothing
+  # to say.
+  defp cell!(?\s, _where, _mapping, _tiles), do: 1
+
+  defp cell!(character, {name, y}, mapping, tiles) do
+    case Map.fetch(mapping, character) do
+      {:ok, index} when is_integer(index) and index in 0..255 ->
+        index
+
+      {:ok, tile} when is_atom(tile) ->
+        case Map.fetch(tiles, tile) do
+          {:ok, index} ->
+            Runtime.art_base() + index
+
+          :error ->
+            known = tiles |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+
+            raise CompileError, """
+            the room #{inspect(name)} maps #{inspect(<<character::utf8>>)} to \
+            #{inspect(tile)}, and no tile is named that.
+
+            #{if known == "", do: "This game declares no tiles.", else: "The ones it has: #{known}."}
+            """
+        end
+
+      {:ok, other} ->
+        raise CompileError, """
+        the room #{inspect(name)} maps #{inspect(<<character::utf8>>)} to \
+        #{inspect(other)} -- a tile is a name from the sheet or an index from 0 \
+        to 255.
+        """
+
+      :error ->
+        raise CompileError, """
+        the room #{inspect(name)} draws #{inspect(<<character::utf8>>)} on row \
+        #{y}, and the mapping does not say which tile that is.
+
+        A space is the empty tile without being declared; everything else is \
+        named:
+
+            room #{inspect(name)}, "…", tiles: %{?#{<<character::utf8>>} => :wall}
+        """
+    end
+  end
 
   defp note!(name, statement) do
     case Map.fetch(@notes, name) do

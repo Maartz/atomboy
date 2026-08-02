@@ -837,6 +837,111 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # Two screens and a walker between them. The drawings are built in module
+  # attributes -- which also exercises the road a room's ascii travels: kept as
+  # a tree, compiled in `__before_compile__` where the attribute is written.
+  defmodule TwoRooms do
+    @moduledoc false
+    use Potion
+
+    @walls ([String.duplicate("#", 20)] ++
+              List.duplicate("#" <> String.duplicate(" ", 18) <> "#", 16) ++
+              [String.duplicate("#", 20)])
+           |> Enum.join("\n")
+
+    @open ([String.duplicate(" ", 20)] ++
+             List.duplicate(" " <> String.duplicate(" ", 18) <> " ", 16) ++
+             [String.duplicate("#", 20)])
+          |> Enum.join("\n")
+
+    room :west, @walls, tiles: %{?# => 0}
+    room :east, @open, tiles: %{?# => 0}
+
+    defactor :walker do
+      variables t: 0
+
+      every_frame do
+        t = t + 1
+        if t == 3, do: show(:west)
+        if t == 10, do: show(:east)
+      end
+    end
+  end
+
+  describe "a room" do
+    # The background map read back out of the emulator: the border is the solid
+    # tile, the inside is the empty one, and -- the part a naive copy gets wrong
+    # -- the twelve columns the panel never shows are untouched. The map is 32
+    # wide and a room is 20; a copy without the stride smears every row twelve
+    # cells into the next.
+    test "it is painted onto the map, twenty columns of it and no more" do
+      # Eight frames, not six: the walker says `show` on its turn at frame six,
+      # and the copy is longer than what is left of that frame -- the emulator
+      # cuts at the frame boundary and finishes the copy in the next one.
+      {_pixels, _state, ram} = run_frames(TwoRooms, 8)
+
+      assert Map.get(ram, 0x9800) == 0, "the top-left corner is not the wall"
+      assert Map.get(ram, 0x9800 + 19) == 0, "the top-right corner is not the wall"
+      assert Map.get(ram, 0x9800 + 32 + 1) == 1, "the inside is not the empty tile"
+      assert Map.get(ram, 0x9800 + 17 * 32) == 0, "the bottom row is not the wall"
+      assert Map.get(ram, 0x9800 + 20) == 1, "the copy ran into the columns nobody sees"
+    end
+
+    test "the panel is switched back on when the copy is done" do
+      {_pixels, _state, ram} = run_frames(TwoRooms, 8)
+
+      assert Map.get(ram, 0xFF40) == 0x93
+    end
+
+    # The point of the whole feature: the screen changes while the console runs.
+    # The walls of the first room are gone, the floor of the second is there,
+    # and the walker's cell went on counting through the swap.
+    test "showing another room changes the screen, and the game keeps running" do
+      addresses = TwoRooms.addresses()
+      {_pixels, _state, ram} = run_frames(TwoRooms, 16)
+
+      assert Map.get(ram, 0x9800) == 1, "the west room's wall survived the move east"
+      assert Map.get(ram, 0x9800 + 17 * 32) == 0, "the east room's floor is missing"
+      assert Map.get(ram, addresses.t) > 10, "the walker stopped counting"
+    end
+
+    test "a drawing that is not a screen is refused, by its numbers" do
+      assert_raise Potion.CompileError, ~r/3 rows tall, and a screen is 18/, fn ->
+        Potion.Compiler.room!(:r, "##\n##\n##", %{?# => 0}, %{})
+      end
+
+      wide = List.duplicate(String.duplicate("#", 21), 18) |> Enum.join("\n")
+
+      assert_raise Potion.CompileError, ~r/21 columns wide, and a screen is 20/, fn ->
+        Potion.Compiler.room!(:r, wide, %{?# => 0}, %{})
+      end
+    end
+
+    test "a character the mapping does not name is refused, at its row" do
+      ascii = List.duplicate("~", 18) |> Enum.join("\n")
+
+      assert_raise Potion.CompileError, ~r/draws "~" on row 0/, fn ->
+        Potion.Compiler.room!(:r, ascii, %{}, %{})
+      end
+    end
+
+    test "a tile name the sheet does not have is refused, with the ones it has" do
+      ascii = List.duplicate("#", 18) |> Enum.join("\n")
+
+      assert_raise Potion.CompileError, ~r/no tile is named that.*:ball/s, fn ->
+        Potion.Compiler.room!(:r, ascii, %{?# => :wall}, %{ball: 0})
+      end
+    end
+
+    test "a room nobody drew is refused, with the ones there are" do
+      allocation = %{Potion.Compiler.allocate(x: 0) | rooms: MapSet.new([:west, :east])}
+
+      assert_raise Potion.CompileError, ~r/no room is called :north.*:east, :west/s, fn ->
+        Potion.Compiler.compile({:show, [], [:north]}, allocation)
+      end
+    end
+  end
+
   describe "a motif reused" do
     # The whole point of evaluating the notation instead of pattern-matching it:
     # Elixir is already the pattern language. Two modules, one saying the phrase

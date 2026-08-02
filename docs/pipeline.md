@@ -230,6 +230,15 @@ compile time, and `:a4` is `2048 - 131072/440`. The envelope is what makes four
 writes enough: the channel starts at full volume and steps down on its own, so
 the sound ends without the game coming back to end it.
 
+**A screen.** `room :cave, @drawing, tiles: %{?# => :wall}` turns twenty
+columns by eighteen rows of ASCII into 360 bytes of tile indices, compiled in
+`__before_compile__` like a tune so the drawing may live in a module attribute.
+`show(:cave)` is a load of HL and a call: the kernel switches the panel off,
+copies the bytes into the background map — skipping the twelve columns nobody
+sees — and switches it back on. One dark frame, which is what a room change has
+always looked like, and the honest alternative to writes the scanning PPU would
+drop.
+
 **A word.** `text(3, 7, "PRESS START")` becomes eleven `LD` pairs, one a square,
 at compile time. There is no string at run time — there are letters that were
 already decided. A space is not a glyph but tile 1, the empty tile the init
