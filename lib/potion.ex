@@ -140,6 +140,7 @@ defmodule Potion do
       if negative?(vx), do: …            the sign bit, which ordering cannot ask about
       if y > 140, do: …                  == != < > <= >=, against a literal or a cell
       if a and b, do: …                  `and` is free, `or` costs one jump
+      if touching?(:wall, x, y), do: …   which tile of the room the pixel is on
       if going_down == 1, do: …, else: … two sentences instead of one
       if pressed?(:a) do … end           a block, several statements
 

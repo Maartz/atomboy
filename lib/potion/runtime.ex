@@ -166,6 +166,11 @@ defmodule Potion.Runtime do
   # players read it on every note.
   @tune_env 0xC0BB
 
+  # Where the current room's bytes live in ROM -- `show` writes it, `touching?`
+  # reads it -- and the tile a `touching?` is asking about.
+  @current_room 0xC0BC
+  @probe 0xC0BE
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -697,6 +702,14 @@ defmodule Potion.Runtime do
   @spec env_cell() :: non_neg_integer()
   def env_cell, do: @tune_env
 
+  @doc "The pointer to the room `show` last painted; zero until one has been."
+  @spec room_cell() :: non_neg_integer()
+  def room_cell, do: @current_room
+
+  @doc "The tile index a `touching?` is asking about, written by its call site."
+  @spec probe_cell() :: non_neg_integer()
+  def probe_cell, do: @probe
+
   @doc """
   The two wobble tables, sixteen signed frames each.
 
@@ -764,7 +777,7 @@ defmodule Potion.Runtime do
       voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave) ++
       vibrato(:vibrato_lead, @lead_pitch, @lead_phase, {@nr13, @nr14}) ++
       vibrato(:vibrato_harmony, @harm_pitch, @harm_phase, {@nr23, @nr24}) ++
-      show_room()
+      show_room() ++ touching()
   end
 
   defp voice(label, {tune, tune_base, tune_wait}, kind) do
@@ -920,6 +933,13 @@ defmodule Potion.Runtime do
   defp show_room do
     [
       {:label, :show_room},
+      # The room being shown becomes the room being *in*: `touching?` reads its
+      # bytes from ROM rather than from the map, so what a `text` or a
+      # `background` scribbles over the picture never becomes an obstacle.
+      {:ld, :a, :l},
+      {:ld, {:mem, @current_room}, :a},
+      {:ld, :a, :h},
+      {:ld, {:mem, @current_room + 1}, :a},
       {:xor, :a, :a},
       {:ldh, {:high, @lcdc}, :a},
       {:ld, :de, @background},
@@ -943,6 +963,61 @@ defmodule Potion.Runtime do
       {:jr, :nz, {:label, :room_row}},
       {:ld, :a, @lcdc_on},
       {:ldh, {:high, @lcdc}, :a},
+      {:ret}
+    ]
+  end
+
+  # Which tile of the current room a screen pixel stands on, against the one
+  # the game asked about. A = y, C = x on entry; the probe cell holds the tile;
+  # Z comes back set when they match.
+  #
+  # The room in ROM is 20 bytes a row -- packed, unlike the 32-wide map -- so
+  # the cell is `base + (y/8) * 20 + x/8`. Twenty is sixteen plus four, two
+  # runs of doublings and an add; the product reaches 340 and lives in HL.
+  #
+  # Before any room has been shown the pointer is the zero the init left, and
+  # the answer is "touching nothing": flags forced to NZ and out. A game that
+  # asks before it shows gets a walkable void, not a wall of accidents.
+  defp touching do
+    [
+      {:label, :touching},
+      {:ld, :b, :a},
+      {:ld, :a, {:mem, @current_room}},
+      {:ld, :l, :a},
+      {:ld, :a, {:mem, @current_room + 1}},
+      {:ld, :h, :a},
+      {:or, :a, :l},
+      {:jr, :nz, {:label, :touch_room}},
+      {:or, :a, 1},
+      {:ret},
+      {:label, :touch_room},
+      {:push, :hl},
+      {:ld, :a, :b},
+      {:srl, :a},
+      {:srl, :a},
+      {:srl, :a},
+      {:ld, :l, :a},
+      {:ld, :h, 0},
+      {:add, :hl, :hl},
+      {:add, :hl, :hl},
+      {:ld, :d, :h},
+      {:ld, :e, :l},
+      {:add, :hl, :hl},
+      {:add, :hl, :hl},
+      {:add, :hl, :de},
+      {:ld, :a, :c},
+      {:srl, :a},
+      {:srl, :a},
+      {:srl, :a},
+      {:ld, :c, :a},
+      {:ld, :b, 0},
+      {:add, :hl, :bc},
+      {:pop, :de},
+      {:add, :hl, :de},
+      {:ld, :a, {:mem, :hl}},
+      {:ld, :b, :a},
+      {:ld, :a, {:mem, @probe}},
+      {:cp, :a, :b},
       {:ret}
     ]
   end

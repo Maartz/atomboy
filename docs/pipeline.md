@@ -237,7 +237,10 @@ columns by eighteen rows of ASCII into 360 bytes of tile indices, compiled in
 copies the bytes into the background map — skipping the twelve columns nobody
 sees — and switches it back on. One dark frame, which is what a room change has
 always looked like, and the honest alternative to writes the scanning PPU would
-drop.
+drop. `show` also remembers which room it painted, and `touching?(:wall, x, y)`
+asks which tile of *that room's ROM bytes* a pixel stands on — never the map,
+so nothing a `text` scribbled over the picture becomes an obstacle, and the PPU's
+lock on VRAM never enters into it.
 
 **A word.** `text(3, 7, "PRESS START")` becomes eleven `LD` pairs, one a square,
 at compile time. There is no string at run time — there are letters that were

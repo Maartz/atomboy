@@ -6,10 +6,10 @@
 # moves the square, and walking off the right edge of the meadow puts you in
 # the cave, off the left edge of the cave back in the meadow.
 #
-# This is the smallest game that changes screens, and it is honest about what
-# it does not do: the walls are painted, not solid. Walking through them works
-# fine, because collision is reading the map back and the language does not
-# read the map yet. That is the next piece, and this file is where it will show.
+# This is the smallest game that changes screens -- and now the walls are
+# solid. A step is taken and then unmade if any corner of the square stands on
+# a wall tile: the old position is cheaper to keep than the collision is to
+# predict, which is how most games this size did it.
 
 defmodule Walk do
   use Potion
@@ -19,18 +19,21 @@ defmodule Walk do
   @top String.duplicate("#", 20)
   @side "#" <> String.duplicate(" ", 18) <> "#"
 
+  # The doors are two tiles tall, and that is walkability rather than looks: the
+  # walker is eight pixels and a tile is eight pixels, so a one-tile door would
+  # want pixel-perfect alignment to pass -- a wall that pretends to be a door.
   @meadow ([@top] ++
              List.duplicate(@side, 7) ++
-             ["#" <> String.duplicate(" ", 19)] ++
-             List.duplicate(@side, 8) ++
+             List.duplicate("#" <> String.duplicate(" ", 19), 2) ++
+             List.duplicate(@side, 7) ++
              [@top])
           |> Enum.join("\n")
 
   @cave ([@top] ++
            List.duplicate(@side, 7) ++
-           [String.duplicate(" ", 19) <> "#"] ++
+           List.duplicate(String.duplicate(" ", 19) <> "#", 2) ++
            ["#   ###  ###  ###  #"] ++
-           List.duplicate(@side, 7) ++
+           List.duplicate(@side, 6) ++
            [@top])
         |> Enum.join("\n")
 
@@ -38,7 +41,7 @@ defmodule Walk do
   room :cave, @cave, tiles: %{?# => 0}
 
   defactor :walker do
-    variables x: 80, y: 72, arrived: 0
+    variables x: 80, y: 72, ox: 80, oy: 72, x7: 0, y7: 0, arrived: 0
 
     every_frame do
       # The first turn paints the first screen. An actor has no startup — the
@@ -49,11 +52,22 @@ defmodule Walk do
         show(:meadow)
       end
 
+      # The position before the step, kept so the step can be unmade. Cheaper
+      # than predicting: one wrong frame of position that nobody ever sees,
+      # against four look-aheads per direction.
+      ox = x
+      oy = y
+
       if pressed?(:right), do: x = x + 1
       if pressed?(:left), do: x = x - 1
       if pressed?(:up), do: y = y - 1
       if pressed?(:down), do: y = y + 1
 
+      # The doors come *before* the walls, and the order is load-bearing. One
+      # step past the threshold the far corner is off the screen, and
+      # `touching?` answers about whatever cell its arithmetic lands on -- a
+      # wall, as it happens. Cross first, and the collision below only ever
+      # sees on-screen pixels.
       # The edges are doors. Crossing one shows the other room and carries the
       # walker to its far side — the position survives the move because cells
       # are WRAM and a room only rewrites the background map.
@@ -65,6 +79,19 @@ defmodule Walk do
       if x < 8 do
         show(:meadow)
         x = 152
+      end
+
+      # The square is eight pixels wide, so a wall is hit by whichever corner
+      # reaches it first. `touching?` asks about one pixel; the corners are
+      # four questions joined with `or`, which costs what the nested ifs it
+      # replaces would have.
+      x7 = x + 7
+      y7 = y + 7
+
+      if touching?(0, x, y) or touching?(0, x7, y) or touching?(0, x, y7) or
+           touching?(0, x7, y7) do
+        x = ox
+        y = oy
       end
 
       sprite(0, x: x, y: y, tile: 0)

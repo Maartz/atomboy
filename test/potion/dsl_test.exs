@@ -868,6 +868,126 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A walled room and a walker pressed against it, for the collision. The same
+  # border both fixtures use, plus a fixture with no room at all -- the case
+  # where `touching?` has nothing to stand on.
+  defmodule Bumper do
+    @moduledoc false
+    use Potion
+
+    @walls ([String.duplicate("#", 20)] ++
+              List.duplicate("#" <> String.duplicate(" ", 18) <> "#", 16) ++
+              [String.duplicate("#", 20)])
+           |> Enum.join("\n")
+
+    room :box, @walls, tiles: %{?# => 0}
+
+    defactor :walker do
+      variables x: 80, y: 72, ox: 80, oy: 72, x7: 0, y7: 0, arrived: 0
+
+      every_frame do
+        if arrived == 0 do
+          arrived = 1
+          show(:box)
+        end
+
+        ox = x
+        oy = y
+
+        if pressed?(:right), do: x = x + 1
+        if pressed?(:up), do: y = y - 1
+
+        x7 = x + 7
+        y7 = y + 7
+
+        if touching?(0, x, y) or touching?(0, x7, y) or touching?(0, x, y7) or
+             touching?(0, x7, y7) do
+          x = ox
+          y = oy
+        end
+
+        sprite(0, x: x, y: y, tile: 0)
+      end
+    end
+  end
+
+  defmodule Roomless do
+    @moduledoc false
+    use Potion
+
+    defactor :walker do
+      variables x: 80, ox: 80
+
+      every_frame do
+        ox = x
+        if pressed?(:right), do: x = x + 1
+        if touching?(0, x, 72), do: x = ox
+        sprite(0, x: x, y: 72, tile: 0)
+      end
+    end
+  end
+
+  describe "a wall" do
+    # The wall stops the walker at the pixel the arithmetic says: the right wall
+    # is column 19, so the walker's far edge x+7 may reach 151 and x sticks at
+    # 144. An off-by-one in the divide, the times-twenty or the corner offsets
+    # lands somewhere else and this number moves.
+    test "the walker stops against it, at the exact pixel" do
+      {_pixels, state, ram} = run_frames(Bumper, 8)
+
+      {_state, ram} = frames(Bumper, state, Joypad.set(ram, @right, @released), 90)
+
+      assert Map.get(ram, Bumper.addresses().x) == 144
+    end
+
+    test "and against the ceiling" do
+      {_pixels, state, ram} = run_frames(Bumper, 8)
+
+      {_state, ram} = frames(Bumper, state, Joypad.set(ram, @up, @released), 90)
+
+      assert Map.get(ram, Bumper.addresses().y) == 8
+    end
+
+    # Before any room has been shown the pointer holds the zero the init left,
+    # and `touching?` answers "nothing" -- a walkable void, not a wall of
+    # accidents. A game that asks too early walks free rather than freezing.
+    test "no room means no walls" do
+      {_pixels, state, ram} = run_frames(Roomless, 8)
+
+      {_state, ram} = frames(Roomless, state, Joypad.set(ram, @right, @released), 90)
+
+      assert Map.get(ram, Roomless.addresses().x) > 160
+    end
+
+    test "the question compiles to the kernel's arithmetic, not its own" do
+      allocation = %{Potion.Compiler.allocate(x: 0, y: 0, hit: 0) | rooms: MapSet.new([:box])}
+
+      body =
+        {:if, [],
+         [
+           {:touching?, [], [0, {:x, [], nil}, {:y, [], nil}]},
+           [do: {:=, [], [{:hit, [], nil}, 1]}]
+         ]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:call, {:label, :touching}} in elements
+      assert {:ld, {:mem, Potion.Runtime.probe_cell()}, :a} in elements
+    end
+
+    test "a tile the sheet does not have is refused here too" do
+      allocation = Potion.Compiler.allocate(x: 0, hit: 0)
+
+      body =
+        {:if, [],
+         [{:touching?, [], [:ghost, {:x, [], nil}, 40]}, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      assert_raise Potion.CompileError, ~r/no tile is named :ghost/, fn ->
+        Potion.Compiler.compile(body, allocation)
+      end
+    end
+  end
+
   describe "a room" do
     # The background map read back out of the emulator: the border is the solid
     # tile, the inside is the empty one, and -- the part a naive copy gets wrong

@@ -1591,6 +1591,28 @@ defmodule Potion.Compiler do
      ], counter}
   end
 
+  # `touching?(:wall, x, y)`: which tile of the current room the pixel (x, y)
+  # stands on, against the one named. The kernel does the arithmetic -- room
+  # bytes are read from ROM, not from the map, so nothing a `text` scribbled
+  # becomes an obstacle -- and answers in the Z flag, which makes this exactly
+  # the shape `pressed?` already has.
+  #
+  # The pixel is taken to be on screen. Off it, the arithmetic lands on some
+  # other cell of the room and answers about that -- there is no room in a
+  # frame to range-check what the game can keep in bounds itself.
+  defp condition!({:touching?, _, [tile, x, y]}, otherwise, allocation, statement, counter) do
+    index = tile!(tile, allocation, statement)
+
+    {[{:ld, :a, index}, {:ld, {:mem, Runtime.probe_cell()}, :a}] ++
+       sprite_value(x, 0, allocation, statement) ++
+       [{:ld, :c, :a}] ++
+       sprite_value(y, 0, allocation, statement) ++
+       [
+         {:call, {:label, :touching}},
+         {:jp, :nz, {:label, otherwise}}
+       ], counter}
+  end
+
   defp condition!({op, _, [left, right]}, otherwise, allocation, statement, counter)
        when op in [:==, :!=, :<, :>, :<=, :>=] do
     if op in [:<, :>, :<=, :>=], do: unsigned!(right, statement)
