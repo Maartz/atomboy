@@ -3,7 +3,10 @@ defmodule Potion.Music do
   A tune, written as a line of text and laid into the cartridge as bytes.
 
       music :theme, "c4 . e4 . g4 . c5 . . . - -"
-      music :theme, lead: "c4 . e4 . g4 .", bass: "c2 . . . g1 . . ."
+
+      music :theme,
+        [lead: "c4 . e4 . g4 .", harmony: "e3 . g3 . c4 .", bass: "c2 . . . g1 . . ."],
+        beat: 10, duty: :eighth, gap: 3
 
   Three kinds of token and nothing else:
 
@@ -33,11 +36,17 @@ defmodule Potion.Music do
   held note. So `c4 . . .` is one step of four beats, not four steps of one, and
   the channel is left alone for the whole of it.
 
-  That is also why music sits on channel 1 while `beep` sits on channel 2. A
-  tune wants a note that sustains — the envelope is set to a fixed volume and
-  never decays — and a sound effect wants one that dies on its own. They are
-  opposite settings of the same register, so they get a channel each and can
-  sound together.
+  ## Three voices, and the one that is shared
+
+  `lead:` is channel 1, `harmony:` channel 2, `bass:` the wave channel. A tune
+  wants notes that sustain — the envelope is a fixed volume that never decays —
+  which is the opposite of what `beep` asks of a channel.
+
+  And `beep` is on channel 2, so a sound effect takes the harmony's voice for as
+  long as it lasts and the harmony comes back at its next step. That is not a
+  clash to be fixed: it is what a Game Boy game sounds like, because the console
+  has four channels and a game has more than four things to say. Nothing
+  coordinates it — the next note simply writes over the effect.
   """
 
   @concert 440.0
@@ -68,7 +77,7 @@ defmodule Potion.Music do
               |> Enum.reject(fn {_name, x} -> x < 0 end)
               |> Map.new()
 
-  @voices [:lead, :bass]
+  @voices [:lead, :harmony, :bass]
 
   # The pulse's duty is what fraction of each period the wave is high, and it is
   # the difference between one square-wave instrument and another. Named by the
@@ -145,14 +154,15 @@ defmodule Potion.Music do
         raise Potion.CompileError, """
         the tune #{inspect(name)} has a voice called #{unknown |> hd() |> inspect()}.
 
-        There are two: `lead:` on channel 1 and `bass:` on the wave channel, \
-        which reaches an octave lower. A tune written as one line of text is the \
-        lead alone.
+        There are three: `lead:` on channel 1, `harmony:` on channel 2 and \
+        `bass:` on the wave channel, which reaches an octave lower. A tune \
+        written as one line of text is the lead alone.
         """
     end
 
     %{
       lead: voice!(Keyword.get(voices, :lead), name, @notes, beat, gap),
+      harmony: voice!(Keyword.get(voices, :harmony), name, @notes, beat, gap),
       bass: voice!(Keyword.get(voices, :bass), name, @wave_notes, beat, gap),
       duty: duty!(duty, name)
     }

@@ -29,6 +29,11 @@ defmodule Pong do
   # the sound a Game Boy lead usually has. At fifty percent it is a plain square
   # and sounds like a test tone.
   #
+  # The harmony is a third under the lead, on channel 2 — which `beep` also has.
+  # A sound effect therefore takes its voice for as long as it lasts and the
+  # harmony comes back at its next step. That is not a clash to fix: it is what
+  # four channels and more than four things to say sounds like.
+  #
   # `gap: 3` ends every note three frames early. That is the whole difference
   # between notes that run into one another and notes with a rhythm: without it
   # the channel is simply retriggered at each step and never stops, which is
@@ -36,6 +41,7 @@ defmodule Pong do
   music :attract,
         [
           lead: "c4 e4 g4 c5 . . g4 e4 c4 . . . - -",
+          harmony: "e3 g3 c4 e4 . . c4 g3 e3 . . . - -",
           bass: "c2 . . . g1 . . . c2 . . . - ."
         ],
         beat: 10,

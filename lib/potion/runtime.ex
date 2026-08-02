@@ -105,6 +105,11 @@ defmodule Potion.Runtime do
   @nr34 0x1E
   @wave 0xFF30
 
+  @nr21 0x16
+  @nr22 0x17
+  @nr23 0x18
+  @nr24 0x19
+
   @nr41 0x20
   @nr42 0x21
   @nr43 0x22
@@ -142,6 +147,11 @@ defmodule Potion.Runtime do
 
   # Which square the lead is: `play` writes it, the player reads it on every note.
   @tune_duty 0xC0AD
+
+  # The harmony, on channel 2 -- the same three cells a third time.
+  @harmony 0xC0AE
+  @harmony_base 0xC0B0
+  @harmony_wait 0xC0B2
 
   @state 0xC100
   @hram_dma 0xFF80
@@ -290,16 +300,16 @@ defmodule Potion.Runtime do
       art_data(art) ++
       Enum.flat_map(tunes, fn {name, voices} ->
         [{:label, :"potion_tune_#{name}"}, {:bytes, voices.lead}] ++
-          if voices.bass == <<>> do
-            []
-          else
-            [{:label, :"potion_bass_#{name}"}, {:bytes, voices.bass}]
-          end
+          bytes_for(:"potion_harmony_#{name}", voices.harmony) ++
+          bytes_for(:"potion_bass_#{name}", voices.bass)
       end) ++
       Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
         [{:label, actor_label(slot)}] ++ fragment
       end)
   end
+
+  defp bytes_for(_label, <<>>), do: []
+  defp bytes_for(label, bytes), do: [{:label, label}, {:bytes, bytes}]
 
   defp art_data(<<>>), do: []
   defp art_data(art), do: [{:label, :art_data}, {:bytes, art}]
@@ -656,6 +666,14 @@ defmodule Potion.Runtime do
   @spec duty_cell() :: non_neg_integer()
   def duty_cell, do: @tune_duty
 
+  @doc "The harmony's three, on channel 2 -- the one `beep` borrows."
+  @spec harmony_cells() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
+  def harmony_cells, do: {@harmony, @harmony_base, @harmony_wait}
+
+  @doc "Channel 2's four, which the harmony and `beep` share."
+  @spec pulse_two() :: {byte(), byte(), byte(), byte()}
+  def pulse_two, do: {@nr21, @nr22, @nr23, @nr24}
+
   @doc "The wave channel's registers: DAC, volume, frequency, trigger."
   @spec wave() :: {byte(), byte(), byte(), byte()}
   def wave, do: {@nr30, @nr32, @nr33, @nr34}
@@ -684,6 +702,7 @@ defmodule Potion.Runtime do
   # where it started, which is why a tune loops without saying so.
   defp play_music do
     voice(:play_music, {@tune, @tune_base, @tune_wait}, :pulse) ++
+      voice(:play_harmony, {@harmony, @harmony_base, @harmony_wait}, :pulse_two) ++
       voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave)
   end
 
@@ -760,6 +779,7 @@ defmodule Potion.Runtime do
   # register: take the volume to nothing, without triggering anything, so the
   # note already sounding stops rather than being replaced.
   defp hush(:pulse), do: [{:xor, :a, :a}, {:ldh, {:high, @nr12}, :a}]
+  defp hush(:pulse_two), do: [{:xor, :a, :a}, {:ldh, {:high, @nr22}, :a}]
   defp hush(:wave), do: [{:xor, :a, :a}, {:ldh, {:high, @nr32}, :a}]
 
   # A note. C holds the frequency's low byte and B its high byte with the
@@ -782,6 +802,24 @@ defmodule Potion.Runtime do
       {:ldh, {:high, @nr13}, :a},
       {:ld, :a, :b},
       {:ldh, {:high, @nr14}, :a},
+      {:ret}
+    ]
+  end
+
+  # Channel 2 is channel 1 without the sweep register, and it shares the duty
+  # the tune asked for -- two pulses in parallel thirds want the same instrument,
+  # and a harmony in a different one reads as a second melody rather than as
+  # thickness.
+  defp sound(:pulse_two) do
+    [
+      {:ld, :a, {:mem, @tune_duty}},
+      {:ldh, {:high, @nr21}, :a},
+      {:ld, :a, 0xF0},
+      {:ldh, {:high, @nr22}, :a},
+      {:ld, :a, :c},
+      {:ldh, {:high, @nr23}, :a},
+      {:ld, :a, :b},
+      {:ldh, {:high, @nr24}, :a},
       {:ret}
     ]
   end
@@ -1036,6 +1074,7 @@ defmodule Potion.Runtime do
       {:ld, {:mem, @flag}, :a},
       {:call, {:label, :read_pad}},
       {:call, {:label, :play_music}},
+      {:call, {:label, :play_harmony}},
       {:call, {:label, :play_bass}},
       calls,
       {:jr, {:label, :main_loop}}

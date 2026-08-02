@@ -940,30 +940,12 @@ defmodule Potion.Compiler do
   # loop -- the player, reaching a step of length zero, goes back to where the
   # base says it started.
   defp statement({:play, _, [name]} = statement, allocation, counter) when is_atom(name) do
-    {label, bass?, duty} = tune!(name, allocation, statement)
+    voices = tune!(name, allocation, statement)
 
-    lead =
-      [{:ld, :a, duty}, {:ld, {:mem, Runtime.duty_cell()}, :a}] ++
-        arm(Runtime.music_cells(), label)
-
-    bass =
-      if bass? do
-        arm(Runtime.bass_cells(), :"potion_bass_#{name}")
-      else
-        # A tune with no bass silences the wave channel rather than leaving
-        # whatever the last one was still running under it.
-        {tune, _base, _wait} = Runtime.bass_cells()
-        {_nr30, nr32, _nr33, _nr34} = Runtime.wave()
-
-        [
-          {:xor, :a, :a},
-          {:ld, {:mem, tune}, :a},
-          {:ld, {:mem, tune + 1}, :a},
-          {:ldh, {:high, nr32}, :a}
-        ]
-      end
-
-    {lead ++ bass, counter}
+    {[{:ld, :a, voices.duty}, {:ld, {:mem, Runtime.duty_cell()}, :a}] ++
+       arm(Runtime.music_cells(), :"potion_tune_#{name}") ++
+       start(voices.harmony?, Runtime.harmony_cells(), :"potion_harmony_#{name}", :pulse_two) ++
+       start(voices.bass?, Runtime.bass_cells(), :"potion_bass_#{name}", :wave), counter}
   end
 
   defp statement({:play, _, [other]} = statement, _allocation, _counter) do
@@ -981,18 +963,23 @@ defmodule Potion.Compiler do
   # taken down in the same breath so the note already sounding stops rather than
   # hanging on until something else triggers the channel.
   defp statement({:silence, _, []}, _allocation, counter) do
-    {tune, _base, _wait} = Runtime.music_cells()
-    {bass, _bass_base, _bass_wait} = Runtime.bass_cells()
+    {tune, _, _} = Runtime.music_cells()
+    {harmony, _, _} = Runtime.harmony_cells()
+    {bass, _, _} = Runtime.bass_cells()
     {_nr10, _nr11, nr12, _nr13, _nr14} = Runtime.pulse_one()
+    {_nr21, nr22, _nr23, _nr24} = Runtime.pulse_two()
     {_nr30, nr32, _nr33, _nr34} = Runtime.wave()
 
     {[
        {:xor, :a, :a},
        {:ld, {:mem, tune}, :a},
        {:ld, {:mem, tune + 1}, :a},
+       {:ld, {:mem, harmony}, :a},
+       {:ld, {:mem, harmony + 1}, :a},
        {:ld, {:mem, bass}, :a},
        {:ld, {:mem, bass + 1}, :a},
        {:ldh, {:high, nr12}, :a},
+       {:ldh, {:high, nr22}, :a},
        {:ldh, {:high, nr32}, :a}
      ], counter}
   end
@@ -1139,6 +1126,26 @@ defmodule Potion.Compiler do
 
   defp statement(other, _allocation, _counter), do: reject!(other)
 
+  # A voice the tune does not have is silenced rather than left alone: whatever
+  # the last tune put on that channel would otherwise go on sounding underneath
+  # this one.
+  defp start(true, cells, label, _kind), do: arm(cells, label)
+
+  defp start(false, {tune, _base, _wait}, _label, kind) do
+    register =
+      case kind do
+        :pulse_two -> elem(Runtime.pulse_two(), 1)
+        :wave -> elem(Runtime.wave(), 1)
+      end
+
+    [
+      {:xor, :a, :a},
+      {:ld, {:mem, tune}, :a},
+      {:ld, {:mem, tune + 1}, :a},
+      {:ldh, {:high, register}, :a}
+    ]
+  end
+
   defp arm({tune, base, wait}, label) do
     [
       {:ld, :hl, {:label, label}},
@@ -1158,8 +1165,7 @@ defmodule Potion.Compiler do
     tunes = Map.get(allocation, :tunes, %{})
 
     if Map.has_key?(tunes, name) do
-      {bass?, duty} = Map.fetch!(tunes, name)
-      {:"potion_tune_#{name}", bass?, duty}
+      Map.fetch!(tunes, name)
     else
       known = tunes |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
 

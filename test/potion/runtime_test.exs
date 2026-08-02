@@ -78,6 +78,7 @@ defmodule Potion.RuntimeTest do
       assert calls == [
                {:call, {:label, :read_pad}},
                {:call, {:label, :play_music}},
+               {:call, {:label, :play_harmony}},
                {:call, {:label, :play_bass}},
                {:call, {:label, :actor_0}},
                {:call, {:label, :actor_1}}

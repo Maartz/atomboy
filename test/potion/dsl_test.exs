@@ -804,7 +804,10 @@ defmodule Potion.DSLTest do
     @moduledoc false
     use Potion
 
-    music :song, [lead: "c5 e5 g5 c6", bass: "c2 . g1 ."], beat: 6, duty: :eighth
+    music :song,
+          [lead: "c5 e5 g5 c6", harmony: "e4 g4 c5 e5", bass: "c2 . g1 ."],
+          beat: 6,
+          duty: :eighth
 
     defactor :voice do
       variables t: 0
@@ -816,24 +819,63 @@ defmodule Potion.DSLTest do
     end
   end
 
-  describe "two voices" do
+  # A tune with a harmony, and a beep fired into the middle of it.
+  defmodule Interrupted do
+    @moduledoc false
+    use Potion
+
+    music :song, [lead: "c5 e5 g5 c6", harmony: "e4 g4 c5 e5"], beat: 6
+
+    defactor :voice do
+      variables t: 0
+
+      every_frame do
+        t = t + 1
+        if t == 3, do: play(:song)
+        if t == 12, do: beep(:c6)
+      end
+    end
+  end
+
+  describe "three voices" do
     # Each channel's frequency register is read back on its own, because the
     # mixed samples cannot say which channel a sound came from — and "both are
     # playing" is the only thing this feature claims.
-    test "the melody and the bass play at once, each on its own channel" do
+    test "the three play at once, each on its own channel" do
       heard = duet(Duet, 30)
 
       lead = heard |> Enum.map(&elem(&1, 0)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
-      bass = heard |> Enum.map(&elem(&1, 1)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+      bass = heard |> Enum.map(&elem(&1, 2)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
 
       notes = Potion.Music.notes()
       wave = Potion.Music.wave_notes()
 
+      harmony = heard |> Enum.map(&elem(&1, 1)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+
       assert lead == [notes[:c5], notes[:e5], notes[:g5], notes[:c6]]
+      assert harmony == [notes[:e4], notes[:g4], notes[:c5], notes[:e5]]
       assert bass == [wave[:c2], wave[:g1]]
 
-      together = Enum.count(heard, fn {l, b} -> l != 0 and b != 0 end)
-      assert together > 15, "the two voices barely overlapped: #{together} frames of 30"
+      together = Enum.count(heard, fn {l, h, b} -> l != 0 and h != 0 and b != 0 end)
+      assert together > 15, "the three voices barely overlapped: #{together} frames of 30"
+    end
+
+    # `beep` is on channel 2 and so is the harmony. A sound effect therefore
+    # takes the harmony's voice for as long as it lasts, and the harmony comes
+    # back at its next step. Nothing coordinates that — the next note writes over
+    # the effect — and it is what a Game Boy game sounds like: four channels and
+    # more than four things to say.
+    test "a sound effect borrows the harmony's channel and gives it back" do
+      rom = Beeper.rom()
+      _ = rom
+
+      heard = duet(Interrupted, 30)
+      notes = Potion.Music.notes()
+
+      channel_two = heard |> Enum.map(&elem(&1, 1)) |> Enum.dedup() |> Enum.reject(&(&1 == 0))
+
+      assert notes[:c6] in channel_two, "the beep never reached channel 2"
+      assert List.last(channel_two) != notes[:c6], "the harmony never came back"
     end
 
     # The wave channel counts its period twice as slowly, so the same note is a
@@ -859,7 +901,7 @@ defmodule Potion.DSLTest do
     end
   end
 
-  # The two frequency registers, frame by frame: channel 1's and channel 3's.
+  # The three frequency registers, frame by frame: channels 1, 2 and 3.
   defp duet(game, count) do
     rom = game.rom()
 
@@ -870,9 +912,10 @@ defmodule Potion.DSLTest do
           {_samples, ram, apu} = Atomboy.APU.frame(ram, apu)
 
           lead = Map.get(ram, 0xFF13, 0) + Bitwise.band(Map.get(ram, 0xFF14, 0), 0x07) * 256
+          harmony = Map.get(ram, 0xFF18, 0) + Bitwise.band(Map.get(ram, 0xFF19, 0), 0x07) * 256
           bass = Map.get(ram, 0xFF1D, 0) + Bitwise.band(Map.get(ram, 0xFF1E, 0), 0x07) * 256
 
-          {state, ram, apu, [{lead, bass} | acc]}
+          {state, ram, apu, [{lead, harmony, bass} | acc]}
       end)
 
     Enum.reverse(heard)
@@ -1774,6 +1817,7 @@ defmodule Potion.DSLTest do
       assert calls == [
                {:call, {:label, :read_pad}},
                {:call, {:label, :play_music}},
+               {:call, {:label, :play_harmony}},
                {:call, {:label, :play_bass}},
                {:call, {:label, :actor_0}},
                {:call, {:label, :actor_1}}
