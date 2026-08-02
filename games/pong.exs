@@ -23,7 +23,20 @@ defmodule Pong do
   # The title's tune, on channel 1 — `beep` has channel 2, so a paddle can be
   # struck over a bar without either cutting the other. It loops on its own: the
   # player reads a length of zero and goes back to the start.
-  music(:attract, "c4 . e4 . g4 . c5 . . . g4 . e4 . c4 . . . - -", beat: 9)
+  # The opening of the Ballad of the Wind Fish, as far as two voices reach: the
+  # lead climbing e4-g4-a4-c5, the bass walking a3-f3-d3-e3 underneath. The
+  # harmony and the percussion the original carries would want channels 2 and 4,
+  # which `beep` and `noise` have.
+  #
+  # The two are the same number of beats on purpose. Each loops on its own
+  # terminator, so a lead of eighteen against a bass of sixteen would slip a
+  # beat every time round and be a different tune by the fourth pass.
+  music :attract,
+        [
+          lead: "e4 . g4 . a4 . c5 . . . a4 . g4 . e4 . . . - -",
+          bass: "a3 . . . f3 . . . d3 . . . e3 . . . a3 . - -"
+        ],
+        beat: 10
 
   # ── The director ───────────────────────────────────────────────────────────
   #
