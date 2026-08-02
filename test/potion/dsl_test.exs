@@ -37,6 +37,8 @@ defmodule Potion.DSLTest do
   @left 0x0F - 0x02
   @up 0x0F - 0x04
   @down 0x0F - 0x08
+  @start_key 0x0F - 0x08
+  @a_key 0x0F - 0x01
 
   @start_x 80
   @start_y 72
@@ -80,6 +82,30 @@ defmodule Potion.DSLTest do
 
         sprite(1, x: width, y: 40, tile: 3)
         sprite(2, x: 100, y: height, tile: 0)
+      end
+    end
+  end
+
+  # A ball that falls, hits a floor and climbs back: the smallest game that
+  # cannot be written without comparisons. `going_down` is the direction, and
+  # the `else` is what makes it a direction rather than a one-way trip.
+  defmodule Bouncer do
+    @moduledoc false
+    use Potion
+
+    defactor :ball do
+      variables y: 60, going_down: 1
+
+      every_frame do
+        if going_down == 1 do
+          y = y + 2
+          if y > 100, do: going_down = 0
+        else
+          y = y - 2
+          if y < 20, do: going_down = 1
+        end
+
+        sprite(0, x: 80, y: y, tile: 0)
       end
     end
   end
@@ -187,19 +213,19 @@ defmodule Potion.DSLTest do
       program = Hero.program()
 
       assert is_list(program)
-      assert {:label, :actor} in program
+      assert {:label, :actor_0} in program
 
       addresses = Assembler.addresses(program, origin: 0x0150)
 
       assert addresses.init == 0x0150
-      assert Map.has_key?(addresses, :actor)
-      assert addresses.actor > addresses.main_loop
+      assert Map.has_key?(addresses, :actor_0)
+      assert addresses.actor_0 > addresses.main_loop
 
       # The compiler's labels, all prefixed: one per `if`, plus the one for the
       # installation.
-      assert Map.has_key?(addresses, :potion_installed)
+      assert Map.has_key?(addresses, :potion_0_installed)
 
-      for n <- 0..3, do: assert(Map.has_key?(addresses, :"potion_end_#{n}"))
+      for n <- 0..3, do: assert(Map.has_key?(addresses, :"potion_0_end_#{n}"))
 
       # And the fragment ends with the RET the kernel demands.
       assert List.last(program) == {:ret}
@@ -265,7 +291,1018 @@ defmodule Potion.DSLTest do
 
   # ══ The refusals, at compile time ════════════════════════════════════════════
 
+  # The same ball, but its step is a variable rather than a literal -- which is
+  # what `x = x + speed` buys, and what a Pong ball needs: a direction that is
+  # data, not two branches of code.
+  defmodule Drifter do
+    @moduledoc false
+    use Potion
+
+    defactor :ball do
+      variables x: 40, step: 3, limit: 120
+
+      every_frame do
+        x = x + step
+
+        if x >= limit, do: step = 0
+
+        sprite(0, x: x, y: 70, tile: 0)
+      end
+    end
+  end
+
+  # A ball that turns around: `vx` is a direction, and reversing it is the whole
+  # of a bounce. This is the one game that would not compile without the sign --
+  # the same `x = x + vx` has to walk both ways depending on a byte.
+  defmodule Rebound do
+    @moduledoc false
+    use Potion
+
+    defactor :ball do
+      variables x: 100, vx: 1, facing: 0
+
+      every_frame do
+        x = x + vx
+
+        if x > 120, do: vx = -vx
+        if x < 20, do: vx = -vx
+
+        if negative?(vx), do: facing = 1, else: facing = 0
+
+        sprite(0, x: x, y: 72, tile: 0)
+      end
+    end
+  end
+
+  # Two actors in one game: each with its own cells, its own sprite, its own
+  # pace. `follower` reads a cell `leader` wrote earlier in the same frame --
+  # which only means anything because the kernel calls the slots in declaration
+  # order, every frame, with nothing in between.
+  defmodule Pair do
+    @moduledoc false
+    use Potion
+
+    defactor :leader do
+      variables leader_x: 20
+
+      every_frame do
+        leader_x = leader_x + 1
+        sprite(0, x: leader_x, y: 40, tile: 0)
+      end
+    end
+
+    defactor :follower do
+      variables follower_x: 0
+
+      every_frame do
+        follower_x = leader_x - 8
+        sprite(1, x: follower_x, y: 60, tile: 0)
+      end
+    end
+  end
+
+  # A score on the background layer: no sprite, no OAM entry, just a square of
+  # the map pointed at a digit of the kernel's font.
+  defmodule Scoreboard do
+    @moduledoc false
+    use Potion
+
+    defactor :hud do
+      variables score: 0, wait: 0
+
+      every_frame do
+        wait = wait + 1
+
+        if wait == 4 do
+          wait = 0
+          score = score + 1
+        end
+
+        background(2, 1, digit: score)
+      end
+    end
+  end
+
+  # Five cells and five questions, between them every path an `and` or an `or`
+  # can take. Three of them are load-bearing and were not obvious:
+  #
+  #   * `or` where only the *left* side holds, which is the fall-through into
+  #     the body and the one shape this module had to invert a test for;
+  #   * `and` whose *second* test fails, which is the only case that notices an
+  #     `and` dropping its right operand — one whose first test fails is
+  #     satisfied by the first alone, and a compiler that forgot the rest of the
+  #     sentence would pass it;
+  #   * `and` whose first test fails, for the plain short circuit.
+  #
+  # The middle one is here because it was missing, and its absence was found by
+  # deleting the concatenation and watching every assertion still hold.
+  defmodule Gate do
+    @moduledoc false
+    use Potion
+
+    defactor :gate do
+      variables a: 5, b: 3, both: 0, right_only: 0, left_only: 0, neither: 0, half: 0
+
+      every_frame do
+        if a == 5 and b == 3, do: both = 1
+        if a == 9 or b == 3, do: right_only = 1
+        if a == 5 or b == 9, do: left_only = 1
+        if a == 9 and b == 3, do: neither = 1
+        if a == 5 and b == 9, do: half = 1
+      end
+    end
+  end
+
+  # A game with a drawing. `shades.png` is the four-shade fixture from
+  # `Potion.TilesTest`, two tiles wide, and the names are handed out in reading
+  # order — so `:bands` is tile 0 of the sheet and `:split` tile 1.
+  defmodule Painted do
+    @moduledoc false
+    use Potion
+
+    tiles(from: "fixtures/shades.png", names: [:bands, :split])
+
+    defactor :thing do
+      variables x: 40
+
+      every_frame do
+        sprite(0, x: x, y: 20, tile: :bands)
+        background(3, 4, tile: :split)
+      end
+    end
+  end
+
+  # Three screens and the two ways out of each: a key, and a count of frames.
+  # `seen` and `played` count entries rather than frames, so they are what says
+  # `on_enter` ran once per transition and not once per frame.
+  defmodule Screens do
+    @moduledoc false
+    use Potion
+
+    defactor :director do
+      variables step: 0, seen: 0, played: 0
+
+      state :title do
+        on_enter do
+          seen = seen + 1
+          text(5, 6, "PRESS START")
+        end
+
+        every_frame do
+          if pressed?(:start), do: become(:playing)
+        end
+      end
+
+      state :playing do
+        on_enter do
+          played = played + 1
+          step = 0
+        end
+
+        every_frame do
+          step = step + 1
+          if step == 3, do: fade(1)
+          if step == 6, do: fade(2)
+          if step >= 9, do: become(:title)
+        end
+      end
+    end
+  end
+
+  # One state that becomes itself. `become` sets the entry marker to a number no
+  # state answers to rather than leaving it alone, and this is the only shape
+  # that can tell: every other transition goes somewhere else, where the marker
+  # already differs and the entry would have run regardless.
+  defmodule Restart do
+    @moduledoc false
+    use Potion
+
+    defactor :thing do
+      variables entries: 0
+
+      state :only do
+        on_enter do
+          entries = entries + 1
+        end
+
+        every_frame do
+          if pressed?(:a), do: become(:only)
+        end
+      end
+    end
+  end
+
+  # One routine, called from two places that differ only in what they set first.
+  # That is Pong's collision in miniature: the callers set `input`, the routine
+  # reads it, and the parameter an argument would have carried is a cell — which
+  # is what an argument would have compiled to anyway.
+  defmodule Twice do
+    @moduledoc false
+    use Potion
+
+    defactor :thing do
+      variables input: 0, doubled: 0, calls: 0, left: 0, right: 0
+
+      routine :double do
+        doubled = input + input
+        calls = calls + 1
+      end
+
+      every_frame do
+        if left == 0 do
+          input = 3
+          double()
+          left = doubled
+        end
+
+        if right == 0 do
+          input = 5
+          double()
+          right = doubled
+        end
+      end
+    end
+  end
+
+  describe "a routine written once and called twice" do
+    test "both callers get the routine's work, on their own input" do
+      addresses = Twice.addresses()
+      {_pixels, _state, ram} = run_frames(Twice, 10)
+
+      assert Map.get(ram, addresses.left) == 6
+      assert Map.get(ram, addresses.right) == 10
+    end
+
+    # A `CALL` that never returned would run into whatever follows, and the
+    # counter says the block ran twice rather than once and fallen through, or
+    # twice on a frame that should have stopped after the first.
+    test "the routine returns, so the caller carries on" do
+      addresses = Twice.addresses()
+      {_pixels, _state, ram} = run_frames(Twice, 10)
+
+      assert Map.get(ram, addresses.calls) == 2
+    end
+
+    # A `CALL` pushes a return address that only the matching `RET` takes back,
+    # so routines calling each other in a circle would grow the stack by two
+    # bytes a lap until it reached the actor's own cells. The message names the
+    # circle, because a stack that has quietly walked into `x` is a crash a long
+    # way from its cause.
+    test "routines that call each other in a circle are refused, and the circle is named" do
+      error =
+        assert_raise Potion.CompileError, fn ->
+          Code.compile_string("""
+          defmodule Circular.Routines do
+            use Potion
+
+            defactor :thing do
+              variables x: 0
+
+              routine :one do
+                x = x + 1
+                two()
+              end
+
+              routine :two do
+                x = x + 1
+                one()
+              end
+
+              every_frame do
+                one()
+              end
+            end
+          end
+          """)
+        end
+
+      assert error.message =~ "circle"
+      assert error.message =~ ":one"
+      assert error.message =~ ":two"
+    end
+
+    test "a routine that was never declared is refused, with the ones that were" do
+      allocation = Potion.Compiler.allocate([x: 0], routines: [:bounce, :serve])
+
+      assert_raise Potion.CompileError, ~r/no routine is named :bonce.*:bounce, :serve/s, fn ->
+        Potion.Compiler.compile({:bonce, [], []}, allocation)
+      end
+    end
+
+    test "the block is in the ROM once, not once per call" do
+      program = Twice.program()
+
+      labels = Enum.filter(program, &match?({:label, :potion_0_do_double}, &1))
+      calls = Enum.filter(program, &match?({:call, {:label, :potion_0_do_double}}, &1))
+
+      assert length(labels) == 1
+      assert length(calls) == 2
+    end
+  end
+
+  describe "an actor made of states" do
+    test "becoming the state already running enters it again" do
+      addresses = Restart.addresses()
+      {_pixels, state, ram} = run_frames(Restart, 12)
+
+      assert Map.get(ram, addresses.entries) == 1
+
+      {_state, ram} = frames(Restart, state, Joypad.set(ram, @released, @a_key), 2)
+
+      assert Map.get(ram, addresses.entries) == 2
+    end
+
+    test "it wakes up in the first state, and enters it exactly once" do
+      addresses = Screens.addresses()
+      {_pixels, _state, ram} = run_frames(Screens, 20)
+
+      # Twenty frames in the title screen, one entry. Anything that ran
+      # `on_enter` per frame rather than per transition would read 18 here.
+      assert Map.get(ram, addresses.seen) == 1
+      assert Map.get(ram, addresses.played) == 0
+    end
+
+    test "a key changes the state, and the new one is entered" do
+      addresses = Screens.addresses()
+      {_pixels, state, ram} = run_frames(Screens, 5)
+
+      {_state, ram} = frames(Screens, state, Joypad.set(ram, @released, @start_key), 2)
+
+      assert Map.get(ram, addresses.played) == 1
+      assert Map.get(ram, addresses.seen) == 1
+    end
+
+    # The whole round trip: title, start, nine frames of play, and back to the
+    # title -- which has to be entered a second time. A machine that only ever
+    # entered a state once would pass every assertion above this one.
+    test "a state left and come back to is entered again" do
+      addresses = Screens.addresses()
+      {_pixels, state, ram} = run_frames(Screens, 5)
+
+      {state, ram} = frames(Screens, state, Joypad.set(ram, @released, @start_key), 2)
+      {_state, ram} = frames(Screens, state, Joypad.set(ram, @released, @released), 12)
+
+      assert Map.get(ram, addresses.played) == 1
+      assert Map.get(ram, addresses.seen) == 2
+    end
+
+    test "the fade rewrites the palette, and only once the count reaches it" do
+      {_pixels, state, ram} = run_frames(Screens, 5)
+      {state, ram} = frames(Screens, state, Joypad.set(ram, @released, @start_key), 2)
+
+      # Two frames into `playing`, the count has not reached the first step.
+      assert Map.get(ram, 0xFF47) == 0xE4
+
+      {_state, ram} = frames(Screens, state, Joypad.set(ram, @released, @released), 4)
+      assert Map.get(ram, 0xFF47) == 0xF9
+    end
+
+    # The title screen says PRESS START, painted in `on_enter`. Reading the map
+    # back is what says the characters became the right tiles: P is the
+    # sixteenth letter, the space is the empty tile the map was already full of,
+    # and both have to land on consecutive squares of row 6.
+    test "a string becomes tiles on the background map" do
+      {_pixels, _state, ram} = run_frames(Screens, 10)
+
+      row = 0x9800 + 6 * 32
+      written = for i <- 0..10, do: Map.get(ram, row + 5 + i)
+
+      alphabet = Potion.Runtime.alphabet()
+
+      assert written == [
+               alphabet + (?P - ?A),
+               alphabet + (?R - ?A),
+               alphabet + (?E - ?A),
+               alphabet + (?S - ?A),
+               alphabet + (?S - ?A),
+               1,
+               alphabet + (?S - ?A),
+               alphabet + (?T - ?A),
+               alphabet + (?A - ?A),
+               alphabet + (?R - ?A),
+               alphabet + (?T - ?A)
+             ]
+    end
+
+    # The glyph a letter points at has to be the letter, not merely a distinct
+    # number per character -- a mapping off by one would satisfy the test above
+    # and spell QSFTT TUBSU on the glass.
+    test "the tile a letter points at holds the letter's own bitmap" do
+      {_pixels, _state, ram} = run_frames(Screens, 10)
+
+      # P, the sixteenth letter: its sixteen bytes, read out of VRAM.
+      start = 0x8000 + (Potion.Runtime.alphabet() + (?P - ?A)) * 16
+      copied = for i <- 0..15, do: Map.get(ram, start + i, 0)
+
+      expected = binary_part(Potion.Runtime.letter_bytes(), (?P - ?A) * 16, 16)
+      assert :binary.list_to_bin(copied) == expected
+    end
+
+    test "the two cells the machine keeps are not in the game's own" do
+      # `addresses/0` is what a game sees, and it sees what it declared. The
+      # state and the entry marker are the compiler's, like the installed flag.
+      assert Map.keys(Screens.addresses()) |> Enum.sort() == [:played, :seen, :step]
+    end
+  end
+
+  describe "a drawing brought into the game" do
+    # The whole chain in one assertion: a PNG on disk, cut while this file
+    # compiled, laid into the cartridge, copied by the kernel's init, and read
+    # back out of the emulator's VRAM. Comparing against `Potion.Tiles` rather
+    # than against bytes written here is deliberate -- the two would have to be
+    # wrong the same way to agree, and the tile cutter has its own fixture.
+    test "the sheet is copied into VRAM at the base the kernel reserved" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      base = 0x8000 + Potion.Runtime.art_base() * 16
+      copied = for i <- 0..31, do: Map.get(ram, base + i, 0)
+
+      expected = Path.join(__DIR__, "fixtures/shades.png") |> Potion.Tiles.read!() |> Enum.join()
+
+      assert :binary.list_to_bin(copied) == expected
+    end
+
+    # The game says `:bands` and the OAM holds 12. Nothing in the source names
+    # that number, and nothing should: the kernel spoke for the first twelve
+    # tiles and a game has no reason to learn how many.
+    test "a name becomes the index the kernel left room for" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      [_y, _x, tile, _flags] = oam(ram, 0)
+      assert tile == Potion.Runtime.art_base()
+    end
+
+    test "the second tile of the sheet is the second name" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      # background(3, 4, tile: :split) -- the map is 32 wide.
+      assert Map.get(ram, 0x9800 + 4 * 32 + 3) == Potion.Runtime.art_base() + 1
+    end
+
+    # The assertion above compares the index against `art_base/0`, so it would
+    # hold just as well if that base moved down onto the digits. This one states
+    # what the base is actually for: after the sheet has been copied, the
+    # kernel's own font is still where it put it.
+    test "the drawing lands past the kernel's tiles rather than on top of them" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      # All ten digits and not just the first: a base one tile too low would
+      # leave the front of the font untouched and eat the back of it, and a
+      # single glyph checked at either end would have said nothing.
+      font = Potion.Runtime.font_bytes()
+      start = 0x8000 + Potion.Runtime.digits() * 16
+      copied = for i <- 0..(byte_size(font) - 1), do: Map.get(ram, start + i, 0)
+
+      assert :binary.list_to_bin(copied) == font
+    end
+
+    test "an unknown name is refused, and the message lists the ones there are" do
+      allocation = Potion.Compiler.allocate([x: 0], tiles: %{ball: 0, paddle: 1})
+      body = {:sprite, [], [0, [x: 8, y: 8, tile: :bal]]}
+
+      assert_raise Potion.CompileError, ~r/no tile is named :bal.*:ball, :paddle/s, fn ->
+        Potion.Compiler.compile(body, allocation)
+      end
+    end
+
+    test "a game with no drawing at all says so rather than listing nothing" do
+      allocation = Potion.Compiler.allocate(x: 0)
+      body = {:sprite, [], [0, [x: 8, y: 8, tile: :ball]]}
+
+      assert_raise Potion.CompileError, ~r/declares no tiles at all/, fn ->
+        Potion.Compiler.compile(body, allocation)
+      end
+    end
+  end
+
+  describe "`and` and `or`" do
+    test "every path through the two operators" do
+      addresses = Gate.addresses()
+      {_pixels, _state, ram} = run_frames(Gate, 10)
+
+      assert Map.get(ram, addresses.both) == 1, "`and` with both sides true"
+      assert Map.get(ram, addresses.right_only) == 1, "`or` where only the right side holds"
+      assert Map.get(ram, addresses.left_only) == 1, "`or` where only the left side holds"
+      assert Map.get(ram, addresses.neither) == 0, "`and` whose first test fails"
+      assert Map.get(ram, addresses.half) == 0, "`and` whose second test fails"
+    end
+
+    # The whole claim of `and`, and the reason it costs nothing: a condition
+    # already emits the jumps that leave when it is false, so two of them in a
+    # row leave when either is false. There is nothing to add and nothing to
+    # invert, and the proof is that the bytes do not move.
+    test "`and` is the nested ifs it replaces, byte for byte" do
+      allocation = Potion.Compiler.allocate(x: 0, y: 0, hit: 0)
+
+      assign = {:=, [], [{:hit, [], nil}, 1]}
+      left = {:<, [], [{:x, [], nil}, 5]}
+      right = {:>, [], [{:y, [], nil}, 3]}
+
+      joined = {:if, [], [{:and, [], [left, right]}, [do: assign]]}
+      nested = {:if, [], [left, [do: {:if, [], [right, [do: assign]]}]]}
+
+      bytes = fn tree ->
+        tree
+        |> Potion.Compiler.compile(allocation)
+        |> Potion.Runtime.program()
+        |> Potion.Assembler.assemble(origin: 0x0150)
+      end
+
+      assert bytes.(joined) == bytes.(nested)
+    end
+  end
+
+  describe "the flags a comparison reads" do
+    # `CP n` is a subtraction thrown away: Z if equal, C if A was the smaller.
+    # Every comparison is a choice of jumps over those two bits, and the choice
+    # is the whole semantics -- a played game does not always notice a wrong
+    # one. A ball stepping by two crosses `> 100` at 102 whether or not the
+    # equality is ruled out, so the boundary is stated here instead.
+    test "each comparison spells its own flag test" do
+      allocation = Potion.Compiler.allocate(x: 0, hit: 0)
+
+      conditions = fn operator ->
+        condition = {operator, [], [{:x, [], nil}, 5]}
+        body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+        body
+        |> Potion.Compiler.compile(allocation)
+        |> Enum.filter(fn
+          {_, _, {:label, :potion_installed}} -> false
+          {mnemonic, _, _} when mnemonic in [:jr, :jp] -> true
+          _ -> false
+        end)
+        |> Enum.map(&elem(&1, 1))
+      end
+
+      assert conditions.(:==) == [:nz]
+      assert conditions.(:!=) == [:z]
+      assert conditions.(:<) == [:nc]
+      assert conditions.(:>=) == [:c]
+
+      # Greater-than has to rule out equality as well as the borrow.
+      assert conditions.(:>) == [:c, :z]
+
+      # Less-or-equal is the only one that jumps *into* the body: "C or Z"
+      # cannot be said by jumping away from it.
+      assert conditions.(:<=) == [:c, :nz]
+    end
+
+    # The jumps that leave an `if` are absolute, and this is the reason. They
+    # were relative, which reaches 127 bytes, and Pong's ball walked off that
+    # cliff at 152: a collision, the offset it was struck at, and two ladders of
+    # four speeds. Nothing about that block is extravagant — but the failure it
+    # produced spoke of JR displacements, which is not a thing the author of a
+    # game has any reason to have heard of.
+    #
+    # Forty assignments at five bytes each put the label some two hundred bytes
+    # past the jump, which no relative jump can reach and every absolute one can.
+    test "an `if` block may be larger than a relative jump could reach" do
+      allocation = Potion.Compiler.allocate(x: 0, hit: 0)
+
+      statements = for value <- 1..40, do: {:=, [], [{:hit, [], nil}, rem(value, 256)]}
+      condition = {:>, [], [{:x, [], nil}, 5]}
+      body = {:if, [], [condition, [do: {:__block__, [], statements}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert is_binary(
+               Potion.Assembler.assemble(Potion.Runtime.program(elements), origin: 0x0150)
+             )
+    end
+
+    test "the comparison loads the variable it names" do
+      allocation = Potion.Compiler.allocate(x: 0, y: 0, hit: 0)
+      condition = {:>, [], [{:y, [], nil}, 140]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, {:mem, allocation.cells.y}} in elements
+      assert {:cp, :a, 140} in elements
+    end
+  end
+
+  describe "a game that compares" do
+    test "the ball falls, then turns round on its own" do
+      addresses = Bouncer.addresses()
+
+      # The actor runs from the third frame; 30 frames is 28 turns, enough to
+      # cover the 20 steps down to the floor and start back up.
+      {_pixels, _state, ram} = run_frames(Bouncer, 30)
+
+      assert Map.get(ram, addresses.going_down) == 0, "it should have bounced"
+      assert Map.get(ram, addresses.y) < 102
+    end
+
+    test "it never escapes the two walls it was given" do
+      rom = Bouncer.rom()
+      addresses = Bouncer.addresses()
+
+      # The first turns are dropped: the init leaves the page at zero, and a
+      # `y` that has not been laid down yet is not a position the game chose.
+      {_final, seen} =
+        Enum.reduce(1..120, {{Screen.boot_state(rom), Screen.boot_ram(rom)}, []}, fn n,
+                                                                                     {{state,
+                                                                                       ram},
+                                                                                      seen} ->
+          {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+          {{state, ram}, if(n > 4, do: [Map.get(ram, addresses.y) | seen], else: seen)}
+        end)
+
+      travelled = seen |> Enum.reject(&is_nil/1) |> Enum.uniq()
+
+      assert Enum.min(travelled) >= 18, "it went through the ceiling: #{Enum.min(travelled)}"
+      assert Enum.max(travelled) <= 102, "it went through the floor: #{Enum.max(travelled)}"
+
+      # A ball that never moved would also satisfy the two walls.
+      assert length(travelled) > 20, "it barely moved: #{inspect(travelled)}"
+    end
+
+    test "the sprite follows the variable, one turn behind" do
+      addresses = Bouncer.addresses()
+
+      # The DMA publishes the mirror at the vblank *after* the actor filled it,
+      # so the OAM always shows the previous turn's position. On a hero that
+      # only moves under your thumb the lag is invisible; on a ball that moves
+      # every frame it is the whole difference between right and nearly right.
+      {_pixels, state, ram} = run_frames(Bouncer, 29)
+      written = Map.get(ram, addresses.y)
+
+      {_state, ram} = frames(Bouncer, state, ram, 1)
+      [oam_y, oam_x, tile, flags] = oam(ram, 0)
+
+      assert oam_y == written + 16
+      assert oam_x == 80 + 8
+      assert {tile, flags} == {0, 0}
+    end
+  end
+
+  describe "a variable on the right-hand side" do
+    test "the ball advances by a step it reads from memory" do
+      addresses = Drifter.addresses()
+
+      # Three turns of the actor: 40, 43, 46.
+      {_pixels, _state, ram} = run_frames(Drifter, 5)
+
+      assert Map.get(ram, addresses.x) == 40 + 3 * 3
+      assert Map.get(ram, addresses.step) == 3
+    end
+
+    test "it stops where another variable says to, not where a literal does" do
+      {_pixels, _state, ram} = run_frames(Drifter, 60)
+      addresses = Drifter.addresses()
+
+      assert Map.get(ram, addresses.step) == 0, "it should have reached the limit"
+
+      x = Map.get(ram, addresses.x)
+      assert x >= 120 and x < 123, "it stopped at #{x}, not just past its limit"
+    end
+
+    test "the addition reaches the second variable through HL" do
+      allocation = Potion.Compiler.allocate(x: 0, step: 0)
+      body = {:=, [], [{:x, [], nil}, {:+, [], [{:x, [], nil}, {:step, [], nil}]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, {:mem, allocation.cells.x}} in elements
+      assert {:ld, :hl, allocation.cells.step} in elements
+      assert {:add, :a, {:mem, :hl}} in elements
+      assert {:ld, {:mem, allocation.cells.x}, :a} in elements
+    end
+
+    test "a comparison reaches it the same way" do
+      allocation = Potion.Compiler.allocate(x: 0, limit: 0, hit: 0)
+      condition = {:>=, [], [{:x, [], nil}, {:limit, [], nil}]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :hl, allocation.cells.limit} in elements
+      assert {:cp, :a, {:mem, :hl}} in elements
+    end
+
+    test "a literal still costs one instruction less" do
+      allocation = Potion.Compiler.allocate(x: 0)
+      body = {:=, [], [{:x, [], nil}, {:+, [], [{:x, [], nil}, 3]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:add, :a, 3} in elements
+      refute Enum.any?(elements, &match?({:ld, :hl, _}, &1))
+    end
+  end
+
+  describe "the sign" do
+    test "the ball walks forward, turns around, and walks back" do
+      addresses = Rebound.addresses()
+
+      # Three turns of the actor, all forward.
+      {_pixels, _state, ram} = run_frames(Rebound, 5)
+      assert Map.get(ram, addresses.x) == 103
+      assert Map.get(ram, addresses.vx) == 1
+
+      # Past 120 the direction is reversed, and `x = x + vx` -- the very same
+      # sentence -- now walks the other way. 121 was the far point, and by the
+      # 25th frame the ball has come back two steps.
+      {_pixels, _state, ram} = run_frames(Rebound, 25)
+      assert Map.get(ram, addresses.x) == 119
+      assert Map.get(ram, addresses.vx) == 0xFF, "vx should hold -1 in two's complement"
+    end
+
+    test "and turns around again at the other end, without ever leaving the court" do
+      # 19 is reached at the 125th frame, and reversed on the spot.
+      {_pixels, _state, ram} = run_frames(Rebound, 130)
+      addresses = Rebound.addresses()
+
+      assert Map.get(ram, addresses.x) == 24
+      assert Map.get(ram, addresses.vx) == 1
+
+      # The invariant the two bounces exist for: the ball never wraps past the
+      # walls. An unsigned `x = x + vx` would have run x through 0 to 255 on the
+      # first step back.
+      {_pixels, _state, ram} = run_frames(Rebound, 130)
+
+      x = Map.get(ram, addresses.x)
+      assert x in 19..121, "the ball left the court at #{x}"
+    end
+
+    test "`negative?` follows the sign bit, frame by frame" do
+      addresses = Rebound.addresses()
+
+      {_pixels, _state, ram} = run_frames(Rebound, 5)
+      assert Map.get(ram, addresses.facing) == 0
+
+      {_pixels, _state, ram} = run_frames(Rebound, 25)
+      assert Map.get(ram, addresses.facing) == 1
+    end
+
+    test "a negative literal is folded into its byte, not computed" do
+      allocation = Potion.Compiler.allocate(vx: 0)
+      body = {:=, [], [{:vx, [], nil}, {:-, [], [1]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, 0xFF} in elements
+      refute {:cpl} in elements
+    end
+
+    test "negating a variable is a flip and a step" do
+      allocation = Potion.Compiler.allocate(vx: 0)
+      body = {:=, [], [{:vx, [], nil}, {:-, [], [{:vx, [], nil}]}]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:cpl} in elements
+      assert {:inc, :a} in elements
+    end
+
+    test "`negative?` is one bit test, and the jump is over the body" do
+      allocation = Potion.Compiler.allocate(vx: 0, hit: 0)
+      condition = {:negative?, [], [{:vx, [], nil}]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, {:mem, allocation.cells.vx}} in elements
+      assert {:bit, 7, :a} in elements
+      assert Enum.any?(elements, &match?({:jp, :z, {:label, _}}, &1))
+      refute Enum.any?(elements, &match?({:cp, :a, _}, &1))
+    end
+
+    test "both ends of the byte are reachable, and neither one past" do
+      # -128 and 255 are the same 256 values read two ways, and a game is
+      # allowed to name either end: 0x80 is the largest step backwards, 0xFF
+      # the largest forwards. The boundary is stated because it is the one
+      # place a range can be off by one and still look right everywhere else.
+      assert Potion.Compiler.allocate(vx: -128).initial == %{vx: 0x80}
+      assert Potion.Compiler.allocate(vx: 255).initial == %{vx: 0xFF}
+
+      allocation = Potion.Compiler.allocate(vx: 0)
+
+      for {written, byte} <- [{{:-, [], [128]}, 0x80}, {255, 0xFF}] do
+        body = {:=, [], [{:vx, [], nil}, written]}
+        assert {:ld, :a, byte} in Potion.Compiler.compile(body, allocation)
+      end
+
+      for outside <- [{:-, [], [129]}, 256] do
+        body = {:=, [], [{:vx, [], nil}, outside]}
+
+        assert_raise Potion.CompileError, ~r/outside a byte/, fn ->
+          Potion.Compiler.compile(body, allocation)
+        end
+      end
+
+      for outside <- [-129, 256] do
+        assert_raise Potion.CompileError, ~r/initial value outside a byte/, fn ->
+          Potion.Compiler.allocate(vx: outside)
+        end
+      end
+    end
+
+    test "equality takes a negative literal, since it orders nothing" do
+      allocation = Potion.Compiler.allocate(vx: 0, hit: 0)
+      condition = {:==, [], [{:vx, [], nil}, {:-, [], [1]}]}
+      body = {:if, [], [condition, [do: {:=, [], [{:hit, [], nil}, 1]}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:cp, :a, 0xFF} in elements
+    end
+  end
+
+  describe "several actors" do
+    test "each one gets its own cells, side by side in the page" do
+      addresses = Pair.addresses()
+
+      assert addresses.leader_x == Potion.Runtime.actor_state()
+      # The leader takes a cell and its flag; the follower starts after both.
+      assert addresses.follower_x == Potion.Runtime.actor_state() + 2
+    end
+
+    test "both run every frame, and both draw" do
+      {_pixels, _state, ram} = run_frames(Pair, 8)
+      addresses = Pair.addresses()
+
+      leader = Map.get(ram, addresses.leader_x)
+      follower = Map.get(ram, addresses.follower_x)
+
+      assert leader > 20, "the leader has not moved"
+      assert follower == leader - 8, "the follower did not read this frame's value"
+
+      assert [_y, _x, 0, 0] = oam(ram, 0)
+      assert [_y2, _x2, 0, 0] = oam(ram, 1)
+    end
+
+    test "the order is the declaration order, and the follower sees the same frame" do
+      # If the kernel called them the other way round, the follower would be
+      # reading the leader's *previous* position and would trail by nine.
+      {_pixels, _state, ram} = run_frames(Pair, 12)
+      addresses = Pair.addresses()
+
+      assert Map.get(ram, addresses.follower_x) ==
+               Map.get(ram, addresses.leader_x) - 8
+    end
+
+    test "the kernel calls one slot per actor" do
+      program = Pair.program()
+
+      calls =
+        program
+        |> Enum.drop_while(&(&1 != {:label, :main_loop}))
+        |> Enum.take_while(&(&1 != {:label, :dma_source}))
+        |> Enum.filter(&match?({:call, _}, &1))
+
+      assert calls == [
+               {:call, {:label, :read_pad}},
+               {:call, {:label, :actor_0}},
+               {:call, {:label, :actor_1}}
+             ]
+    end
+
+    test "the two actors' labels do not collide" do
+      addresses = Assembler.addresses(Pair.program(), origin: 0x0150)
+
+      assert Map.has_key?(addresses, :potion_0_installed)
+      assert Map.has_key?(addresses, :potion_1_installed)
+      assert addresses.potion_0_installed != addresses.potion_1_installed
+    end
+  end
+
+  describe "the background layer" do
+    test "a square of the map points at the digit the game asked for" do
+      {_pixels, _state, ram} = run_frames(Scoreboard, 8)
+      addresses = Scoreboard.addresses()
+
+      score = Map.get(ram, addresses.score)
+      square = Potion.Runtime.background_address(2, 1)
+
+      assert Map.get(ram, square) == Potion.Runtime.digits() + score
+      assert score > 0, "the counter never advanced"
+    end
+
+    test "the digit is really drawn, and only where it was put" do
+      {pixels, _state, _ram} = run_frames(Scoreboard, 8, render: true)
+      lit = non_white(pixels)
+
+      # Column 2, row 1 of the map is the 8x8 square at (16, 8).
+      inside = MapSet.intersection(lit, box(16, 8))
+
+      assert MapSet.size(inside) > 8, "nothing was drawn in the square"
+      assert MapSet.subset?(lit, box(16, 8)), "ink outside the one square asked for"
+
+      # And in the same black as the sprite's solid tile. Both planes of the
+      # glyph carry the bitmap, which is colour 3; carrying only one would draw
+      # a legible but grey digit, and "non-white" would not notice.
+      shades =
+        for {x, y} <- inside, into: MapSet.new(), do: :binary.at(pixels, y * 160 + x)
+
+      assert shades == MapSet.new([3]), "the ink is not colour 3: #{inspect(shades)}"
+    end
+
+    test "the kernel's font sits behind its own two tiles" do
+      assert Potion.Runtime.digits() == 2
+      assert byte_size(Potion.Runtime.font_bytes()) == 10 * 16
+    end
+
+    test "a raw tile index goes in unchanged" do
+      allocation = Potion.Compiler.allocate(n: 0)
+      body = {:background, [], [0, 0, [tile: {:n, [], nil}]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+      square = Potion.Runtime.background_address(0, 0)
+
+      assert {:ld, :a, {:mem, allocation.cells.n}} in elements
+      assert {:ld, {:mem, square}, :a} in elements
+      refute Enum.any?(elements, &match?({:add, :a, _}, &1))
+    end
+
+    test "a digit adds the font's base, and a literal one folds at compile time" do
+      allocation = Potion.Compiler.allocate(n: 0)
+
+      variable =
+        Potion.Compiler.compile({:background, [], [0, 0, [digit: {:n, [], nil}]]}, allocation)
+
+      assert {:add, :a, Potion.Runtime.digits()} in variable
+
+      literal = Potion.Compiler.compile({:background, [], [0, 0, [digit: 7]]}, allocation)
+      assert {:ld, :a, Potion.Runtime.digits() + 7} in literal
+      refute Enum.any?(literal, &match?({:add, :a, _}, &1))
+    end
+  end
+
   describe "what the v0 refuses to compile" do
+    test "an ordering against a negative literal, which would never be taken" do
+      message =
+        reject!("Rejected.SignedOrdering", "variables vx: 1", "if vx < -1, do: vx = 1")
+
+      assert message =~ "ordering against a negative literal"
+      assert message =~ "negative?(vx)"
+      assert message =~ "never taken"
+    end
+
+    test "each of the four orderings refuses it, and neither equality does" do
+      for op <- ["<", ">", "<=", ">="] do
+        message =
+          reject!(
+            "Rejected.Ordering#{:erlang.phash2(op)}",
+            "variables vx: 1",
+            "if vx #{op} -1, do: vx = 1"
+          )
+
+        assert message =~ "ordering against a negative literal",
+               "`#{op}` let a negative literal through"
+      end
+
+      # `==` and `!=` compile, and the game they make is a real one: `vx` starts
+      # at -1, so the branch is taken on the first frame.
+      for op <- ["==", "!="] do
+        {[{module, _} | _], _stderr} =
+          ExUnit.CaptureIO.with_io(:stderr, fn ->
+            Code.compile_string("""
+            defmodule Accepted.Equality#{:erlang.phash2(op)} do
+              use Potion
+
+              defactor :sign do
+                variables vx: -1, hit: 0
+
+                every_frame do
+                  if vx #{op} -1, do: hit = 1
+                end
+              end
+            end
+            """)
+          end)
+
+        {_pixels, _state, ram} = run_frames(module, 5)
+
+        expected = if op == "==", do: 1, else: 0
+        assert Map.get(ram, module.addresses().hit) == expected
+      end
+    end
+
+    test "a literal below -128, which no byte holds either way" do
+      message = reject!("Rejected.TooNegative", "variables vx: 1", "vx = -129")
+
+      assert message =~ "outside a byte"
+      assert message =~ "-128 to 255"
+    end
+
+    test "an initial value below -128" do
+      message = reject!("Rejected.NegativeInitial", "variables vx: -129", "vx = 1")
+
+      assert message =~ "initial value outside a byte"
+      assert message =~ "-128 to 255"
+    end
+
+    test "`negative?` of something that is not a variable" do
+      message =
+        reject!("Rejected.SignOfLiteral", "variables vx: 1", "if negative?(3), do: vx = 1")
+
+      assert message =~ "condition outside the subset"
+      assert message =~ "negative?"
+    end
+
     test "an expression outside the subset" do
       message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
 
@@ -274,11 +1311,11 @@ defmodule Potion.DSLTest do
       assert message =~ "x = x + 1"
     end
 
-    test "an addition of two variables — the v0 has no register policy" do
-      message = reject!("Rejected.TwoVariables", "variables x: 1, y: 2", "x = x + y")
+    test "a computation nested inside another" do
+      message = reject!("Rejected.Nested", "variables x: 1, y: 2", "x = x + (y + 1)")
 
-      assert message =~ "outside the v0 subset"
-      assert message =~ "integer literal from 0 to 255"
+      assert message =~ "operand outside the subset"
+      assert message =~ "one operation per sentence"
     end
 
     test "an unknown key" do
@@ -304,20 +1341,22 @@ defmodule Potion.DSLTest do
       assert message =~ "undeclared variable: :z"
     end
 
-    test "two actors in the same module" do
+    test "two actors sharing a variable name" do
       source = """
-      defmodule Rejected.TwoActors do
+      defmodule Rejected.SharedName do
         use Potion
 
-        defactor :first do
+        defactor :left do
+          variables y: 10
           every_frame do
-            sprite(0, x: 10, y: 10, tile: 0)
+            sprite(0, x: 10, y: y, tile: 0)
           end
         end
 
-        defactor :second do
+        defactor :right do
+          variables y: 20
           every_frame do
-            sprite(1, x: 20, y: 20, tile: 0)
+            sprite(1, x: 150, y: y, tile: 0)
           end
         end
       end
@@ -325,9 +1364,48 @@ defmodule Potion.DSLTest do
 
       message = refuse_compile!(source)
 
-      assert message =~ "second actor"
-      assert message =~ ":second"
-      assert message =~ "has only one slot"
+      assert message =~ "already used by another actor"
+      assert message =~ ":left"
+      assert message =~ "left_y"
+    end
+
+    test "two actors with the same name" do
+      source = """
+      defmodule Rejected.SameActor do
+        use Potion
+
+        defactor :ball do
+          variables a: 1
+          every_frame do
+            a = a + 1
+          end
+        end
+
+        defactor :ball do
+          variables b: 1
+          every_frame do
+            b = b + 1
+          end
+        end
+      end
+      """
+
+      message = refuse_compile!(source)
+
+      assert message =~ "two actors called :ball"
+    end
+
+    test "a background square outside the map" do
+      message = reject!("Rejected.Square", "variables x: 1", "background(40, 0, tile: 0)")
+
+      assert message =~ "background square outside the map"
+      assert message =~ "32 by 32"
+    end
+
+    test "a background square with neither tile nor digit" do
+      message = reject!("Rejected.Field", "variables x: 1", "background(0, 0, colour: 3)")
+
+      assert message =~ "malformed `background`"
     end
 
     test "a sprite number outside the forty OAM entries" do
@@ -344,16 +1422,29 @@ defmodule Potion.DSLTest do
       assert message =~ "is not a literal"
     end
 
-    test "an `if` with a branch the v0 does not compile" do
+    test "a comparison against something that is neither variable nor byte" do
       message =
         reject!(
-          "Rejected.Else",
+          "Rejected.Comparand",
           "variables x: 1",
-          "if pressed?(:a), do: x = x + 1, else: x = x - 1"
+          "if x > (1 + 1), do: x = x + 1"
         )
 
-      assert message =~ "branch the v0 does not compile"
-      assert message =~ "else"
+      assert message =~ "operand outside the subset"
+    end
+
+    test "a comparison against a value outside a byte" do
+      message =
+        reject!("Rejected.TooBig", "variables x: 1", "if x > 300, do: x = x + 1")
+
+      assert message =~ "outside a byte"
+    end
+
+    test "a condition that is neither a key nor a comparison" do
+      message =
+        reject!("Rejected.Condition", "variables x: 1", "if x, do: x = x + 1")
+
+      assert message =~ "condition outside the subset"
     end
 
     test "an actor without every_frame" do

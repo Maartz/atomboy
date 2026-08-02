@@ -26,7 +26,9 @@ defmodule Potion do
           variables x: 80, y: 72
 
           every_frame do
-            if pressed?(:right), do: x = x + 1
+            if negative?(vx), do: vx = 1       is the sign bit set
+
+      if pressed?(:right), do: x = x + 1
             if pressed?(:left), do: x = x - 1
             if pressed?(:up), do: y = y - 1
             if pressed?(:down), do: y = y + 1
@@ -99,12 +101,22 @@ defmodule Potion do
   declares nor ever sees — and lets the first frame recognise that it is the
   first. `Potion.Compiler` details that pattern.
 
-  The v0 accepts **only one actor per module**: the kernel's scheduler has a
-  single slot, and a second `defactor` would compile a game half of which would
-  never run. The day the scheduler has several, the macro will accept them
-  without the surface changing.
+  A module may hold **several actors**. The kernel gives each one a slot and
+  calls them in declaration order, every frame, with nothing in between -- so an
+  actor that writes a cell another one reads will be read in that order, always.
+
+  Their cells share one namespace: `addresses/0` returns the whole game's, and
+  two actors cannot both declare a `y`. In exchange, any actor can name any
+  cell, whichever actor declared it and whatever the order -- a ball reads the
+  paddles, and the paddles read the ball.
 
   ## What the v0 compiles
+
+      background(2, 1, digit: score)     a digit on the background layer
+      background(0, 0, tile: 0)          any tile, by index
+
+      vx = -1                            a negative literal, two's complement
+      vx = -vx                           and the sentence a bounce is made of
 
       x = 5                              a constant into a cell
       x = y                              one cell into another
@@ -148,7 +160,18 @@ defmodule Potion do
   """
   defmacro __using__(_opts) do
     quote do
-      import Potion, only: [defactor: 2, variables: 1, every_frame: 1]
+      import Potion,
+        only: [
+          defactor: 2,
+          variables: 1,
+          every_frame: 1,
+          tiles: 1,
+          state: 2,
+          on_enter: 1,
+          routine: 2
+        ]
+
+      @before_compile Potion
     end
   end
 
@@ -166,45 +189,191 @@ defmodule Potion do
     name = name!(name, module)
     unique!(module, name)
 
-    {declarations, every_frame} = split!(body, name)
-    allocation = Compiler.allocate(declarations)
-    fragment = Compiler.compile(every_frame, allocation)
-    verify!(fragment, name)
+    {declarations, behaviour, routines} = split!(body, name)
 
-    Module.put_attribute(module, :potion_actor, name)
+    slot = length(actors(module))
 
-    quote do
-      @doc """
-      The complete assembler program — the kernel, then the actor `#{inspect(unquote(name))}`.
+    allocation =
+      Compiler.allocate(declarations,
+        base: next_base(module),
+        prefix: "potion_#{slot}",
+        states: state_names(behaviour),
+        routines: Enum.map(routines, fn {name, _} -> name end)
+      )
 
-      In the `Potion.Assembler` format: a list of tuples, which can be read,
-      sliced, or passed to `Potion.Assembler.addresses/2` to find out where
-      everything landed.
+    shared_names!(module, allocation, name)
+
+    Module.put_attribute(
+      module,
+      :potion_actors,
+      actors(module) ++ [{name, allocation, behaviour, routines}]
+    )
+
+    :ok
+  end
+
+  @doc """
+  Brings a drawing into the game, and gives its tiles names.
+
+      tiles from: "art/pong.png", names: [:ball, :paddle]
+
+  The file is read **here**, while the host module compiles: the sheet is cut
+  into 8x8 tiles in reading order — left to right, then down — and the bytes are
+  laid into the cartridge, where the kernel copies them into VRAM at startup.
+  Nothing about the drawing survives into the running game except sixteen bytes
+  a tile.
+
+  `names` are handed out in that same order, and there may be fewer names than
+  tiles: a sheet can carry scenery nobody needs to name. More names than tiles
+  is refused, because it can only mean the sheet is not the one that was meant.
+
+  The path is relative to the file that declares it, so a game and its art
+  travel together — `games/pong.exs` looks for `games/art/pong.png`.
+
+  The drawing is registered with the compiler as an external resource, so
+  editing the PNG recompiles the module. Without that, a redrawn sprite would
+  not appear until something else in the file changed, which is a confusing
+  half-hour the first time it happens.
+  """
+  defmacro tiles(options) do
+    module = __CALLER__.module
+    options = tile_options!(options, module)
+
+    path = Path.expand(options[:from], Path.dirname(__CALLER__.file))
+    cut = Potion.Tiles.read!(path)
+    names = options[:names] || []
+
+    if length(names) > length(cut) do
+      raise CompileError, """
+      #{length(names)} names for #{length(cut)} tiles in #{Path.relative_to_cwd(path)}.
+
+      Names are handed to tiles in reading order and there are not enough to go \
+      round, which means this is not the sheet the names were written for.
       """
-      def program do
-        Potion.Runtime.program(unquote(Macro.escape(fragment)))
+    end
+
+    Module.put_attribute(module, :external_resource, path)
+
+    Module.put_attribute(module, :potion_art, %{
+      bytes: Enum.join(cut),
+      names: names |> Enum.with_index() |> Map.new()
+    })
+
+    :ok
+  end
+
+  defp tile_options!(options, module) do
+    with true <- Keyword.keyword?(options),
+         path when is_binary(path) <- options[:from],
+         names when is_list(names) or is_nil(names) <- options[:names] do
+      unless Module.get_attribute(module, :potion_art) == nil do
+        raise CompileError, """
+        this module declares `tiles` twice.
+
+        A cartridge has one sheet. Put every tile the game draws on it — the \
+        names are what tell them apart, and there is room for 244.
+        """
       end
 
-      @doc """
-      The ROM, 32,768 bytes, ready to burn or to hand to `Atomboy.Screen`.
-      """
-      def rom do
-        Potion.ROM.build(program(),
-          vblank: :vblank,
-          title: unquote(title(module))
-        )
-      end
+      options
+    else
+      _ ->
+        raise CompileError, """
+        malformed `tiles`: #{Macro.to_string(options)}
 
-      @doc """
-      Where the game's variables live, in WRAM.
+        It takes the drawing and, optionally, the names its tiles answer to:
 
-      A Potion game has no variables in the BEAM sense: it has cells. Here they
-      are, for whoever wants to read them from the outside — an emulator, a test,
-      a debugger.
-      """
-      def addresses do
-        unquote(Macro.escape(allocation.cells))
-      end
+            tiles from: "art/pong.png", names: [:ball, :paddle]
+        """
+    end
+  end
+
+  @doc false
+  defmacro __before_compile__(env) do
+    case actors(env.module) do
+      [] ->
+        :ok
+
+      actors ->
+        # Compiling here rather than in `defactor` is what lets an actor name a
+        # cell belonging to another one. At `defactor` time only the actors
+        # declared *above* exist, so a ball could see the paddles and the paddles
+        # could never see the ball -- a rule nobody would remember. By the time
+        # the module closes, every cell is known, and reading is symmetric.
+        cells =
+          Enum.reduce(actors, %{}, fn {_name, allocation, _behaviour, _routines}, acc ->
+            Map.merge(acc, allocation.cells)
+          end)
+
+        art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
+
+        fragments =
+          Enum.map(actors, fn {name, allocation, behaviour, routines} ->
+            allocation = %{allocation | cells: cells, tiles: art.names}
+
+            fragment =
+              case behaviour do
+                {:body, body} ->
+                  Compiler.compile(body, allocation, routines)
+
+                {:states, states} ->
+                  Compiler.compile_machine(states, allocation, routines)
+              end
+
+            verify!(fragment, name, art.bytes)
+            fragment
+          end)
+
+        quote do
+          @doc """
+          The complete assembler program -- the kernel, then each actor in turn.
+
+          In the `Potion.Assembler` format: a list of tuples, which can be read,
+          sliced, or passed to `Potion.Assembler.addresses/2` to find out where
+          everything landed.
+          """
+          def program do
+            Potion.Runtime.program(
+              unquote(Macro.escape(fragments)),
+              unquote(Macro.escape(art.bytes))
+            )
+          end
+
+          @doc """
+          The ROM, 32,768 bytes, ready to burn or to hand to `Atomboy.Screen`.
+          """
+          def rom do
+            Potion.ROM.build(program(),
+              vblank: :vblank,
+              title: unquote(title(env.module))
+            )
+          end
+
+          @doc """
+          Where the game's variables live, in WRAM.
+
+          A Potion game has no variables in the BEAM sense: it has cells. Here
+          they are -- every actor's, in one map, which is why two actors cannot
+          share a variable name.
+          """
+          def addresses do
+            unquote(Macro.escape(cells))
+          end
+        end
+    end
+  end
+
+  # Declaration order, which is also the order the kernel calls them in. The
+  # list is held whole rather than accumulated: an `accumulate: true` attribute
+  # comes back reversed, and reversing it at every read is one more place for
+  # the scheduling order to go quietly wrong.
+  defp actors(module), do: Module.get_attribute(module, :potion_actors) || []
+
+  # Each actor takes its slice of the page, one after another.
+  defp next_base(module) do
+    case actors(module) do
+      [] -> Runtime.actor_state()
+      list -> list |> List.last() |> elem(1) |> Compiler.next_free()
     end
   end
 
@@ -234,6 +403,31 @@ defmodule Potion do
     outside_actor!("every_frame", "every_frame do … end")
   end
 
+  @doc """
+  One of an actor's states. Only inside a `defactor`, and never on its own.
+
+  Like `variables` and `every_frame`, this exists so that writing it in the wrong
+  place says so. Inside `defactor` the body is read as a tree and never expanded,
+  so this function is not the one that runs — `Potion.Compiler` is.
+  """
+  defmacro state(_name, _blocks) do
+    outside_actor!("state", "state :title do … end")
+  end
+
+  @doc """
+  A state's entry code: run once, on the frame the state is entered.
+  """
+  defmacro on_enter(_blocks) do
+    outside_actor!("on_enter", "on_enter do … end")
+  end
+
+  @doc """
+  A block written once inside an actor and called by name from several places.
+  """
+  defmacro routine(_name, _blocks) do
+    outside_actor!("routine", "routine :bounce do … end")
+  end
+
   # ══ Reading the actor's tree ═════════════════════════════════════════════════
 
   defp name!(name, _module) when is_atom(name), do: name
@@ -252,69 +446,117 @@ defmodule Potion do
   end
 
   defp unique!(module, name) do
-    case Module.get_attribute(module, :potion_actor) do
-      nil ->
+    if Enum.any?(actors(module), fn {taken, _allocation, _behaviour, _routines} ->
+         taken == name
+       end) do
+      raise CompileError, """
+      two actors called #{inspect(name)} in #{inspect(module)}.
+
+      The name is what the game calls a slot; two of them would not say which \
+      one the kernel calls first, nor which cells belong to which.
+      """
+    end
+  end
+
+  # Every actor's variables end up in one `addresses/0`, so a name taken twice
+  # would hide a cell rather than clash. Better said here, while the second
+  # declaration is still on screen.
+  defp shared_names!(module, allocation, name) do
+    clashes =
+      Enum.flat_map(actors(module), fn {other, other_allocation, _behaviour, _routines} ->
+        for {variable, _address} <- other_allocation.cells,
+            Map.has_key?(allocation.cells, variable),
+            do: {variable, other}
+      end)
+
+    case clashes do
+      [] ->
         :ok
 
-      first ->
+      taken ->
         raise CompileError, """
-        second actor in #{inspect(module)}: #{inspect(name)}, after #{inspect(first)}.
+        variable name already used by another actor, in #{inspect(name)}: \
+        #{Enum.map_join(taken, ", ", fn {variable, other} -> "#{inspect(variable)} (#{inspect(other)})" end)}
 
-        The v0 scheduler has only one slot — the kernel makes a single `CALL` per \
-        frame, and #{inspect(first)} occupies it. #{inspect(name)} would never \
-        run, which is the worst possible way of not working.
-
-        Until there is a multi-slot scheduler: one actor per module, and one ROM \
-        per module.
+        A game's cells all share one `addresses/0`, so names are unique across \
+        the whole game, not merely within an actor. Two paddles want `left_y` \
+        and `right_y` rather than a `y` each.
         """
     end
   end
 
-  # The body of a `defactor`: at most one `variables`, exactly one `every_frame`,
-  # and nothing else. Neither is expanded — they are forms this function
-  # recognises, not code that runs.
   defp split!(body, name) do
-    body
-    |> statements()
-    |> Enum.reduce({nil, nil}, fn statement, {declarations, every_frame} ->
-      case statement do
-        {:variables, _, _} when declarations != nil ->
-          duplicate!("variables", name)
+    {declarations, every_frame, states, routines} =
+      body
+      |> statements()
+      |> Enum.reduce({nil, nil, [], []}, fn statement,
+                                            {declarations, every_frame, states, routines} ->
+        case statement do
+          {:variables, _, _} when declarations != nil ->
+            duplicate!("variables", name)
 
-        {:every_frame, _, _} when every_frame != nil ->
-          duplicate!("every_frame", name)
+          {:every_frame, _, _} when every_frame != nil ->
+            duplicate!("every_frame", name)
 
-        {:variables, _, [decl]} ->
-          {decl, every_frame}
+          {:variables, _, [decl]} ->
+            {decl, every_frame, states, routines}
 
-        {:every_frame, _, [[do: block]]} ->
-          {declarations, {:body, block}}
+          {:every_frame, _, [[do: block]]} ->
+            {declarations, block, states, routines}
 
-        other ->
-          raise CompileError, """
-          unknown statement in `defactor #{inspect(name)}`:
+          {:state, _, [state_name, [do: block]]} ->
+            {declarations, every_frame, states ++ [state!(state_name, block, name, states)],
+             routines}
 
-              #{Macro.to_string(other)}
+          {:routine, _, [routine_name, [do: block]]} ->
+            {declarations, every_frame, states,
+             routines ++ [routine!(routine_name, block, name, routines)]}
 
-          Rejected AST: #{inspect(other)}
+          other ->
+            raise CompileError, """
+            unknown statement in `defactor #{inspect(name)}`:
 
-          An actor's body contains two forms and no others:
+                #{Macro.to_string(other)}
 
-              variables x: 80, y: 72
-              every_frame do … end
+            Rejected AST: #{inspect(other)}
 
-          The game's code goes into `every_frame`; that is what the kernel calls.
-          """
-      end
-    end)
-    |> case do
-      {_declarations, nil} ->
+            An actor's body contains four forms and no others:
+
+                variables x: 80, y: 72
+                every_frame do … end
+                state :title do … end
+                routine :bounce do … end
+
+            The game's code goes into `every_frame` — either one for the whole \
+            actor, or one inside each `state`.
+            """
+        end
+      end)
+
+    cond do
+      every_frame != nil and states != [] ->
         raise CompileError, """
-        actor without `every_frame`: #{inspect(name)}
+        the actor #{inspect(name)} has both an `every_frame` and states.
 
-        An actor is code called once per frame. Without `every_frame`, the kernel \
-        would be calling a `RET` sixty times a second and the screen would stay \
-        empty.
+        An actor is one or the other. With states, the kernel still calls it once \
+        a frame — it is the state it is in that decides what runs, so a body \
+        outside them would have no moment at which to be called.
+
+        Move that code into the state it belongs to, or into each of them.
+        """
+
+      states != [] ->
+        {declarations || [], {:states, states}, routines}
+
+      every_frame != nil ->
+        {declarations || [], {:body, every_frame}, routines}
+
+      true ->
+        raise CompileError, """
+        actor without `every_frame` or states: #{inspect(name)}
+
+        An actor is code called once per frame. Without either, the kernel would \
+        be calling a `RET` sixty times a second and the screen would stay empty.
 
             defactor #{inspect(name)} do
               every_frame do
@@ -322,11 +564,85 @@ defmodule Potion do
               end
             end
         """
-
-      {declarations, {:body, block}} ->
-        {declarations || [], block}
     end
   end
+
+  # A routine is a name and a block, and nothing else -- no parameters, because
+  # an actor's cells are the only storage there is and a caller sets them.
+  defp routine!(routine_name, block, actor, seen) do
+    routine_name = literal_name!(routine_name, actor)
+
+    if Enum.any?(seen, fn {name, _} -> name == routine_name end) do
+      raise CompileError, """
+      the actor #{inspect(actor)} declares the routine #{inspect(routine_name)} twice.
+
+      A call names one place in the ROM, so two blocks with one name is a call \
+      with no answer.
+      """
+    end
+
+    {routine_name, block}
+  end
+
+  # A state's body holds the same `every_frame` an actor does, and may hold an
+  # `on_enter` before it. Both are optional -- a state that only waits for a key
+  # has no entry code, and one that paints a screen and then does nothing has no
+  # frame code.
+  defp state!(state_name, block, actor, seen) do
+    state_name = literal_name!(state_name, actor)
+
+    if Enum.any?(seen, fn {name, _, _} -> name == state_name end) do
+      raise CompileError, """
+      the actor #{inspect(actor)} declares the state #{inspect(state_name)} twice.
+
+      States are numbered in the order they are written and `become` names them, \
+      so two with one name is a question with no answer.
+      """
+    end
+
+    {on_enter, every_frame} =
+      block
+      |> statements()
+      |> Enum.reduce({nil, nil}, fn statement, {on_enter, every_frame} ->
+        case statement do
+          {:on_enter, _, [[do: body]]} when on_enter == nil -> {body, every_frame}
+          {:every_frame, _, [[do: body]]} when every_frame == nil -> {on_enter, body}
+          other -> reject_state!(other, state_name, actor)
+        end
+      end)
+
+    {state_name, on_enter, every_frame}
+  end
+
+  defp literal_name!(name, _actor) when is_atom(name), do: name
+
+  defp literal_name!(other, actor) do
+    raise CompileError, """
+    a state's name is written out: #{Macro.to_string(other)}, in #{inspect(actor)}.
+
+    States are numbered when the game compiles, and `become` names one of those \
+    numbers. There is nothing to look a name up in at run time.
+    """
+  end
+
+  defp reject_state!(other, state_name, actor) do
+    raise CompileError, """
+    unknown statement in `state #{inspect(state_name)}` of #{inspect(actor)}:
+
+        #{Macro.to_string(other)}
+
+    A state holds two forms and no others, both optional:
+
+        on_enter do … end       once, on the frame the state is entered
+        every_frame do … end    every frame it stays in
+
+    `on_enter` is where a screen is painted: doing it in `every_frame` would \
+    redraw it sixty times a second to no effect.
+    """
+  end
+
+  defp state_names({:body, _}), do: []
+  defp state_names({:states, states}), do: Enum.map(states, fn {name, _, _} -> name end)
 
   defp statements({:__block__, _, list}), do: list
   defp statements(nil), do: []
@@ -345,10 +661,10 @@ defmodule Potion do
   # The dry run of the assembly: is the fragment a program? The kernel checks the
   # closing RET, the assembler the labels and the jump ranges. Doing it here
   # rather than on the first call to `rom/0` is the whole benefit of a compiled
-  # language: an `if` whose block overshoots the range of a JR shows up in `mix
-  # compile`, not three weeks later on a flashcart.
-  defp verify!(fragment, name) do
-    Assembler.assemble(Runtime.program(fragment), origin: 0x0150)
+  # language: a fragment that is not a program shows up in `mix compile`, not
+  # three weeks later on a flashcart.
+  defp verify!(fragment, name, art) do
+    Assembler.assemble(Runtime.program(fragment, art), origin: 0x0150)
     :ok
   rescue
     error in ArgumentError ->
@@ -360,9 +676,9 @@ defmodule Potion do
                 #{error.message}
 
                 The body compiled, but the fragment that came out of it is not a \
-                valid program. If the message speaks of a jump out of range, it is \
-                an `if` block that is too big: JR only jumps 127 bytes, and the v0 \
-                knows nothing but JR.
+                valid program. An `if` block of any size is fine — every jump that \
+                leaves one is absolute — so a jump out of range here is a bug in \
+                the compiler and not in the game.
                 """
               ],
               __STACKTRACE__

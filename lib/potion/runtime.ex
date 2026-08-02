@@ -57,20 +57,22 @@ defmodule Potion.Runtime do
 
   The init arms the vblank interrupt, and *only* that one (IE = 0x01). The main
   loop is then a `HALT`: the processor sleeps, the vblank wakes it, the handler
-  raises the flag, the loop reads the pad, calls the actor, and goes back to
-  sleep. That is the v0 scheduler — a single slot, the single actor — and it is
-  also the shape the later ones will keep: what changes then is the contents of
-  the slot, not the beat.
+  raises the flag, the loop reads the pad, calls each actor in turn, and goes
+  back to sleep. That is the scheduler: one slot per actor, called in
+  declaration order, and the beat is the vblank rather than a count of cycles.
 
   The flag is not decoration. `HALT` wakes on *any* serviced interrupt, and
   others will come (the timer, the joypad, STAT) the day the kernel arms them;
   the flag tells "this is a new frame" apart from "someone woke me". Without it,
   the actor would run at a rhythm unknown to it.
 
-  ## The v0's two tiles
+  ## The tiles
 
   Tile 0 is a solid square — the sprite. Tile 1 is empty, and the init fills the
-  whole background map (0x9800-0x9BFF) with tile 1.
+  whole background map (0x9800-0x9BFF) with tile 1. Tiles 2 to 11 are the ten
+  digits, copied from ROM at startup: a score is the first thing a game wants to
+  say in words rather than in sprites, and it is also the cheapest — 160 bytes
+  and a copy loop, against one OAM entry per figure.
 
   That map is the only departure from a strictly minimal kernel, and it is
   forced: a cleared VRAM leaves the background map at zero, hence at tile 0 — the
@@ -110,6 +112,103 @@ defmodule Potion.Runtime do
   @vram 0x8000
   @vram_bytes 0x2000
   @background 0x9800
+  @digits 2
+
+  # Five columns of ink in an eight-wide tile, with the last row left blank so
+  # two lines of digits do not touch.
+  @font [
+    [0x3C, 0x66, 0x6E, 0x7E, 0x76, 0x66, 0x3C, 0x00],
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00],
+    [0x3C, 0x66, 0x06, 0x0C, 0x18, 0x30, 0x7E, 0x00],
+    [0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00],
+    [0x0C, 0x1C, 0x3C, 0x6C, 0x7E, 0x0C, 0x0C, 0x00],
+    [0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00],
+    [0x1C, 0x30, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00],
+    [0x7E, 0x66, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x00],
+    [0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00],
+    [0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x38, 0x00]
+  ]
+
+  # The alphabet, five columns wide and seated at the same bits as the digits.
+  # Uppercase only, which is what a Game Boy font is: lowercase would double the
+  # VRAM for glyphs a title screen does not use. `text` upcases what it is given.
+  #
+  # A space is not here. It is tile 1 -- the empty one the init already fills the
+  # whole background map with -- so a gap between two words costs nothing that
+  # was not already spent.
+  @letters [
+    # A
+    [0x38, 0x44, 0x44, 0x7C, 0x44, 0x44, 0x44, 0x00],
+    # B
+    [0x78, 0x44, 0x78, 0x44, 0x44, 0x44, 0x78, 0x00],
+    # C
+    [0x38, 0x44, 0x40, 0x40, 0x40, 0x44, 0x38, 0x00],
+    # D
+    [0x78, 0x44, 0x44, 0x44, 0x44, 0x44, 0x78, 0x00],
+    # E
+    [0x7C, 0x40, 0x78, 0x40, 0x40, 0x40, 0x7C, 0x00],
+    # F
+    [0x7C, 0x40, 0x78, 0x40, 0x40, 0x40, 0x40, 0x00],
+    # G
+    [0x38, 0x44, 0x40, 0x4C, 0x44, 0x44, 0x38, 0x00],
+    # H
+    [0x44, 0x44, 0x7C, 0x44, 0x44, 0x44, 0x44, 0x00],
+    # I
+    [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x00],
+    # J
+    [0x04, 0x04, 0x04, 0x04, 0x44, 0x44, 0x38, 0x00],
+    # K
+    [0x44, 0x48, 0x50, 0x60, 0x50, 0x48, 0x44, 0x00],
+    # L
+    [0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x7C, 0x00],
+    # M
+    [0x44, 0x6C, 0x54, 0x44, 0x44, 0x44, 0x44, 0x00],
+    # N
+    [0x44, 0x64, 0x54, 0x4C, 0x44, 0x44, 0x44, 0x00],
+    # O
+    [0x38, 0x44, 0x44, 0x44, 0x44, 0x44, 0x38, 0x00],
+    # P
+    [0x78, 0x44, 0x44, 0x78, 0x40, 0x40, 0x40, 0x00],
+    # Q
+    [0x38, 0x44, 0x44, 0x44, 0x54, 0x48, 0x34, 0x00],
+    # R
+    [0x78, 0x44, 0x44, 0x78, 0x50, 0x48, 0x44, 0x00],
+    # S
+    [0x3C, 0x40, 0x40, 0x38, 0x04, 0x04, 0x78, 0x00],
+    # T
+    [0x7C, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x00],
+    # U
+    [0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x38, 0x00],
+    # V
+    [0x44, 0x44, 0x44, 0x44, 0x44, 0x28, 0x10, 0x00],
+    # W
+    [0x44, 0x44, 0x44, 0x44, 0x54, 0x6C, 0x44, 0x00],
+    # X
+    [0x44, 0x44, 0x28, 0x10, 0x28, 0x44, 0x44, 0x00],
+    # Y
+    [0x44, 0x44, 0x28, 0x10, 0x10, 0x10, 0x10, 0x00],
+    # Z
+    [0x7C, 0x04, 0x08, 0x10, 0x20, 0x40, 0x7C, 0x00],
+    # .
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x30, 0x00],
+    # ,
+    [0x00, 0x00, 0x00, 0x00, 0x30, 0x30, 0x20, 0x00],
+    # !
+    [0x10, 0x10, 0x10, 0x10, 0x10, 0x00, 0x10, 0x00],
+    # ?
+    [0x38, 0x44, 0x04, 0x18, 0x10, 0x00, 0x10, 0x00],
+    # -
+    [0x00, 0x00, 0x00, 0x7C, 0x00, 0x00, 0x00, 0x00],
+    # :
+    [0x00, 0x30, 0x30, 0x00, 0x30, 0x30, 0x00, 0x00]
+  ]
+
+  # Where a game's own tiles begin: after the solid square, the empty one, and
+  # the ten digits. A game never writes this number — it names a tile and the
+  # compiler adds the base, exactly as `digit:` does.
+  @alphabet 12
+  @art 44
+
   @wram_cleared 0x0200
 
   # LCD on, tile data at 0x8000 (unsigned indices), OBJ and BG on. 0x93 is what
@@ -133,17 +232,59 @@ defmodule Potion.Runtime do
   happens here, at assembly time, because at run time the symptom would be an
   illegal opcode thousands of cycles away from its cause.
   """
-  @spec program([Assembler.element()]) :: [Assembler.element()]
-  def program(actor) when is_list(actor) do
-    check_actor!(actor)
+  @spec program([Assembler.element()], binary()) :: [Assembler.element()]
+  def program(actors, art \\ <<>>) when is_list(actors) and is_binary(art) do
+    fragments = fragments(actors)
+    Enum.each(fragments, &check_actor!/1)
+    art!(art)
 
-    init() ++
+    init(art) ++
       vblank() ++
       read_pad() ++
-      main_loop() ++
+      main_loop(length(fragments)) ++
       [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
-      [{:label, :actor}] ++ actor
+      [{:label, :font_data}, {:bytes, font_bytes()}] ++
+      [{:label, :letter_data}, {:bytes, letter_bytes()}] ++
+      art_data(art) ++
+      Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
+        [{:label, actor_label(slot)}] ++ fragment
+      end)
   end
+
+  defp art_data(<<>>), do: []
+  defp art_data(art), do: [{:label, :art_data}, {:bytes, art}]
+
+  # 256 tiles answer to an unsigned index, and the kernel has spoken for the
+  # first twelve. The check is here rather than at the drawing, because it is
+  # only here that the kernel's own tiles and the game's are counted together.
+  defp art!(art) do
+    tiles = div(byte_size(art), 16)
+
+    if @art + tiles > 256 do
+      raise ArgumentError, """
+      #{tiles} tiles of art, and there is room for #{256 - @art}.
+
+      Tile data at 0x8000 is addressed by an unsigned byte, so a game has 256 of \
+      them and the kernel keeps the first #{@art}: the solid square, the empty \
+      one the background is filled with, and the ten digits.
+      """
+    end
+  end
+
+  @doc """
+  The label the kernel calls for the actor in a given slot.
+
+  Numbered rather than named: the kernel schedules positions, and it is the
+  language above that knows an actor is called `:ball`.
+  """
+  @spec actor_label(non_neg_integer()) :: atom()
+  def actor_label(slot), do: :"actor_#{slot}"
+
+  # One fragment or several. A fragment is a list of tuples, a list of fragments
+  # a list of lists -- the two cannot be confused, and accepting both means the
+  # hand-written actors that predate the scheduler still read as they did.
+  defp fragments([head | _] = actors) when is_list(head), do: actors
+  defp fragments(actor), do: [actor]
 
   defp check_actor!(actor) do
     case List.last(actor) do
@@ -179,6 +320,40 @@ defmodule Potion.Runtime do
   @spec actor_state() :: 0xC100
   def actor_state, do: @state
 
+  @doc """
+  The tile index of the digit `0`; the ten follow it in order.
+
+  Tiles 0 and 1 belong to the kernel -- the solid square and the empty one --
+  so the font starts at 2. A game rarely needs the number: `background(c, r,
+  digit: n)` adds it, which is the whole point of spelling `digit:` rather than
+  `tile:`.
+  """
+  @spec digits() :: 2
+  def digits, do: @digits
+
+  @doc "The first byte of the background map."
+  @spec background_map() :: 0x9800
+  def background_map, do: @background
+
+  @doc """
+  Where a square of the background map lives.
+
+  The map is 32 tiles wide, of which the screen shows 20; a row is therefore 32
+  bytes, and the eleven past the twentieth are off-screen unless the game
+  scrolls.
+
+      iex> Potion.Runtime.background_address(0, 0)
+      0x9800
+
+      iex> Potion.Runtime.background_address(2, 1)
+      0x9822
+  """
+  @spec background_address(0..31, 0..31) :: 0x9800..0x9BFF
+  def background_address(column, row)
+      when column in 0..31 and row in 0..31 do
+    @background + row * 32 + column
+  end
+
   @doc "The address of the DMA routine in HRAM."
   @spec hram_dma() :: 0xFF80
   def hram_dma, do: @hram_dma
@@ -194,8 +369,8 @@ defmodule Potion.Runtime do
   and the background map, copy the DMA into HRAM, set the palettes, and only
   then turn the screen back on and open the interrupts.
   """
-  @spec init() :: [Assembler.element()]
-  def init do
+  @spec init(binary()) :: [Assembler.element()]
+  def init(art \\ <<>>) do
     [
       {:label, :init},
       {:di},
@@ -222,6 +397,9 @@ defmodule Potion.Runtime do
       clear(@oam_mirror, @wram_cleared, :clear_wram) ++
       bg_map() ++
       tiles() ++
+      font() ++
+      letters() ++
+      art(art) ++
       copy_dma() ++
       [
         {:ld, :a, @palette},
@@ -292,6 +470,108 @@ defmodule Potion.Runtime do
   # Tile 0: sixteen bytes of 0xFF, that is, eight lines of eight pixels in
   # colour 3 — a solid square. Two bitplanes set to 1 make colour 3, and that is
   # the whole v0 tileset. Tile 1 stays the one the clearing left behind.
+  # The ten digits, copied into VRAM behind the kernel's two tiles.
+  #
+  # A score is the first thing a game wants to say in words rather than in
+  # sprites, and it is also the cheapest: ten tiles, 160 bytes of ROM, and a
+  # copy loop the init runs once. Sprites could spell it too -- the OAM holds
+  # forty -- but they would ride above the playfield and cost an entry each.
+  defp font do
+    [
+      {:ld, :hl, {:label, :font_data}},
+      {:ld, :de, @vram + @digits * 16},
+      {:ld, :b, 10 * 16},
+      {:label, :copy_font},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:dec, :b},
+      {:jr, :nz, {:label, :copy_font}}
+    ]
+  end
+
+  @doc """
+  The font's bytes: ten digits, 8x8, in the Game Boy's two-plane format.
+
+  Both planes carry the same bitmap, which puts the ink at colour 3 -- the same
+  the solid tile uses, so a digit and a sprite are the same black.
+  """
+  @spec font_bytes() :: binary()
+  def font_bytes do
+    for glyph <- @font, row <- glyph, into: <<>>, do: <<row, row>>
+  end
+
+  @doc """
+  The tile index of the letter `A`; the alphabet then the punctuation follow it.
+
+  The order is the one `Potion.Compiler` maps characters through, and it is
+  written down in one place: A to Z, then `.` `,` `!` `?` `-` `:`.
+  """
+  @spec alphabet() :: non_neg_integer()
+  def alphabet, do: @alphabet
+
+  @doc "The alphabet's bytes, in the Game Boy's two-plane format."
+  @spec letter_bytes() :: binary()
+  def letter_bytes do
+    for glyph <- @letters, row <- glyph, into: <<>>, do: <<row, row>>
+  end
+
+  @doc """
+  The two palette registers, background then sprites.
+
+  A fade on this console is not a fade at all: there is nothing to blend. What
+  there is, is a table saying which of the four greys each shade prints as, and
+  darkening a picture means rewriting that table. `Potion.Compiler` holds the
+  four steps.
+  """
+  @spec palettes() :: {byte(), byte()}
+  def palettes, do: {@bgp, @obp0}
+
+  @doc "The tile index a game's own art starts at."
+  @spec art_base() :: non_neg_integer()
+  def art_base, do: @art
+
+  # The game's tiles, on the font's pattern with one difference that matters:
+  # the counter is sixteen bits. The font is 160 bytes and fits in B; a sheet is
+  # whatever was drawn, and forty tiles is already 640. `DEC BC` sets no flags on
+  # this processor -- that is the reason for the `LD A, B / OR C` rather than
+  # forgetfulness -- so the loop tests the pair by hand.
+  defp art(<<>>), do: []
+
+  defp art(bytes) do
+    [
+      {:ld, :hl, {:label, :art_data}},
+      {:ld, :de, @vram + @art * 16},
+      {:ld, :bc, byte_size(bytes)},
+      {:label, :copy_art},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:dec, :bc},
+      {:ld, :a, :b},
+      {:or, :a, :c},
+      {:jr, :nz, {:label, :copy_art}}
+    ]
+  end
+
+  # The alphabet, copied like the digits and for the same reason: a game that
+  # wants to say PRESS START should not have to spend an OAM entry a letter.
+  defp letters do
+    [
+      {:ld, :hl, {:label, :letter_data}},
+      {:ld, :de, @vram + @alphabet * 16},
+      {:ld, :bc, byte_size(letter_bytes())},
+      {:label, :copy_letters},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:dec, :bc},
+      {:ld, :a, :b},
+      {:or, :a, :c},
+      {:jr, :nz, {:label, :copy_letters}}
+    ]
+  end
+
   defp tiles do
     [
       {:ld, :hl, @vram},
@@ -441,15 +721,22 @@ defmodule Potion.Runtime do
   # ══ The main loop ════════════════════════════════════════════════════════════
 
   @doc """
-  The v0 scheduler: sleep, wake on the vblank, read the pad, call the actor, go
-  back to sleep.
+  The scheduler: sleep, wake on the vblank, read the pad, call each actor in
+  turn, go back to sleep.
 
   `HALT` is not a battery saving here, it is the system's only clock: it gives
   the kernel a rhythm of exactly one frame, without counting a single cycle. A
-  loop polling LY would work too, and would drift as soon as the actor grew.
+  loop polling LY would work too, and would drift as soon as the actors grew.
+
+  The slots run in declaration order, every frame, with nothing between them: an
+  actor that writes a cell another one reads will be read in that order, always.
+  That is the whole scheduling contract, and it is worth stating because it is
+  the one an actor cannot check for itself.
   """
-  @spec main_loop() :: [Assembler.element()]
-  def main_loop do
+  @spec main_loop(pos_integer()) :: [Assembler.element()]
+  def main_loop(slots \\ 1) when slots >= 1 do
+    calls = for slot <- 0..(slots - 1), do: {:call, {:label, actor_label(slot)}}
+
     [
       {:label, :main_loop},
       {:halt},
@@ -460,8 +747,9 @@ defmodule Potion.Runtime do
       {:xor, :a, :a},
       {:ld, {:mem, @flag}, :a},
       {:call, {:label, :read_pad}},
-      {:call, {:label, :actor}},
+      calls,
       {:jr, {:label, :main_loop}}
     ]
+    |> List.flatten()
   end
 end

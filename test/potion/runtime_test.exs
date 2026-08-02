@@ -47,13 +47,45 @@ defmodule Potion.RuntimeTest do
 
       # The cartridge's entry point lands on the init.
       assert addresses.init == 0x0150
-      # The two labels the rest of the world knows about.
+      # The two labels the rest of the world knows about. Slots are numbered,
+      # because the kernel schedules positions -- it is the language above that
+      # knows an actor is called `:ball`.
       assert Map.has_key?(addresses, :vblank)
-      assert Map.has_key?(addresses, :actor)
-      # The actor comes last: the whole kernel precedes it.
-      assert addresses.actor > addresses.main_loop
+      assert Map.has_key?(addresses, :actor_0)
+      # The actors come last: the whole kernel precedes them.
+      assert addresses.actor_0 > addresses.main_loop
       # And the test actor's state fits in the page the kernel promises.
       assert @counter == Runtime.actor_state()
+    end
+
+    test "several actors each get a slot, called in declaration order" do
+      first = [{:ld, :a, 1}, {:ld, {:mem, 0xC1F0}, :a}, {:ret}]
+      second = [{:ld, :a, 2}, {:ld, {:mem, 0xC1F1}, :a}, {:ret}]
+
+      program = Runtime.program([first, second])
+      addresses = Potion.Assembler.addresses(program, origin: 0x0150)
+
+      assert addresses.actor_0 < addresses.actor_1
+
+      calls =
+        program
+        |> Enum.drop_while(&(&1 != {:label, :main_loop}))
+        |> Enum.filter(&match?({:call, _}, &1))
+
+      assert calls == [
+               {:call, {:label, :read_pad}},
+               {:call, {:label, :actor_0}},
+               {:call, {:label, :actor_1}}
+             ]
+    end
+
+    test "a single fragment is still a whole game" do
+      # The hand-written actors predate the scheduler; passing one on its own
+      # must keep meaning what it meant.
+      addresses = Potion.Assembler.addresses(Runtime.program(actor()), origin: 0x0150)
+
+      assert Map.has_key?(addresses, :actor_0)
+      refute Map.has_key?(addresses, :actor_1)
     end
 
     test "an actor without a RET is refused at assembly, not at run time" do
