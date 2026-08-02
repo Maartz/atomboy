@@ -162,6 +162,10 @@ defmodule Potion.Runtime do
   @harm_pitch 0xC0B8
   @harm_phase 0xC0BA
 
+  # The envelope the tune's pulse notes take: `play` writes it, both pulse
+  # players read it on every note.
+  @tune_env 0xC0BB
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -685,6 +689,10 @@ defmodule Potion.Runtime do
   @spec wobble_cell() :: non_neg_integer()
   def wobble_cell, do: @wobble
 
+  @doc "The cell holding the envelope the tune's pulse notes take."
+  @spec env_cell() :: non_neg_integer()
+  def env_cell, do: @tune_env
+
   @doc """
   The two wobble tables, sixteen signed frames each.
 
@@ -850,7 +858,7 @@ defmodule Potion.Runtime do
       # note because a game may start another tune between two of them.
       {:ld, :a, {:mem, @tune_duty}},
       {:ldh, {:high, @nr11}, :a},
-      {:ld, :a, 0xF0},
+      {:ld, :a, {:mem, @tune_env}},
       {:ldh, {:high, @nr12}, :a},
       {:ld, :a, :c},
       {:ldh, {:high, @nr13}, :a},
@@ -867,7 +875,7 @@ defmodule Potion.Runtime do
     [
       {:ld, :a, {:mem, @tune_duty}},
       {:ldh, {:high, @nr21}, :a},
-      {:ld, :a, 0xF0},
+      {:ld, :a, {:mem, @tune_env}},
       {:ldh, {:high, @nr22}, :a},
       {:ld, :a, :c},
       {:ldh, {:high, @nr23}, :a},

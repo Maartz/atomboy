@@ -8,11 +8,24 @@ defmodule Potion.Music do
         [lead: "c4 . e4 . g4 .", harmony: "e3 . g3 . c4 .", bass: "c2 . . . g1 . . ."],
         beat: 10, duty: :eighth, gap: 3
 
-  Three kinds of token and nothing else:
+  The tokens:
 
       c4  fs5  as3    a note — letter, optional `s` for the sharp, octave
       .               hold: the note before it goes on sounding
       -               a rest: the channel is silenced
+      |               a bar line — ink for the reader, the parser walks past it
+      [c4 e4 g4]      a group: its notes packed into one beat, equal slices
+
+  A group is how a melody says pickup notes and triplets without speeding the
+  whole tune up. The beat has to divide by the group's size, only the last
+  member takes the `gap:` — a triplet is one gesture, slurred inside and
+  breathing at the end — and a hold cannot appear inside one.
+
+  And a tune's notation is *evaluated* when the module compiles, so motifs are
+  ordinary Elixir:
+
+      @motif "c4 e4 g4 ."
+      music :song, [lead: @motif <> " " <> @motif]
 
   Each token is one beat, and a beat is `beat:` frames — twelve by default, so
   five beats a second. `beat: 6` is twice as fast, and there is no tempo beyond
@@ -90,6 +103,14 @@ defmodule Potion.Music do
   # 75% exists and is not here: it is 25% turned inside out and sounds the same.
   @duties %{eighth: 0x00, quarter: 0x40, half: 0x80}
 
+  # How a pulse note carries its volume over time. `:organ` holds full volume
+  # until the next note -- what every tune before this option sounded like.
+  # `:pluck` starts full and lets the hardware walk it down over about half a
+  # second, so a note dies the way a struck string does. The nibble is the
+  # starting volume, the low bits the pace; the envelope hardware does the rest
+  # and no code runs per frame.
+  @envelopes %{organ: 0xF0, pluck: 0xF2}
+
   @default_beat 12
 
   @doc """
@@ -143,6 +164,7 @@ defmodule Potion.Music do
     {gap, voices} = Keyword.pop(voices, :gap, 0)
     {duty, voices} = Keyword.pop(voices, :duty, :half)
     {wobble, voices} = Keyword.pop(voices, :vibrato, :none)
+    {envelope, voices} = Keyword.pop(voices, :envelope, :organ)
 
     beat!(beat, name)
     gap!(gap, beat, name)
@@ -166,7 +188,8 @@ defmodule Potion.Music do
       harmony: voice!(Keyword.get(voices, :harmony), name, @notes, beat, gap),
       bass: voice!(Keyword.get(voices, :bass), name, @wave_notes, beat, gap),
       duty: duty!(duty, name),
-      vibrato: vibrato!(wobble, name)
+      vibrato: vibrato!(wobble, name),
+      envelope: envelope!(envelope, name)
     }
   end
 
@@ -202,6 +225,22 @@ defmodule Potion.Music do
     """
   end
 
+  defp envelope!(envelope, name) do
+    case Map.fetch(@envelopes, envelope) do
+      {:ok, byte} ->
+        byte
+
+      :error ->
+        raise Potion.CompileError, """
+        the tune #{inspect(name)} asks for an envelope of #{inspect(envelope)}.
+
+        There are two: `:organ` holds a note at full volume until the next one, \
+        and `:pluck` lets it die away on its own, the way a struck string does. \
+        It shapes the two pulse voices; the bass has no envelope hardware.
+        """
+    end
+  end
+
   defp gap!(gap, beat, name) do
     unless is_integer(gap) and gap >= 0 and gap < beat do
       raise Potion.CompileError, """
@@ -230,9 +269,14 @@ defmodule Potion.Music do
 
   defp voice!(notation, name, notes, beat, gap) do
     notation
+    |> String.replace("[", " [ ")
+    |> String.replace("]", " ] ")
     |> String.split()
+    # A bar line is ink, not sound: it exists so the three voices can be
+    # written in columns that line up, and the parser walks past it.
+    |> Enum.reject(&(&1 == "|"))
     |> steps!(name, beat, notes)
-    |> Enum.flat_map(&articulate(&1, gap))
+    |> Enum.flat_map(&articulate(&1, gap, name))
     |> Enum.map_join(fn {x, frames} -> step(x, frames) end)
     |> Kernel.<>(<<0x00, 0x00, 0x00>>)
   end
@@ -243,37 +287,136 @@ defmodule Potion.Music do
   #
   # It goes on the *note* and not on the beat, so a held note gives up the same
   # two frames a short one does -- which is what an instrument does, and what
-  # makes a long note read as long rather than as four short ones.
-  defp articulate(step, 0), do: [step]
-  defp articulate({:rest, _frames} = step, _gap), do: [step]
-  defp articulate({x, frames}, gap), do: [{x, frames - gap}, {:rest, gap}]
+  # makes a long note read as long rather than as four short ones. Inside a
+  # group only the last member takes it, which is why steps carry the flag.
+  defp articulate({x, frames, _}, 0, _name), do: [{x, frames}]
+  defp articulate({:rest, frames, _}, _gap, _name), do: [{:rest, frames}]
+  defp articulate({x, frames, false}, _gap, _name), do: [{x, frames}]
 
-  # Tokens into runs. A hold lengthens the step before it rather than making a
-  # new one, and a hold with nothing before it is a mistake worth naming: it
-  # reads as a rest and is not one.
+  defp articulate({_x, frames, true}, gap, name) when frames - gap < 1 do
+    raise Potion.CompileError, """
+    the tune #{inspect(name)} has a gap of #{gap} on a note #{frames} frames long.
+
+    Nothing of the note would be left. Grouped notes are slices of one beat, so \
+    a gap that fits the beat can still swallow a slice -- shorten the gap or \
+    widen the beat.
+    """
+  end
+
+  defp articulate({x, frames, true}, gap, _name), do: [{x, frames - gap}, {:rest, gap}]
+
+  # Tokens into steps of {sound, frames, articulate?}. A hold lengthens the
+  # step before it rather than making a new one, and a hold with nothing before
+  # it is a mistake worth naming: it reads as a rest and is not one.
+  #
+  # `[c4 e4 g4]` packs its members into one beat -- the pickup notes and
+  # triplets a melody is phrased with, which a rigid grid cannot say without
+  # speeding the whole tune up. The members become ordinary steps of beat/n
+  # frames each, so the kernel plays them the way it plays everything; only the
+  # last one takes the gap, because a triplet is one gesture -- slurred inside,
+  # breathing at the end.
   defp steps!(tokens, name, beat, notes) do
-    tokens
-    |> Enum.reduce([], fn token, steps ->
-      case {token, steps} do
-        {".", []} ->
-          raise Potion.CompileError, """
-          the tune #{inspect(name)} opens with `.`, which holds the note before it.
+    {steps, group} =
+      Enum.reduce(tokens, {[], nil}, fn token, {steps, group} ->
+        case {token, group} do
+          {"[", nil} ->
+            {steps, []}
 
-          There is nothing before it. A silence at the start is `-`.
-          """
+          {"[", _members} ->
+            raise Potion.CompileError, """
+            the tune #{inspect(name)} opens a group inside a group.
 
-        {".", [{x, frames} | rest]} ->
-          [{x, frames + beat} | rest]
+            A group packs notes into one beat, and a beat has no smaller beat \
+            inside it to pack into.
+            """
 
-        {"-", steps} ->
-          [{:rest, beat} | steps]
+          {"]", nil} ->
+            raise Potion.CompileError,
+                  "the tune #{inspect(name)} closes a group it never opened."
 
-        {note, steps} ->
-          [{note!(note, name, notes), beat} | steps]
-      end
+          {"]", []} ->
+            raise Potion.CompileError, """
+            the tune #{inspect(name)} has an empty group.
+
+            `[ ]` would be a beat of nothing, which is what `-` already says.
+            """
+
+          {"]", members} ->
+            {burst(Enum.reverse(members), beat, name) ++ steps, nil}
+
+          {".", nil} ->
+            case steps do
+              [] ->
+                raise Potion.CompileError, """
+                the tune #{inspect(name)} opens with `.`, which holds the note before it.
+
+                There is nothing before it. A silence at the start is `-`.
+                """
+
+              [{x, frames, articulate?} | rest] ->
+                {[{x, frames + beat, articulate?} | rest], nil}
+            end
+
+          {".", _members} ->
+            raise Potion.CompileError, """
+            the tune #{inspect(name)} holds a note inside a group.
+
+            A group's members are equal slices of one beat; to lengthen one, \
+            name it again.
+            """
+
+          {"-", nil} ->
+            {[{:rest, beat, false} | steps], nil}
+
+          {"-", members} ->
+            {steps, [:rest | members]}
+
+          {note, nil} ->
+            {[{note!(note, name, notes), beat, true} | steps], nil}
+
+          {note, members} ->
+            {steps, [note!(note, name, notes) | members]}
+        end
+      end)
+
+    if group != nil do
+      raise Potion.CompileError,
+            "the tune #{inspect(name)} opens a group and never closes it."
+    end
+
+    steps |> Enum.reverse() |> Enum.map(&fits!(&1, name))
+  end
+
+  # One group into its slices. The beat has to divide evenly, and refusing the
+  # remainder beats rounding it: a lost frame per group is a tune that drifts
+  # against its own bass, slowly enough that nobody suspects the notation.
+  defp burst(members, beat, name) do
+    count = length(members)
+
+    if rem(beat, count) != 0 do
+      raise Potion.CompileError, """
+      the tune #{inspect(name)} packs #{count} notes into a beat of #{beat} frames.
+
+      #{beat} does not divide by #{count}, and a group's members are equal \
+      slices. Beats that divide: #{beat_suggestions(count)}.
+      """
+    end
+
+    slice = div(beat, count)
+    last = count - 1
+
+    members
+    |> Enum.with_index()
+    |> Enum.map(fn
+      {:rest, _index} -> {:rest, slice, false}
+      {x, ^last} -> {x, slice, true}
+      {x, _index} -> {x, slice, false}
     end)
     |> Enum.reverse()
-    |> Enum.map(&fits!(&1, name))
+  end
+
+  defp beat_suggestions(count) do
+    1..20 |> Enum.map(&(&1 * count)) |> Enum.filter(&(&1 in 6..30)) |> Enum.join(", ")
   end
 
   defp note!(token, name, notes) do
@@ -287,7 +430,8 @@ defmodule Potion.Music do
 
         A note is a letter, an optional `s` for the sharp, and an octave: `c2` \
         up to `b7`, so `a4` is concert A and `fs5` the F sharp above the treble \
-        staff. `-` is a rest and `.` holds the note before it.
+        staff. `-` is a rest, `.` holds the note before it, `|` is a bar line \
+        the parser walks past, and `[c4 e4 g4]` packs notes into one beat.
 
         Below C2 the console cannot help: its register counts down to a period, \
         and under about 64 Hz the number it would need is negative.
@@ -296,8 +440,8 @@ defmodule Potion.Music do
   end
 
   # A step's length is one byte, and a zero is the terminator, so 255 is the
-  # ceiling and 0 cannot happen. Twenty-one holds at the default beat.
-  defp fits!({_x, frames}, name) when frames > 255 do
+  # ceiling and 0 cannot happen.
+  defp fits!({_x, frames, _articulate?}, name) when frames > 255 do
     raise Potion.CompileError, """
     the tune #{inspect(name)} holds a note for #{frames} frames, and a step lasts \
     at most 255.

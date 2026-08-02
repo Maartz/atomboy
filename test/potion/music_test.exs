@@ -61,6 +61,88 @@ defmodule Potion.MusicTest do
     end
   end
 
+  describe "the shape of a phrase" do
+    test "a bar line is ink, not sound" do
+      assert lead!("c4 | e4 | g4", :t) == lead!("c4 e4 g4", :t)
+    end
+
+    # `[c4 e4 g4]` packs three notes into one beat: three ordinary steps of a
+    # third of a beat each, and the format does not change -- the kernel plays
+    # them the way it plays everything.
+    test "a group packs its notes into one beat" do
+      bytes = lead!("[c4 e4 g4] .", :t, beat: 12)
+
+      assert steps(bytes) == 3
+
+      frames = for <<_lo, _hi, f <- binary_part(bytes, 0, 9)>>, do: f
+      assert frames == [4, 4, 4 + 12]
+    end
+
+    # A triplet is one gesture: slurred inside, breathing at the end. So the gap
+    # falls on the last member alone -- gapping every slice would turn a run of
+    # pickup notes into a hiccup.
+    test "only the last note of a group takes the gap" do
+      bytes = lead!("[c4 e4 g4]", :t, beat: 12, gap: 2)
+
+      assert steps(bytes) == 4
+
+      steps = for <<lo, hi, f <- binary_part(bytes, 0, 12)>>, do: {lo, hi, f}
+      assert [{_, _, 4}, {_, _, 4}, {_, _, 2}, {0, 0, 2}] = steps
+    end
+
+    test "a rest can sit inside a group" do
+      bytes = lead!("[c4 - g4]", :t, beat: 12)
+
+      assert [{_, _, 4}, {0, 0, 4}, {_, _, 4}] =
+               for(<<lo, hi, f <- binary_part(bytes, 0, 9)>>, do: {lo, hi, f})
+    end
+
+    test "a beat that does not divide is refused, with the beats that would" do
+      assert_raise Potion.CompileError, ~r/does not divide by 3.*Beats that divide.*12/s, fn ->
+        Music.compile!("[c4 e4 g4]", :t, beat: 10)
+      end
+    end
+
+    test "the brackets have to close, open once, and hold something" do
+      assert_raise Potion.CompileError, ~r/never closes/, fn ->
+        Music.compile!("[c4 e4", :t, beat: 12)
+      end
+
+      assert_raise Potion.CompileError, ~r/never opened/, fn ->
+        Music.compile!("c4 ]", :t, beat: 12)
+      end
+
+      assert_raise Potion.CompileError, ~r/empty group/, fn ->
+        Music.compile!("[ ] c4", :t, beat: 12)
+      end
+
+      assert_raise Potion.CompileError, ~r/group inside a group/, fn ->
+        Music.compile!("[c4 [e4]]", :t, beat: 12)
+      end
+
+      assert_raise Potion.CompileError, ~r/holds a note inside a group/, fn ->
+        Music.compile!("[c4 . e4]", :t, beat: 12)
+      end
+    end
+
+    # `gap < beat` no longer guarantees a note survives: a grouped note is a
+    # slice of the beat, and the gap can swallow the slice whole.
+    test "a gap that swallows a slice is refused" do
+      assert_raise Potion.CompileError, ~r/gap of 4 on a note 4 frames long/, fn ->
+        Music.compile!("[c4 e4]", :t, beat: 8, gap: 4)
+      end
+    end
+
+    test "the envelope is named, defaults to the organ, and is refused by name" do
+      assert Music.compile!("c4", :t).envelope == 0xF0
+      assert Music.compile!("c4", :t, envelope: :pluck).envelope == 0xF2
+
+      assert_raise Potion.CompileError, ~r/envelope of :zing.*:organ.*:pluck/s, fn ->
+        Music.compile!("c4", :t, envelope: :zing)
+      end
+    end
+  end
+
   describe "the second voice" do
     # The wave channel counts its period twice as slowly, so the same note is a
     # different number there. A bass compiled against the lead's table would be

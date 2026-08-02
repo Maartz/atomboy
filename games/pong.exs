@@ -43,40 +43,44 @@ defmodule Pong do
   # between notes that run into one another and notes with a rhythm: without it
   # the channel is simply retriggered at each step and never stops, which is
   # what a sequencer sounds like and not what an instrument does.
+  # The bar lines are ink for the reader -- the parser walks past them -- and
+  # they are why the three voices can be checked against each other by eye.
+  # `envelope: :pluck` lets each note die away on its own, the way a struck
+  # string does, instead of holding like an organ until the next one.
   music :attract,
         [
-          lead: "c4 e4 g4 c5 . . g4 e4 c4 . . . - -",
-          harmony: "e3 g3 c4 e4 . . c4 g3 e3 . . . - -",
-          bass: "c2 . . . g1 . . . c2 . . . - ."
+          lead: "c4 e4 g4 c5 | . . g4 e4 | c4 . . . | - -",
+          harmony: "e3 g3 c4 e4 | . . c4 g3 | e3 . . . | - -",
+          bass: "c2 . . . | g1 . . . | c2 . . . | - ."
         ],
         beat: 10,
         duty: :eighth,
         gap: 3,
-        vibrato: :gentle
+        vibrato: :gentle,
+        envelope: :pluck
 
-  # Kazumi Totaka's "Ballad of the Wind Fish" adapted for your Elixir Game Boy engine.
-  # Channels 1 and 2 utilize a thin 12.5% duty cycle (:eighth) for that signature nasal lead.
-  # Channel 3 (bass) provides the deep, smooth foundation.
+  # Kazumi Totaka's "Ballad of the Wind Fish" (Zelda: Link's Awakening)
+  # Adjusted for Potion's note naming (sharps via 's', '-' for rests) 
+  # and safe Game Boy frequency constraints (all bass notes >= c2).
   music :wind_fish,
         [
-          # Main vocal melody (Channel 1)
+          # Channel 1: Main Melody
           lead:
-            "e4 . g4 . a4 . . . c5 . . . a4 . . . g4 . e4 . d4 . e4 . g4 . . . . . . . e4 . g4 . a4 . . . c5 . d5 . e5 . . . d5 . . . c5 . . . . . . . - -",
+            "e4 . g4 . as4 . . . d5 . . . as4 . . . a4 . f4 . e4 . f4 . g4 . . . . . . . e4 . g4 . as4 . . . d5 . e5 . f5 . . . e5 . . . d5 . . . . . . . - -",
 
-          # Parallel harmony a third/fifth below (Channel 2)
+          # Channel 2: Parallel Harmony
           harmony:
-            "c4 . e4 . f4 . . . a4 . . . f4 . . . e4 . c4 . b3 . c4 . e4 . . . . . . . c4 . e4 . f4 . . . a4 . b4 . c5 . . . b4 . . . a4 . . . . . . . - -",
+            "d4 . f4 . g4 . . . as4 . . . g4 . . . f4 . d4 . c4 . d4 . e4 . . . . . . . d4 . f4 . g4 . . . as4 . c5 . d5 . . . c5 . . . as4 . . . . . . . - -",
 
-          # Foundational root bass notes (Channel 3 - Wave)
+          # Channel 3: Wave Bass (Shifted up to octave 2 to stay above the 64Hz threshold)
+          # Sequence: d2 -> as2 -> f2 -> c2
           bass:
-            "a2 . . . . . . . f2 . . . . . . . c2 . . . . . . . g2 . . . . . . . a2 . . . . . . . f2 . . . . . . . c2 . . . . . . . g2 . . . . . . . - -"
+            "d2 . . . . . . . as2 . . . . . . . f2 . . . . . . . c2 . . . . . . . d2 . . . . . . . as2 . . . . . . . f2 . . . . . . . c2 . . . . . . . - -"
         ],
-        # Slightly slower pace to capture the dreamy, melancholy atmosphere
-        beat: 12,
-        # 12.5% square wave for authentic Game Boy lead texture
+        beat: 14,
         duty: :eighth,
-        # Essential 3-frame gap to give the 8-bit envelopes "breathing room"
-        gap: 3
+        gap: 3,
+        vibrato: :gentle
 
   # ── The director ───────────────────────────────────────────────────────────
   #

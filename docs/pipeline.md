@@ -210,7 +210,10 @@ played and a tune costs twice the bytes. `vibrato:` is the one thing here that r
 frequency a note was struck at, walks a sixteen-entry table of deviations, and
 rewrites the register with the trigger bit clear — so the note bends instead of
 starting again. The table opens on four zeros, which is the delay without a
-counter. `duty:` travels in a kernel cell that `play` writes, because the player rewrites the duty register on every note. The
+counter. `duty:` travels in a kernel cell that `play` writes, because the player rewrites the duty register on every note. `[c4 e4 g4]` packs a triplet into one beat as three ordinary steps, `|` is a
+bar line the parser walks past, `envelope: :pluck` is the hardware's own decay,
+and the notation is *evaluated* — a motif in a module attribute is ordinary
+Elixir, which is the pattern language instead of a `defpattern` of our own. The
 bass is compiled against its own table: the wave channel counts its period twice
 as slowly, so the same note is a different number there — and it reaches an
 octave lower, which is why a bass may say `c1` and a lead may not.

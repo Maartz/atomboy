@@ -837,6 +837,112 @@ defmodule Potion.DSLTest do
     end
   end
 
+  describe "a motif reused" do
+    # The whole point of evaluating the notation instead of pattern-matching it:
+    # Elixir is already the pattern language. Two modules, one saying the phrase
+    # twice by hand and one reusing an attribute, and the programs they compile
+    # to are identical -- the roms differ only by the title the module name puts
+    # in the header, which is why program/0 is compared and not rom/0.
+    test "an attribute reused twice is the phrase written twice" do
+      [{by_hand, _} | _] =
+        Code.compile_string("""
+        defmodule Reused.ByHand#{:erlang.unique_integer([:positive])} do
+          use Potion
+
+          music :song, "c4 e4 g4 . c4 e4 g4 ."
+
+          defactor :v do
+            variables t: 0
+
+            every_frame do
+              t = t + 1
+              if t == 3, do: play(:song)
+            end
+          end
+        end
+        """)
+
+      [{by_motif, _} | _] =
+        Code.compile_string("""
+        defmodule Reused.ByMotif#{:erlang.unique_integer([:positive])} do
+          use Potion
+
+          @motif "c4 e4 g4 ."
+          music :song, @motif <> " " <> @motif
+
+          defactor :v do
+            variables t: 0
+
+            every_frame do
+              t = t + 1
+              if t == 3, do: play(:song)
+            end
+          end
+        end
+        """)
+
+      assert by_hand.program() == by_motif.program()
+    end
+
+    # A variable from the module body is genuinely out of reach -- a macro never
+    # sees bindings -- so the refusal has to point at the thing that works.
+    test "a body variable is refused, and the message names the attribute" do
+      assert_raise Potion.CompileError, ~r/could not be worked out.*module attribute/s, fn ->
+        Code.compile_string("""
+        defmodule Reused.ByVariable do
+          use Potion
+
+          motif = "c4 e4"
+          music :song, motif
+
+          defactor :v do
+            variables t: 0
+
+            every_frame do
+              t = t + 1
+              if t == 3, do: play(:song)
+            end
+          end
+        end
+        """)
+      end
+    end
+
+    # The pluck is the hardware's own decay: the kernel writes the envelope the
+    # tune asked for on every note, so the register has to hold 0xF2 while a
+    # plucked note sounds.
+    test "the tune's envelope reaches the channel" do
+      [{module, _} | _] =
+        Code.compile_string("""
+        defmodule Plucked#{:erlang.unique_integer([:positive])} do
+          use Potion
+
+          music :song, "c5 e5 g5", beat: 8, envelope: :pluck
+
+          defactor :v do
+            variables t: 0
+
+            every_frame do
+              t = t + 1
+              if t == 3, do: play(:song)
+            end
+          end
+        end
+        """)
+
+      rom = module.rom()
+
+      {_state, _ram, nr12} =
+        Enum.reduce(1..12, {Screen.boot_state(rom), Screen.boot_ram(rom), nil}, fn
+          _n, {state, ram, seen} ->
+            {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+            {state, ram, seen || Map.get(ram, 0xFF12)}
+        end)
+
+      assert nr12 == 0xF2, "the note took the organ instead of the pluck"
+    end
+  end
+
   describe "a wobble" do
     # The point of the whole thing, and the only part that could have been got
     # wrong quietly: the frequency is rewritten with the trigger bit clear, so

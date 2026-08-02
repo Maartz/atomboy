@@ -49,7 +49,10 @@ defmodule Mix.Tasks.Atomboy.Tune do
       end
 
     beat = opts[:beat] || Music.default_beat()
-    bytes = Music.compile!(notation, :tune, beat: beat)
+    # `.lead`: the notation compiles to its voices now, and one line of text is
+    # the lead alone. This readout broke the day the bass landed -- a map has no
+    # byte_size -- and nothing covered it; the test below the task does now.
+    bytes = Music.compile!(notation, :tune, beat: beat).lead
     steps = div(byte_size(bytes), 3) - 1
 
     if opts[:bytes] do

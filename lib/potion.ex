@@ -292,7 +292,10 @@ defmodule Potion do
         count: count,
         states: state_names(behaviour),
         routines: Enum.map(routines, fn {name, _} -> name end),
-        tunes: Enum.map(tunes(module), &described/1)
+        # Empty on purpose: the tunes are trees until `__before_compile__`, and
+        # this allocation's tunes are overridden there anyway -- the rebuilt one
+        # is what fragments compile against.
+        tunes: []
       )
 
     shared_names!(module, allocation, name)
@@ -408,7 +411,11 @@ defmodule Potion do
           end)
 
         art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
-        songs = tunes(env.module)
+
+        songs =
+          Enum.map(tunes(env.module), fn {name, notation, opts} ->
+            {name, compiled_tune!(name, notation, opts, env)}
+          end)
 
         fragments =
           Enum.map(actors, fn {name, allocation, behaviour, routines} ->
@@ -543,8 +550,11 @@ defmodule Potion do
 
       music :theme, "c4 . e4 . g4 . c5 . . ."
       music :hurry, "c5 e5 c5 e5", beat: 4
-      music :song, [lead: "c5 e5 g5", harmony: "e4 g4 c5", bass: "c2 . g1 ."],
-        beat: 10, duty: :eighth, gap: 3, vibrato: :gentle
+      music :song, [lead: "c5 [e5 g5] | c6 .", harmony: "e4 g4 | c5 .", bass: "c2 . | g1 ."],
+        beat: 10, duty: :eighth, gap: 3, vibrato: :gentle, envelope: :pluck
+
+      @motif "c4 e4 g4 ."
+      music :loop, @motif <> " " <> @motif
 
   One line of text is the lead alone, on channel 1. `harmony:` is channel 2 and
   `bass:` the wave channel, which counts its period twice as slowly and so
@@ -565,25 +575,17 @@ defmodule Potion do
   instrument and another. `gap:` ends every note that many frames early, which
   is what turns notes running into one another into notes with a rhythm.
 
-  Compiled here, into the bytes the cartridge carries — `Potion.Music` sets out
-  the notation and the format. The kernel reads a step a frame, so a game starts
-  a tune once and never feeds it.
+  Compiled while the module compiles — in `__before_compile__`, so a motif kept
+  in a module attribute is already written by the time it is read — into the
+  bytes the cartridge carries; `Potion.Music` sets out the notation and the
+  format. The kernel reads a step a frame, so a game starts a tune once and
+  never feeds it.
   """
   defmacro music(name, notation, opts \\ []) do
     module = __CALLER__.module
     name = literal_name!(name, module)
 
-    unless is_binary(notation) or Keyword.keyword?(notation) do
-      raise CompileError, """
-      the tune #{inspect(name)} is written as a line of text, or as its voices: \
-      #{Macro.to_string(notation)}
-
-          music :theme, "c4 . e4 . g4 ."
-          music :theme, lead: "c4 . e4 .", bass: "c2 . . ."
-      """
-    end
-
-    if Enum.any?(tunes(module), fn {taken, _} -> taken == name end) do
+    if Enum.any?(tunes(module), fn {taken, _notation, _opts} -> taken == name end) do
       raise CompileError, """
       two tunes called #{inspect(name)} in #{inspect(module)}.
 
@@ -591,23 +593,87 @@ defmodule Potion do
       """
     end
 
-    bytes = Potion.Music.compile!(notation, name, opts)
-    Module.put_attribute(module, :potion_tunes, tunes(module) ++ [{name, bytes}])
+    # The notation is kept as a tree and compiled in `__before_compile__`, not
+    # here, and the delay is load-bearing: a module's body is macro-expanded
+    # first and evaluated after, so at this moment an `@motif` two lines up has
+    # not been written yet -- read now, every attribute is `nil`. By the time
+    # `__before_compile__` runs the body has been evaluated, and a motif is a
+    # lookup away.
+    Module.put_attribute(module, :potion_tunes, tunes(module) ++ [{name, notation, opts}])
 
     :ok
   end
 
   defp tunes(module), do: Module.get_attribute(module, :potion_tunes) || []
 
-  # What `play` needs to know about a tune: which voices it carries and which
-  # square its pulses are. The bytes stay with the kernel.
+  # The notation is *evaluated*, not pattern-matched: the surface is Elixir,
+  # and Elixir already has the pattern language a tune wants -- module
+  # attributes for motifs, `<>` to chain them, `Enum.join` for lists. A
+  # `defpattern` of our own would be the first place this project doubled the
+  # host instead of using it.
+  #
+  # `@motif` is resolved by walking the tree rather than by the eval: inside
+  # `Code.eval_quoted` the `@` expands against a `__MODULE__` that is no longer
+  # there, and dies as an `ArgumentError` three layers down. Here the module is
+  # still open and every attribute the body set is a lookup away.
+  defp compiled_tune!(name, notation, opts, env) do
+    {notation, opts} =
+      try do
+        {notation, _} = notation |> attributes(env) |> Code.eval_quoted([], env)
+        {opts, _} = opts |> attributes(env) |> Code.eval_quoted([], env)
+        {notation, opts}
+      rescue
+        error ->
+          raise CompileError, """
+          the tune #{inspect(name)}'s notation could not be worked out while compiling:
+
+              #{Exception.message(error) |> String.split("\n") |> hd()}
+
+          A tune is built when the module compiles, so its notation has to be \
+          reachable then: a string, a module attribute, or an expression of those.
+
+              @motif "c4 e4 g4 ."
+              music :song, [lead: @motif <> " " <> @motif]
+
+          A plain variable from the module body is out of reach -- a macro never \
+          sees bindings. Make it an attribute.
+          """
+      end
+
+    unless is_binary(notation) or Keyword.keyword?(notation) do
+      raise CompileError, """
+      the tune #{inspect(name)} is written as a line of text, or as its voices: \
+      #{inspect(notation)}
+
+          music :theme, "c4 . e4 . g4 ."
+          music :theme, lead: "c4 . e4 .", bass: "c2 . . ."
+      """
+    end
+
+    Potion.Music.compile!(notation, name, opts)
+  end
+
+  defp attributes(ast, env) do
+    Macro.prewalk(ast, fn
+      {:@, _, [{attribute, _, context}]} when is_atom(attribute) and is_atom(context) ->
+        Macro.escape(Module.get_attribute(env.module, attribute))
+
+      node ->
+        node
+    end)
+  end
+
+  # What `play` needs to know about a tune: which voices it carries, which
+  # square its pulses are, and how a note carries its volume. The bytes stay
+  # with the kernel.
   defp described({name, voices}) do
     {name,
      %{
        harmony?: voices.harmony != <<>>,
        bass?: voices.bass != <<>>,
        duty: voices.duty,
-       vibrato: voices.vibrato
+       vibrato: voices.vibrato,
+       envelope: voices.envelope
      }}
   end
 
