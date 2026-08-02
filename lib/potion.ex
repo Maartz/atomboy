@@ -110,26 +110,54 @@ defmodule Potion do
   cell, whichever actor declared it and whatever the order -- a ball reads the
   paddles, and the paddles read the ball.
 
-  ## What the v0 compiles
+  ## What Potion compiles
 
-      background(2, 1, digit: score)     a digit on the background layer
-      background(0, 0, tile: 0)          any tile, by index
+  The whole surface, and there is no more of it than this.
 
-      vx = -1                            a negative literal, two's complement
-      vx = -vx                           and the sentence a bounce is made of
+  ### State
+
+      variables x: 80, vx: -1            cells of WRAM, and their first values
 
       x = 5                              a constant into a cell
       x = y                              one cell into another
       x = x + 1                          eight bits, which wrap
       x = y - 3
+      x = x + vy                         a cell on the right-hand side too
+      vx = -vx                           and the sentence a bounce is made of
 
-      if pressed?(key), do: …            :right :left :up :down :a :b :select :start
-      if pressed?(:a) do                 a block, several statements
-        x = x + 1
-        y = y - 1
+  ### Asking
+
+      if pressed?(:right), do: …         :right :left :up :down :a :b :select :start
+      if negative?(vx), do: …            the sign bit, which ordering cannot ask about
+      if y > 140, do: …                  == != < > <= >=, against a literal or a cell
+      if a and b, do: …                  `and` is free, `or` costs one jump
+      if going_down == 1, do: …, else: … two sentences instead of one
+      if pressed?(:a) do … end           a block, several statements
+
+  ### Showing
+
+      sprite(n, x: …, y: …, tile: …)     entry n of the mirror OAM, n a literal 0..39
+      background(2, 1, digit: score)     a digit on the background layer
+      background(0, 0, tile: :wall)      a tile, by name or by index
+      text(3, 7, "PRESS START")          words, turned into stores at compile time
+
+      tiles from: "art/pong.png",        a drawing, cut into tiles and named
+        names: [:ball, :paddle]
+
+  ### Screens, sound, and saying a thing once
+
+      state :title do                    an actor made of states instead of one body
+        on_enter do … end                once, on the frame the state is entered
+        every_frame do … end             every frame it stays in
       end
 
-      sprite(n, x: …, y: …, tile: …)    entry n of the mirror OAM, n a literal from 0 to 39
+      become(:playing)                   and the frame ends there
+      fade(0..3)                         the picture, down to a black screen
+
+      beep(:c5)                          a note, :c2 to :b7, sharps as `cs`
+
+      routine :bounce do … end           written once
+      bounce()                           called from anywhere in the actor
 
   `sprite` writes into the kernel's mirror OAM — never into the real OAM, which
   is only writable during the vblank. The hardware offsets (Y+16, X+8) are added
@@ -137,14 +165,34 @@ defmodule Potion do
   at pixel (80, 72) of the screen, and not sixteen lines further down. The
   attributes are zeroed.
 
+  ## The loop
+
+      ELIXIR_ERL_OPTIONS="-noinput" mix atomboy.live games/pong.exs
+
+  Plays the game and watches the file: save it, and the running console picks up
+  the new cartridge without restarting. The ball keeps its position, the cells
+  keep their values, and what you changed is different on the next frame. It is
+  the trick GOAL played on the PlayStation, and it is nearly free here because
+  `Atomboy.Screen.frame/4` takes the ROM as an argument every frame.
+
+  Two things a reload cannot carry: the cells, since `variables` is an
+  allocation and a new line moves the addresses; and the screen, since a title
+  painted in `on_enter` has already been painted. `Mix.Tasks.Atomboy.Live` says
+  more.
+
+  `docs/pipeline.md` follows one line of a game from Elixir down to the bytes it
+  becomes.
+
   ## The modules
 
     * `Potion.Compiler` — the restricted AST into an assembler fragment, and all
       the refusal messages.
-    * `Potion.Runtime` — the runtime: the init, the vblank, the DMA, the pad, the
-      loop that calls the actor.
+    * `Potion.Runtime` — the kernel: the init, the vblank, the DMA, the pad, the
+      tiles, the alphabet, and the loop that calls each actor in turn.
     * `Potion.Assembler` — the tuples into bytes.
     * `Potion.ROM` — the 32 KB cartridge, header and checksums included.
+    * `Potion.PNG` and `Potion.Tiles` — a drawing down to its pixels, and pixels
+      into the console's two-byte-a-row tiles.
   """
 
   alias Potion.Assembler
