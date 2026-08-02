@@ -122,6 +122,11 @@ defmodule Potion do
       bullets[2] = 5                     a literal index is worked out here
       bullets[n] = bullets[n] + 1        one held in a cell, at run time
 
+      defactor :bullet, count: 4 do      one declaration, four instances
+        …                                its names mean *this* instance's
+        sprite(me, x: bx, …)             and `me` says which one
+      end
+
       x = 5                              a constant into a cell
       x = y                              one cell into another
       x = x + 1                          eight bits, which wrap
@@ -220,6 +225,7 @@ defmodule Potion do
       import Potion,
         only: [
           defactor: 2,
+          defactor: 3,
           variables: 1,
           every_frame: 1,
           tiles: 1,
@@ -244,8 +250,34 @@ defmodule Potion do
   compile anything, they return a value.
   """
   defmacro defactor(name, do: body) do
-    module = __CALLER__.module
+    declare!(name, [], body, __CALLER__.module)
+  end
+
+  @doc """
+  The same, in several instances: one declaration, `count:` sets of cells.
+
+      defactor :bullet, count: 4 do
+        variables bx: 0, live: 0
+
+        every_frame do
+          if live == 1, do: bx = bx + 2
+          sprite(me, x: bx, y: 60, tile: 0)
+        end
+      end
+
+  The body never says which instance it is. Each of the actor's own names
+  becomes `count` consecutive cells and the compiler subscripts them by `me`,
+  which the body may also read — that is how each instance reaches its own OAM
+  entry. Another actor sees those same names as ordinary arrays, and writing
+  into one is how anything gets spawned.
+  """
+  defmacro defactor(name, opts, do: body) do
+    declare!(name, opts, body, __CALLER__.module)
+  end
+
+  defp declare!(name, opts, body, module) do
     name = name!(name, module)
+    count = count!(opts, name)
     unique!(module, name)
 
     {declarations, behaviour, routines} = split!(body, name)
@@ -256,6 +288,7 @@ defmodule Potion do
       Compiler.allocate(declarations,
         base: next_base(module),
         prefix: "potion_#{slot}",
+        count: count,
         states: state_names(behaviour),
         routines: Enum.map(routines, fn {name, _} -> name end),
         tunes: Enum.map(tunes(module), fn {name, _} -> name end)
@@ -365,6 +398,14 @@ defmodule Potion do
             Map.merge(acc, allocation.cells)
           end)
 
+        # The lengths travel with the addresses. Without them a pool's cells
+        # would be visible to another actor as a name it could not subscript --
+        # and reaching into a pool from outside is how anything gets spawned.
+        arrays =
+          Enum.reduce(actors, %{}, fn {_name, allocation, _behaviour, _routines}, acc ->
+            Map.merge(acc, allocation.arrays)
+          end)
+
         art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
         songs = tunes(env.module)
 
@@ -373,6 +414,7 @@ defmodule Potion do
             allocation = %{
               allocation
               | cells: cells,
+                arrays: arrays,
                 tiles: art.names,
                 tunes: MapSet.new(songs, fn {name, _bytes} -> name end)
             }
@@ -744,6 +786,26 @@ defmodule Potion do
     `on_enter` is where a screen is painted: doing it in `every_frame` would \
     redraw it sixty times a second to no effect.
     """
+  end
+
+  # `count:` and nothing else. A pool of one is an actor, so the default says so
+  # rather than being a special case anywhere below.
+  defp count!(opts, name) do
+    case Keyword.get(opts, :count, 1) do
+      count when is_integer(count) and count in 1..255 ->
+        count
+
+      other ->
+        raise CompileError, """
+        the actor #{inspect(name)} asks for #{inspect(other)} instances.
+
+        `count:` is a whole number from 1 to 255, decided while the game \
+        compiles — every instance costs one cell per variable, out of the page \
+        the kernel leaves to the actors.
+
+            defactor :bullet, count: 4 do
+        """
+    end
   end
 
   defp state_names({:body, _}), do: []

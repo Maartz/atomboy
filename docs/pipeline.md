@@ -194,6 +194,12 @@ pushes the value first, because the address goes through HL and the expression
 being stored is free to use HL as well: `bullets[n] = bullets[n] + 1` uses it
 twice.
 
+**A pool.** `defactor :bullet, count: 4` is one body run four times. Each of the
+actor's own names becomes four consecutive cells, and the compiler rewrites
+every mention of them into a subscript by `me` before anything else happens — so
+what loops is exactly the code a single actor would have been. Another actor
+sees those same names as ordinary arrays, which is how one gets spawned.
+
 **A tune.** `music :theme, "c4 . e4 -"` becomes three bytes a step — frequency,
 frequency-with-trigger, frames — laid into the cartridge, and the kernel reads
 one step a frame between the pad and the actors. A game says `play(:theme)`

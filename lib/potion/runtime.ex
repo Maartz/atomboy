@@ -117,9 +117,12 @@ defmodule Potion.Runtime do
   # the tune is being read from, where it started so it can loop, and how many
   # frames the current step has left. A pointer of zero is silence, which is what
   # the init's clearing leaves behind.
-  @tune 0xC0A2
-  @tune_base 0xC0A4
-  @tune_wait 0xC0A6
+  # Which instance of a pooled actor is running. One cell for all of them: actors
+  # run one at a time and never nest, so there is never a second answer.
+  @me 0xC0A1 + 1
+  @tune 0xC0A3
+  @tune_base 0xC0A5
+  @tune_wait 0xC0A7
 
   @state 0xC100
   @hram_dma 0xFF80
@@ -608,6 +611,10 @@ defmodule Potion.Runtime do
   """
   @spec music_cells() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}
   def music_cells, do: {@tune, @tune_base, @tune_wait}
+
+  @doc "The cell holding which instance of a pooled actor is running."
+  @spec me() :: non_neg_integer()
+  def me, do: @me
 
   # Three bytes a step: frequency low, frequency high with the trigger bit, and
   # a count of frames. A length of zero is the end and sends the pointer back to

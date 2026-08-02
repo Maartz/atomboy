@@ -165,6 +165,7 @@ defmodule Potion.Compiler do
     tiles = Keyword.get(opts, :tiles, %{})
     states = Keyword.get(opts, :states, [])
     routines = Keyword.get(opts, :routines, [])
+    count = Keyword.get(opts, :count, 1)
 
     list = declarations!(declarations)
     names = Keyword.keys(list)
@@ -175,15 +176,20 @@ defmodule Potion.Compiler do
     # has elements, so a name's address is the sum of everything written above
     # it rather than its rank. `arrays` remembers the lengths, which is the only
     # thing that tells `bullets` apart from `x` afterwards.
+    # In a pool every variable is `count` cells rather than one -- an instance is
+    # a column through them all. That is what lets the body's `bx` mean `bx[me]`
+    # without a word of it appearing in the game.
     {cells, arrays, installed} =
       Enum.reduce(list, {%{}, %{}, base}, fn {name, value}, {cells, arrays, at} ->
-        case value do
-          values when is_list(values) ->
-            {Map.put(cells, name, at), Map.put(arrays, name, length(values)), at + length(values)}
+        span =
+          case value do
+            values when is_list(values) -> length(values)
+            _ -> count
+          end
 
-          _ ->
-            {Map.put(cells, name, at), arrays, at + 1}
-        end
+        arrays = if span > 1, do: Map.put(arrays, name, span), else: arrays
+
+        {Map.put(cells, name, at), arrays, at + span}
       end)
 
     capacity!(installed + length(machine_cells(states)), declarations, base)
@@ -201,6 +207,10 @@ defmodule Potion.Compiler do
       entered: if(states == [], do: nil, else: installed + 2),
       routines: MapSet.new(routines),
       in_routine: nil,
+      count: count,
+      # The names an instance carries, which the body reads without an index and
+      # everyone else reads with one.
+      pooled: if(count > 1, do: MapSet.new(names), else: MapSet.new()),
       tunes: MapSet.new(Keyword.get(opts, :tunes, []))
     }
   end
@@ -340,9 +350,64 @@ defmodule Potion.Compiler do
   """
   @spec compile(Macro.t(), allocation()) :: [Assembler.element()]
   def compile(body, allocation, routines \\ []) do
-    {compiled, counter} = block(body, allocation, 0)
-    install(allocation) ++ compiled ++ [{:ret}] ++ subroutines(routines, allocation, counter)
+    {compiled, counter} = block(instance(body, allocation), allocation, 0)
+
+    install(allocation) ++
+      pool(compiled, allocation) ++
+      [{:ret}] ++ subroutines(routines, allocation, counter)
   end
+
+  # A pool is the body, run once per instance, with `me` counting. Everything
+  # that makes the body speak of *this* instance happened before it got here:
+  # `instance/2` turned each of the actor's own names into a cell of an array
+  # indexed by `me`, so what loops is exactly the code a single actor would have
+  # been.
+  defp pool(compiled, %{count: 1}), do: compiled
+
+  defp pool(compiled, allocation) do
+    me = Runtime.me()
+    again = :"#{allocation.prefix}_again"
+
+    [{:xor, :a, :a}, {:ld, {:mem, me}, :a}, {:label, again}] ++
+      compiled ++
+      [
+        {:ld, :a, {:mem, me}},
+        {:inc, :a},
+        {:ld, {:mem, me}, :a},
+        {:cp, :a, allocation.count},
+        {:jp, :nz, {:label, again}}
+      ]
+  end
+
+  # Every name the pool owns becomes a cell of an array, subscripted by `me`.
+  # A game with no pool never meets this.
+  #
+  # The index of an existing subscript is walked and its array is not: inside a
+  # pool `bx[2]` means instance two's `bx`, which is how one instance speaks of
+  # another, and rewriting the name there would make it `bx[me][2]`.
+  defp instance(ast, %{pooled: pooled}) do
+    if MapSet.size(pooled) == 0, do: ast, else: walk(ast, pooled)
+  end
+
+  defp walk({{:., meta, [Access, :get]}, brackets, [array, index]}, pooled) do
+    {{:., meta, [Access, :get]}, brackets, [array, walk(index, pooled)]}
+  end
+
+  defp walk({name, meta, context} = node, pooled) when is_atom(name) and is_atom(context) do
+    if MapSet.member?(pooled, name) do
+      {{:., meta, [Access, :get]}, meta, [node, {:__me__, meta, nil}]}
+    else
+      node
+    end
+  end
+
+  defp walk({form, meta, args}, pooled) when is_list(args) do
+    {walk(form, pooled), meta, Enum.map(args, &walk(&1, pooled))}
+  end
+
+  defp walk(list, pooled) when is_list(list), do: Enum.map(list, &walk(&1, pooled))
+  defp walk({left, right}, pooled), do: {walk(left, pooled), walk(right, pooled)}
+  defp walk(other, _pooled), do: other
 
   @doc """
   An actor whose behaviour is a set of states, into one fragment.
@@ -378,6 +443,11 @@ defmodule Potion.Compiler do
           [{atom(), Macro.t()}]
         ) :: [Assembler.item()]
   def compile_machine(states, allocation, routines \\ []) do
+    states =
+      Enum.map(states, fn {name, enter, frame} ->
+        {name, instance(enter, allocation), instance(frame, allocation)}
+      end)
+
     done = done_label(allocation)
 
     {arms, counter} =
@@ -437,7 +507,8 @@ defmodule Potion.Compiler do
 
     {elements, _counter} =
       Enum.reduce(list, {[], counter}, fn {name, body}, {acc, counter} ->
-        {compiled, counter} = block(body, %{allocation | in_routine: name}, counter)
+        {compiled, counter} =
+          block(instance(body, allocation), %{allocation | in_routine: name}, counter)
 
         {acc ++ [{:label, routine_label(allocation, name)}] ++ compiled ++ [{:ret}], counter}
       end)
@@ -515,7 +586,20 @@ defmodule Potion.Compiler do
         end)
 
       value ->
-        [{:ld, :a, value}, {:ld, {:mem, allocation.cells[name]}, :a}]
+        # In a pool this lays the same first value in every instance, which is
+        # what "they all start alike" means and is all a game can say today.
+        [{:ld, :a, value}] ++
+          Enum.map(0..(span(name, allocation) - 1)//1, fn offset ->
+            {:ld, {:mem, allocation.cells[name] + offset}, :a}
+          end)
+    end
+  end
+
+  defp span(name, allocation) do
+    if MapSet.member?(Map.get(allocation, :pooled, MapSet.new()), name) do
+      allocation.count
+    else
+      1
     end
   end
 
@@ -597,7 +681,8 @@ defmodule Potion.Compiler do
 
   # ── An OAM entry ────────────────────────────────────────────────────────────
 
-  defp statement({:sprite, _, [index, fields]} = statement, allocation, counter) do
+  defp statement({:sprite, _, [index, fields]} = statement, allocation, counter)
+       when is_integer(index) do
     base = Runtime.oam_mirror() + 4 * entry!(index, statement)
     {x, y, tile} = fields!(fields, statement)
     tile = tile!(tile, allocation, statement)
@@ -607,6 +692,47 @@ defmodule Potion.Compiler do
         field(x, 8, base + 1, allocation, statement) ++
         field(tile, 0, base + 2, allocation, statement) ++
         [{:xor, :a, :a}, {:ld, {:mem, base + 3}, :a}]
+
+    {elements, counter}
+  end
+
+  # An entry the game picks while it runs -- which is what a pool of bullets
+  # needs, each instance writing its own. The address is `mirror + 4 * n`, and
+  # four is two doublings rather than a multiply the processor does not have.
+  #
+  # It is kept in DE and not HL, and that is the whole reason this clause is
+  # short. A field's value may be a cell of an array, which goes through HL, so
+  # an address parked there would be gone by the time the value arrived. `LD
+  # (DE), A` exists, DE survives everything the values do, and the four bytes
+  # are consecutive so `INC DE` walks them.
+  defp statement({:sprite, _, [index, fields]} = statement, allocation, counter) do
+    {x, y, tile} = fields!(fields, statement)
+    tile = tile!(tile, allocation, statement)
+
+    address =
+      [
+        {:ld, :a, {:mem, cell!(index, allocation, statement)}},
+        {:add, :a, :a},
+        {:add, :a, :a},
+        {:ld, :e, :a},
+        {:ld, :d, 0},
+        {:ld, :hl, Runtime.oam_mirror()},
+        {:add, :hl, :de},
+        {:ld, :d, :h},
+        {:ld, :e, :l}
+      ]
+
+    write = fn value, offset ->
+      sprite_value(value, offset, allocation, statement) ++
+        [{:ld, {:mem, :de}, :a}, {:inc, :de}]
+    end
+
+    elements =
+      address ++
+        write.(y, 16) ++
+        write.(x, 8) ++
+        write.(tile, 0) ++
+        [{:xor, :a, :a}, {:ld, {:mem, :de}, :a}]
 
     {elements, counter}
   end
@@ -1176,12 +1302,13 @@ defmodule Potion.Compiler do
 
   defp condition!({op, _, [left, right]}, otherwise, allocation, statement, counter)
        when op in [:==, :!=, :<, :>, :<=, :>=] do
-    address = cell!(left, allocation, statement)
     if op in [:<, :>, :<=, :>=], do: unsigned!(right, statement)
     {setup, operand} = term(right, allocation, statement)
     {jumps, counter} = skip_unless(op, otherwise, allocation, counter)
 
-    {[{:ld, :a, {:mem, address}}] ++ setup ++ [{:cp, :a, operand}] ++ jumps, counter}
+    left = load(left, allocation, statement)
+
+    {left ++ keep_a(setup, right) ++ [{:cp, :a, operand}] ++ jumps, counter}
   end
 
   # `and` is free, and that is not a turn of phrase: a condition already emits
@@ -1388,10 +1515,23 @@ defmodule Potion.Compiler do
        when operator in [:+, :-] do
     {setup, operand} = term(right, allocation, statement)
 
-    load(left, allocation, statement) ++ setup ++ [{arithmetic(operator), :a, operand}]
+    load(left, allocation, statement) ++
+      keep_a(setup, right) ++ [{arithmetic(operator), :a, operand}]
   end
 
   defp load(other, _allocation, _statement), do: reject!(other)
+
+  # The left-hand value is already in A when the right-hand operand is set up,
+  # and setting up a cell of an array reads its index into A. Two bytes so that
+  # `bx[me] > by[n]` means what it says; a plain cell only loads HL and needs
+  # none of this.
+  defp keep_a(setup, right) do
+    if match?({{:., _, [Access, :get]}, _, _}, right) do
+      [{:push, :af}] ++ setup ++ [{:pop, :af}]
+    else
+      setup
+    end
+  end
 
   defp arithmetic(:+), do: :add
   defp arithmetic(:-), do: :sub
@@ -1563,6 +1703,8 @@ defmodule Potion.Compiler do
        when is_atom(name) and is_atom(context) do
     cell!(name, allocation, statement)
   end
+
+  defp cell!(name, _allocation, _statement) when name in [:me, :__me__], do: Runtime.me()
 
   defp cell!(name, allocation, statement) when is_atom(name) do
     case allocation.cells do

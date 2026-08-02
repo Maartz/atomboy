@@ -601,6 +601,109 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # Four bullets from one `defactor`. The body never says which one it is: `bx`
+  # means this instance's `bx`, and the compiler puts the subscript in.
+  #
+  # The gun is a separate actor that reaches into the pool from outside, where
+  # the same cells are an ordinary array — which is what makes a pool spawnable
+  # at all.
+  defmodule Volley2 do
+    @moduledoc false
+    use Potion
+
+    defactor :gun do
+      variables t: 0, fired: 0
+
+      every_frame do
+        t = t + 1
+
+        # Not on the first turn. The pool lays its starting values down on its
+        # own first turn, and it runs after this one -- a shot fired before that
+        # would be tidied away by the very cells it wrote into.
+        if t == 3 do
+          if fired == 0 do
+            fired = 1
+            live[1] = 1
+            bx[1] = 40
+          end
+        end
+      end
+    end
+
+    defactor :bullet, count: 4 do
+      variables bx: 10, live: 0
+
+      every_frame do
+        if live == 1, do: bx = bx + 2
+        sprite(me, x: bx, y: 60, tile: 0)
+      end
+    end
+  end
+
+  describe "a pool of actors" do
+    test "one declaration takes one cell per variable per instance" do
+      addresses = Volley2.addresses()
+
+      # `bx` and `live` are four cells each, laid consecutively, so the second
+      # array starts four past the first.
+      assert addresses.live == addresses.bx + 4
+    end
+
+    test "every instance starts alike" do
+      # Two turns of the pool, before the gun fires: one `variables` line put 10
+      # into all four.
+      {_pixels, _state, ram} = run_frames(Volley2, 4)
+      base = Volley2.addresses().bx
+
+      assert for(i <- 0..3, do: Map.get(ram, base + i)) == [10, 10, 10, 10]
+    end
+
+    # The body runs once per instance and each run sees its own cells. A pool
+    # that shared one set would move all four, and a loop that ran once would
+    # move none but the first.
+    test "the instance that was woken is the only one that moves" do
+      {_pixels, _state, ram} = run_frames(Volley2, 10)
+      base = Volley2.addresses().bx
+
+      [zero, one, two, three] = for i <- 0..3, do: Map.get(ram, base + i)
+
+      assert one > 44, "the woken bullet did not fly"
+      assert [zero, two, three] == [10, 10, 10], "a sleeping bullet moved"
+    end
+
+    # `sprite(me, …)` gives each instance its own OAM entry, so four bullets are
+    # four sprites rather than four writes to the same one.
+    test "each instance writes its own OAM entry" do
+      {_pixels, _state, ram} = run_frames(Volley2, 10)
+
+      ys = for entry <- 0..3, do: Map.get(ram, 0xFE00 + 4 * entry)
+
+      # All four are at y = 60 plus the hardware's sixteen.
+      assert ys == [76, 76, 76, 76]
+
+      xs = for entry <- 0..3, do: Map.get(ram, 0xFE01 + 4 * entry)
+      assert Enum.count(xs, &(&1 == 18)) == 3
+      assert Enum.any?(xs, &(&1 > 50)), "the flying bullet's sprite did not follow it"
+    end
+
+    test "a count that is not a number of instances is refused" do
+      assert_raise Potion.CompileError, ~r/1 to 255/, fn ->
+        Code.compile_string("""
+        defmodule Pooled.Bad do
+          use Potion
+
+          defactor :thing, count: 0 do
+            variables x: 0
+            every_frame do
+              x = x + 1
+            end
+          end
+        end
+        """)
+      end
+    end
+  end
+
   describe "an array" do
     test "its cells are consecutive, and the game sees one name" do
       addresses = Volley.addresses()
@@ -1743,11 +1846,22 @@ defmodule Potion.DSLTest do
       assert message =~ "0 to 39"
     end
 
-    test "a sprite number that is not a literal" do
-      message =
-        reject!("Rejected.OamVariable", "variables n: 1", "sprite(n, x: 10, y: 10, tile: 0)")
+    # A sprite number held in a cell used to be refused and is now the point: a
+    # pool of bullets writes one OAM entry per instance, and which entry is
+    # decided while the game runs. The address becomes `mirror + 4 * n`, four
+    # being two doublings rather than a multiply the processor does not have.
+    test "a sprite number held in a cell is worked out at run time" do
+      allocation = Potion.Compiler.allocate(n: 0, px: 0)
 
-      assert message =~ "is not a literal"
+      body =
+        {:sprite, [], [{:n, [], nil}, [x: {:px, [], nil}, y: 10, tile: 0]]}
+
+      elements = Potion.Compiler.compile(body, allocation)
+
+      assert {:ld, :a, {:mem, allocation.cells.n}} in elements
+      assert Enum.count(elements, &(&1 == {:add, :a, :a})) == 2
+      assert {:ld, :hl, Potion.Runtime.oam_mirror()} in elements
+      assert {:ld, {:mem, :de}, :a} in elements
     end
 
     test "a comparison against something that is neither variable nor byte" do
