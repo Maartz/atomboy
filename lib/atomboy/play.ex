@@ -172,6 +172,13 @@ defmodule Atomboy.Play do
            paused: false,
            history: [],
            note: nil,
+           # The hot seam: a function the caller may hand in, asked every so
+           # often whether there is a newer cartridge. `Screen.frame` takes the
+           # ROM as an argument, so swapping it is an assignment -- the console
+           # keeps its RAM, its registers and its program counter, and the game
+           # changes underneath itself.
+           reload: Keyword.get(opts, :reload),
+           reload_mark: 0,
            last_frame: nil,
            fps: 0.0,
            fps_mark: System.monotonic_time(:microsecond),
@@ -235,9 +242,38 @@ defmodule Atomboy.Play do
           error
 
         _ ->
-          resume(ctx)
+          ctx |> reload() |> resume()
       end
     end
+  end
+
+  # Asked four times a second rather than every frame: a stat() sixty times a
+  # second to learn nothing is a syscall a frame, and a person cannot save a file
+  # faster than this notices.
+  #
+  # A cartridge that fails to build leaves the running one alone. That is the
+  # whole reason this returns the old context on an error rather than stopping:
+  # a typo mid-edit should cost a note in the status line, not the game state
+  # that took a minute to reach.
+  defp reload(%{reload: nil} = ctx), do: ctx
+
+  defp reload(%{frame: n, reload_mark: mark} = ctx) when n - mark < 15, do: ctx
+
+  defp reload(ctx) do
+    ctx = %{ctx | reload_mark: ctx.frame}
+
+    case ctx.reload.() do
+      {:ok, rom} -> %{ctx | rom: rom, note: {"reloaded", 90}}
+      {:error, message} -> %{ctx | note: {"× " <> first_line(message), 240}}
+      :unchanged -> ctx
+    end
+  end
+
+  defp first_line(message) do
+    message
+    |> String.split("\n", trim: true)
+    |> List.first("compile error")
+    |> String.slice(0, 48)
   end
 
   defp resume(ctx) do
