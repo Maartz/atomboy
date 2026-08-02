@@ -494,6 +494,56 @@ defmodule Potion.Compiler do
     {sprite_value(value, base, allocation, statement) ++ [{:ld, {:mem, address}, :a}], counter}
   end
 
+  # ── Words on the background ─────────────────────────────────────────────────
+
+  defp statement({:text, _, [column, row, string]} = statement, _allocation, counter)
+       when is_binary(string) do
+    column = square!(column, statement)
+    row = square!(row, statement)
+    characters = string |> String.upcase() |> String.to_charlist()
+
+    if column + length(characters) > 32 do
+      raise CompileError, """
+      #{inspect(string)} runs off the map: #{length(characters)} squares from \
+      column #{column}, and the map is 32 wide.
+
+          #{one_line(statement)}
+
+      The screen shows the first 20 columns, so a line meant to be read starts \
+      at 20 minus its length or less.
+      """
+    end
+
+    # Unrolled, one character at a time, and there is nothing to unroll it from:
+    # the string is known here and the map addresses are consecutive, so a loop
+    # would need the string in ROM, a pointer, a counter and a terminator to save
+    # three bytes a character on a title screen written once.
+    {characters
+     |> Enum.with_index()
+     |> Enum.flat_map(fn {character, offset} ->
+       [
+         {:ld, :a, glyph!(character, string, statement)},
+         {:ld, {:mem, Runtime.background_address(column + offset, row)}, :a}
+       ]
+     end), counter}
+  end
+
+  defp statement({:text, _, [_column, _row, other]} = statement, _allocation, _counter) do
+    raise CompileError, """
+    `text` takes a string written out: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    The letters are turned into tile numbers while the game compiles, and laid \
+    down one store each. There is nothing at run time that could read a cell and \
+    find words in it.
+
+    A number that changes is what `digit:` is for:
+
+        background(2, 1, digit: score)
+    """
+  end
+
   # ── Changing state ──────────────────────────────────────────────────────────
 
   defp statement({:become, _, [name]} = statement, allocation, counter) do
@@ -581,6 +631,36 @@ defmodule Potion.Compiler do
   end
 
   defp statement(other, _allocation, _counter), do: reject!(other)
+
+  # A character to the tile that draws it. Three ranges and a space, and the
+  # space is the one worth pointing at: it is tile 1, the empty tile the init
+  # already fills the whole map with, so a gap between two words costs nothing
+  # that was not already spent.
+  defp glyph!(?\s, _string, _statement), do: 1
+
+  defp glyph!(character, _string, _statement) when character in ?0..?9,
+    do: Runtime.digits() + (character - ?0)
+
+  defp glyph!(character, _string, _statement) when character in ?A..?Z,
+    do: Runtime.alphabet() + (character - ?A)
+
+  defp glyph!(character, string, statement) do
+    case Enum.find_index(~c".,!?-:", &(&1 == character)) do
+      nil ->
+        raise CompileError, """
+        no glyph for #{inspect(<<character::utf8>>)}, in #{inspect(string)}.
+
+            #{one_line(statement)}
+
+        The kernel's font is A to Z, the ten digits, a space, and `. , ! ? - :` \
+        Anything else would be a tile the game draws itself and places with \
+        `background`.
+        """
+
+      index ->
+        Runtime.alphabet() + 26 + index
+    end
+  end
 
   defp state!(name, allocation, statement) when is_atom(name) do
     case Map.fetch(allocation.states, name) do

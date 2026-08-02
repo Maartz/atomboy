@@ -445,6 +445,7 @@ defmodule Potion.DSLTest do
       state :title do
         on_enter do
           seen = seen + 1
+          text(5, 6, "PRESS START")
         end
 
         every_frame do
@@ -546,6 +547,47 @@ defmodule Potion.DSLTest do
 
       {_state, ram} = frames(Screens, state, Joypad.set(ram, @released, @released), 4)
       assert Map.get(ram, 0xFF47) == 0xF9
+    end
+
+    # The title screen says PRESS START, painted in `on_enter`. Reading the map
+    # back is what says the characters became the right tiles: P is the
+    # sixteenth letter, the space is the empty tile the map was already full of,
+    # and both have to land on consecutive squares of row 6.
+    test "a string becomes tiles on the background map" do
+      {_pixels, _state, ram} = run_frames(Screens, 10)
+
+      row = 0x9800 + 6 * 32
+      written = for i <- 0..10, do: Map.get(ram, row + 5 + i)
+
+      alphabet = Potion.Runtime.alphabet()
+
+      assert written == [
+               alphabet + (?P - ?A),
+               alphabet + (?R - ?A),
+               alphabet + (?E - ?A),
+               alphabet + (?S - ?A),
+               alphabet + (?S - ?A),
+               1,
+               alphabet + (?S - ?A),
+               alphabet + (?T - ?A),
+               alphabet + (?A - ?A),
+               alphabet + (?R - ?A),
+               alphabet + (?T - ?A)
+             ]
+    end
+
+    # The glyph a letter points at has to be the letter, not merely a distinct
+    # number per character -- a mapping off by one would satisfy the test above
+    # and spell QSFTT TUBSU on the glass.
+    test "the tile a letter points at holds the letter's own bitmap" do
+      {_pixels, _state, ram} = run_frames(Screens, 10)
+
+      # P, the sixteenth letter: its sixteen bytes, read out of VRAM.
+      start = 0x8000 + (Potion.Runtime.alphabet() + (?P - ?A)) * 16
+      copied = for i <- 0..15, do: Map.get(ram, start + i, 0)
+
+      expected = binary_part(Potion.Runtime.letter_bytes(), (?P - ?A) * 16, 16)
+      assert :binary.list_to_bin(copied) == expected
     end
 
     test "the two cells the machine keeps are not in the game's own" do
