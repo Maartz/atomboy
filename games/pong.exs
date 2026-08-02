@@ -8,9 +8,9 @@
 # Two things are worth reading for rather than around. The ball's vertical speed
 # is a fraction of a pixel a frame and where the paddle is struck decides which,
 # so a ball can leave at an angle other than 45 degrees — `acc` below. And the
-# rival moves through that same mechanism at a lower speed, which is what makes
-# it beatable: not a number tuned until it felt fair, but a ceiling it cannot
-# cross.
+# rival moves through that same mechanism at a speed chosen by playing the game
+# two thousand frames at a time and counting, which the comment above it sets
+# out — a ceiling alone turned out not to be enough.
 
 defmodule Pong do
   use Potion
@@ -140,25 +140,36 @@ defmodule Pong do
 
   # ── The rival, on the right ────────────────────────────────────────────────
   #
-  # It walks toward the ball, and the whole of its beatability is that it walks
-  # *slower than the ball can climb*. Its speed is 96 out of 128 against a ball
-  # that leaves a paddle edge at 128, so a steep return gains a pixel every four
-  # frames — around thirty across the width of the screen, well past the sixteen
-  # of overlap it needs to make the save.
+  # It walks toward the ball through the same accumulator the ball uses, and
+  # slower than the ball can climb. That much is structural: at 1 pixel a frame
+  # against a ball that also moved at most 1, it could never fall behind by even
+  # a pixel, so no shot could beat it — not difficult, impossible.
   #
-  # It used to move a pixel a frame against a ball that also moved at most one,
-  # which made it not difficult but *impossible*: it could never fall behind by
-  # even a pixel, so no shot could ever beat it. This is that fixed, and it is
-  # the angle mechanism reused rather than a number chosen until it felt fair. A
-  # centre hit still leaves at 32 and is still caught, which is what makes
-  # aiming for the edges the way to score rather than a matter of luck.
+  # 80 out of 128 is a measured number and not a derived one, and the first
+  # attempt at deriving it was wrong. 96 gives a gap of some thirty pixels across
+  # a crossing, which looked like enough against a paddle sixteen tall — but the
+  # paddle answers to `by` anywhere from `ey - 8` to `ey + 16`, a window of
+  # twenty-four, and every bounce off a wall turns the ball back and hands the
+  # gap away. Measured over two thousand frames, a player aiming every shot at
+  # the edge of its own paddle scored **once**.
+  #
+  # The two numbers this one is chosen on, same length of game:
+  #
+  #     rival 96   perfect player 1-0     paddle left alone  1-5
+  #     rival 80   perfect player 4-0     paddle left alone  0-5
+  #     rival 64   perfect player 5-0     paddle left alone  2-5
+  #
+  # 80 is where a passive player is shut out and an aiming one wins comfortably.
+  # 64 reads better on paper — it is exactly the middle rung of the ball's speed
+  # ladder, so balls slower than the rival would be caught and faster ones not —
+  # but at 64 the rival misses on its own often enough to hand over two points.
 
   defactor :rival do
     variables ey: 64, etop: 56, emid: 72, ebot: 80, eacc: 0
 
     every_frame do
       if playing == 1 do
-        eacc = eacc + 96
+        eacc = eacc + 80
 
         if eacc >= 128 do
           eacc = eacc - 128
