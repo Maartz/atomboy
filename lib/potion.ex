@@ -164,6 +164,7 @@ defmodule Potion do
       fade(0..3)                         the picture, down to a black screen
 
       beep(:c5)                          a note, :c2 to :b7, sharps as `cs`
+      noise(:hit)                        a knock: :tick :hit :thud :boom
 
       music :theme, "c4 . e4 . g4 -"     a tune, declared beside the actors
       play(:theme)                       started once; the kernel keeps the beat

@@ -99,6 +99,11 @@ defmodule Potion.Runtime do
   @nr13 0x13
   @nr14 0x14
 
+  @nr41 0x20
+  @nr42 0x21
+  @nr43 0x22
+  @nr44 0x23
+
   @nr50 0x24
   @nr51 0x25
   @nr52 0x26
@@ -552,6 +557,16 @@ defmodule Potion.Runtime do
   """
   @spec pulse() :: {byte(), byte(), byte(), byte()}
   def pulse, do: {0x16, 0x17, 0x18, 0x19}
+
+  @doc """
+  Channel 4's four: length, envelope, the noise's own shape, and the trigger.
+
+  There is no frequency here. The channel is a shift register clocked by a
+  divisor and a shift — `NR43` — so what a game chooses is how coarse the noise
+  is, not what pitch it is. `Potion.Compiler` holds the four it names.
+  """
+  @spec noise() :: {byte(), byte(), byte(), byte()}
+  def noise, do: {@nr41, @nr42, @nr43, @nr44}
 
   @doc "Channel 1's five, the one the tune plays on: sweep, duty, envelope, frequency."
   @spec pulse_one() :: {byte(), byte(), byte(), byte(), byte()}

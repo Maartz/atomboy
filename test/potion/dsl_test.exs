@@ -872,6 +872,107 @@ defmodule Potion.DSLTest do
     Enum.reverse(heard)
   end
 
+  # A game that knocks and beeps in the same breath, which is the point of there
+  # being four channels: the knock is channel 4 and the note is channel 2, so
+  # neither cuts the other.
+  defmodule Knock do
+    @moduledoc false
+    use Potion
+
+    defactor :hand do
+      variables t: 0
+
+      every_frame do
+        t = t + 1
+
+        if t == 3 do
+          noise(:hit)
+          beep(:c5)
+        end
+      end
+    end
+  end
+
+  describe "a knock" do
+    # Channel 4 has no pitch to read back, so what says the four names mean
+    # something is how *coarse* each one is: a bright noise switches the output
+    # many times a frame and a low one hardly at all. Measured rather than
+    # asserted, because "it sounds different" is not a thing a test can hear.
+    test "the four are a real continuum from bright to low" do
+      coarseness = for kind <- [:tick, :hit, :thud, :boom], do: transitions(kind)
+
+      assert coarseness == Enum.sort(coarseness, :desc),
+             "the four noises do not get coarser in the order they are named: #{inspect(coarseness)}"
+
+      [tick | _] = coarseness
+      boom = List.last(coarseness)
+
+      assert tick > boom * 10, "the brightest and the lowest are barely different"
+    end
+
+    test "a knock and a note sound together, on channels of their own" do
+      {_pixels, _state, ram} = run_frames(Knock, 6)
+
+      # Channel 2's frequency was written by `beep`, channel 4's shape by
+      # `noise`, and both envelopes are live. One statement could not have done
+      # both -- they are different registers on different channels.
+      assert Map.get(ram, 0xFF18, 0) != 0, "the note never reached channel 2"
+      assert Map.get(ram, 0xFF22, 0) != 0, "the knock never reached channel 4"
+      assert Map.get(ram, 0xFF17, 0) != 0
+      assert Map.get(ram, 0xFF21, 0) != 0
+    end
+
+    test "a name that is not one of the four is refused, with the four" do
+      assert_raise Potion.CompileError,
+                   ~r/no noise is called :crash.*:boom, :hit, :thud, :tick/s,
+                   fn ->
+                     Potion.Compiler.compile(
+                       {:noise, [], [:crash]},
+                       Potion.Compiler.allocate(x: 0)
+                     )
+                   end
+    end
+  end
+
+  # How many times the mixed output changes value in the loudest frame of a
+  # knock. It is a proxy for brightness and it is the only one the samples give
+  # without a spectrum.
+  defp transitions(kind) do
+    [{module, _} | _] =
+      Code.compile_string("""
+      defmodule Knocking.#{kind |> Atom.to_string() |> String.capitalize()} do
+        use Potion
+
+        defactor :bang do
+          variables t: 0
+
+          every_frame do
+            t = t + 1
+            if t == 3, do: noise(:#{kind})
+          end
+        end
+      end
+      """)
+
+    rom = module.rom()
+
+    {_state, _ram, _apu, counts} =
+      Enum.reduce(1..20, {Screen.boot_state(rom), Screen.boot_ram(rom), %Atomboy.APU{}, []}, fn
+        _n, {state, ram, apu, acc} ->
+          {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+          {samples, ram, apu} = Atomboy.APU.frame(ram, apu)
+
+          values = for <<value::little-signed-16 <- samples>>, do: value
+
+          changes =
+            values |> Enum.chunk_every(2, 1, :discard) |> Enum.count(fn [a, b] -> a != b end)
+
+          {state, ram, apu, [changes | acc]}
+      end)
+
+    Enum.max(counts)
+  end
+
   describe "a note" do
     # The only judge of a sound is the APU, so the game is played and the samples
     # are read. What the trace has to show is not merely that something was heard

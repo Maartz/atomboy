@@ -206,6 +206,11 @@ one step a frame between the pad and the actors. A game says `play(:theme)`
 once and never feeds it. A hold is a longer step rather than a repeated one,
 because retriggering a note restarts it and the ear hears that as a stutter.
 
+**A knock.** `noise(:hit)` is six writes to channel 4, which is a shift register
+rather than an oscillator — there is no pitch to name, only how coarsely it is
+clocked. The four names are that continuum: measured, `:tick` changes the output
+some three hundred times a frame and `:boom` five.
+
 **A note.** `beep(:c5)` is four writes to channel 2 and nothing kept. The
 console has no pitch register — it has an eleven-bit number `x` where
 `f = 131072 / (2048 - x)` — so the table is that formula run backwards at

@@ -858,6 +858,74 @@ defmodule Potion.Compiler do
     """
   end
 
+  # ── A knock ─────────────────────────────────────────────────────────────────
+  #
+  # Channel 4 is a shift register, not an oscillator: there is no note to name.
+  # What `NR43` sets is how often the register is clocked -- a divisor and a
+  # shift -- so the choice a game makes is how *coarse* the noise is, and the
+  # four below are that continuum with names on it.
+  #
+  #     :tick  0x20  shift 2, divisor 8    a bright short hiss
+  #     :hit   0x44  shift 4, divisor 64   a knock
+  #     :thud  0x66  shift 6, divisor 96   low, and a beat longer
+  #     :boom  0x77  shift 7, divisor 112  the lowest rumble the chip has
+  #
+  # The second byte is the envelope, and it is what makes a knock a knock: full
+  # volume stepping down on its own, faster for the short ones. Nothing is kept,
+  # exactly as `beep` keeps nothing -- four writes and the channel sees itself
+  # out.
+  #
+  # Numbers rather than a name would have been the honest exposure of a register
+  # and a bad language: `noise(4, 2)` is a thing an author picks blind, and this
+  # project has already paid once for a number chosen that way.
+  @noises %{
+    tick: {0x20, 0xF1},
+    hit: {0x44, 0xF1},
+    thud: {0x66, 0xF2},
+    boom: {0x77, 0xF4}
+  }
+
+  defp statement({:noise, _, [kind]} = statement, _allocation, counter) when is_atom(kind) do
+    {_length, envelope, shape, trigger} = Runtime.noise()
+
+    case Map.fetch(@noises, kind) do
+      {:ok, {nr43, nr42}} ->
+        {[
+           {:ld, :a, nr42},
+           {:ldh, {:high, envelope}, :a},
+           {:ld, :a, nr43},
+           {:ldh, {:high, shape}, :a},
+           # The trigger last, once the shape is there -- a channel told to start
+           # before it is told what to be starts as whatever it was.
+           {:ld, :a, 0x80},
+           {:ldh, {:high, trigger}, :a}
+         ], counter}
+
+      :error ->
+        raise CompileError, """
+        no noise is called #{inspect(kind)}.
+
+            #{one_line(statement)}
+
+        There are four, from the brightest to the lowest: \
+        #{@noises |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)}.
+
+        They are channel 4, which has no pitch to name — it is a shift register, \
+        and what these choose is how coarse it sounds.
+        """
+    end
+  end
+
+  defp statement({:noise, _, [other]} = statement, _allocation, _counter) do
+    raise CompileError, """
+    `noise` takes one of four names, written out: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    #{@noises |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)}
+    """
+  end
+
   # ── A tune ──────────────────────────────────────────────────────────────────
   #
   # Two pointers and a countdown, and then the kernel does the rest: it reads a
