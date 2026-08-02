@@ -101,6 +101,8 @@ defmodule Potion.Compiler do
   label.
   """
 
+  import Bitwise, only: [band: 2, bor: 2, bsr: 2]
+
   alias Potion.Assembler
   alias Potion.CompileError
   alias Potion.Runtime
@@ -605,6 +607,74 @@ defmodule Potion.Compiler do
     """
   end
 
+  # ── A note ──────────────────────────────────────────────────────────────────
+  #
+  # The console has no pitch register. It has an eleven-bit number `x`, and the
+  # square wave it makes comes out at
+  #
+  #     f = 131072 / (2048 - x)
+  #
+  # so a note is that formula run backwards, here, at compile time. A game says
+  # `beep(:c5)` and never learns the number -- which is the same bargain `tile:`
+  # and `digit:` strike, and the reason the frequency table below is written as
+  # arithmetic rather than as a list of magic words.
+  #
+  # 440 Hz is A4 by definition and every other note is a twelfth root of two away
+  # from it, so the whole table is one expression. Below about 64 Hz the formula
+  # asks for a negative `x` and there is no note to be had; that is where the
+  # range stops, and it stops on its own rather than by being clipped.
+  @concert 440.0
+  @octaves 2..7
+  @semitones ~w(c cs d ds e f fs g gs a as b)a
+
+  @notes (for octave <- @octaves,
+              {name, index} <- Enum.with_index(@semitones),
+              into: %{} do
+            midi = (octave + 1) * 12 + index
+            hertz = @concert * :math.pow(2, (midi - 69) / 12)
+            {:"#{name}#{octave}", 2048 - round(131_072 / hertz)}
+          end)
+         |> Enum.reject(fn {_name, x} -> x < 0 end)
+         |> Map.new()
+
+  defp statement({:beep, _, [note]} = statement, _allocation, counter) when is_atom(note) do
+    {duty, envelope, low, high} = Runtime.pulse()
+
+    x = note!(note, statement)
+
+    # Four writes and no state kept. The envelope is what makes that enough: the
+    # channel is told to start at full volume and step down on its own, so the
+    # sound ends without the game ever coming back to end it. A `beep` inside an
+    # `if` is a sound effect, and the frame after it has nothing to remember.
+    {[
+       # 50% duty, no length counter -- the envelope decides when it stops.
+       {:ld, :a, 0x80},
+       {:ldh, {:high, duty}, :a},
+       # Volume 15, stepping down, one tick of 64 Hz between steps: about a
+       # quarter of a second from full to silence.
+       {:ld, :a, 0xF1},
+       {:ldh, {:high, envelope}, :a},
+       {:ld, :a, band(x, 0xFF)},
+       {:ldh, {:high, low}, :a},
+       # Bit 7 is the trigger, and it comes last: the frequency has to be there
+       # before the channel is told to start, or the first instant is the old note.
+       {:ld, :a, bor(0x80, bsr(x, 8))},
+       {:ldh, {:high, high}, :a}
+     ], counter}
+  end
+
+  defp statement({:beep, _, [other]} = statement, _allocation, _counter) do
+    raise CompileError, """
+    `beep` takes a note, written out: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    The console has no pitch register — it has a number, and which number a note \
+    is gets worked out while the game compiles. There is nothing at run time that \
+    could turn a cell into a frequency.
+    """
+  end
+
   # ── Calling a routine ───────────────────────────────────────────────────────
   #
   # Written `bounce()`, and the empty parentheses are what make it unambiguous:
@@ -746,6 +816,42 @@ defmodule Potion.Compiler do
   end
 
   defp statement(other, _allocation, _counter), do: reject!(other)
+
+  @doc """
+  The notes a `beep` can name, and the eleven-bit number each one is.
+
+      iex> Potion.Compiler.notes()[:a4]
+      1750
+      iex> Potion.Compiler.notes()[:a5]
+      1899
+
+  1750 is `2048 - 131072/440`, which is the console's own formula for 440 Hz. An
+  octave up halves the divisor, which is why the two numbers are not a ratio of
+  each other -- the register counts *down* to a period, not up to a pitch.
+  """
+  @spec notes() :: %{atom() => 0..2047}
+  def notes, do: @notes
+
+  defp note!(name, statement) do
+    case Map.fetch(@notes, name) do
+      {:ok, x} ->
+        x
+
+      :error ->
+        raise CompileError, """
+        no note is called #{inspect(name)}.
+
+            #{one_line(statement)}
+
+        Notes are a letter, an optional `s` for the sharp, and an octave: \
+        #{inspect(:c2)} up to #{inspect(:b7)}, so #{inspect(:a4)} is concert A \
+        and #{inspect(:fs5)} is the F sharp above the treble staff.
+
+        Below C2 the console cannot help: its register counts down to a period, \
+        and under about 64 Hz the number it would need is negative.
+        """
+    end
+  end
 
   # A character to the tile that draws it. Three ranges and a space, and the
   # space is the one worth pointing at: it is tile 1, the empty tile the init

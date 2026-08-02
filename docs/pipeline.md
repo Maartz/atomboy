@@ -187,6 +187,13 @@ call graph is walked at compile time and a circle is refused, because a `CALL`
 that goes round grows the stack by two bytes a lap until it reaches the actor's
 own cells.
 
+**A note.** `beep(:c5)` is four writes to channel 2 and nothing kept. The
+console has no pitch register — it has an eleven-bit number `x` where
+`f = 131072 / (2048 - x)` — so the table is that formula run backwards at
+compile time, and `:a4` is `2048 - 131072/440`. The envelope is what makes four
+writes enough: the channel starts at full volume and steps down on its own, so
+the sound ends without the game coming back to end it.
+
 **A word.** `text(3, 7, "PRESS START")` becomes eleven `LD` pairs, one a square,
 at compile time. There is no string at run time — there are letters that were
 already decided. A space is not a glyph but tile 1, the empty tile the init

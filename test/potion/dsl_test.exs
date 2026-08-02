@@ -524,6 +524,103 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A game that says one note and never mentions it again.
+  defmodule Beeper do
+    @moduledoc false
+    use Potion
+
+    defactor :voice do
+      variables t: 0
+
+      every_frame do
+        t = t + 1
+        if t == 3, do: beep(:a4)
+      end
+    end
+  end
+
+  describe "a note" do
+    # The only judge of a sound is the APU, so the game is played and the samples
+    # are read. What the trace has to show is not merely that something was heard
+    # but that it *stopped* -- the game writes four registers and never comes
+    # back, so if the envelope did not end the note nothing would.
+    test "it is heard, and it ends without the game ending it" do
+      peaks = peaks(Beeper, 20)
+
+      before = peaks |> Enum.take(4) |> Enum.max()
+      assert before == 0, "something sounded before the game asked"
+
+      loudest = Enum.max(peaks)
+      assert loudest > 0, "the note was never heard"
+
+      # From the peak onward it only ever falls, and reaches nothing. That is the
+      # envelope stepping down on its own: fifteen steps of a fixed size, which
+      # is what makes `beep` a statement rather than a thing to keep feeding.
+      after_peak = Enum.drop_while(peaks, &(&1 < loudest))
+
+      assert after_peak == Enum.sort(after_peak, :desc)
+      assert List.last(peaks) == 0, "the note never stopped"
+    end
+
+    # The kernel powers the APU on, and this is the only test that can tell.
+    # Both the console after its boot ROM and this emulator by default leave
+    # NR52 already on, so on an ordinary boot that write lands on a bit that was
+    # set — removing it changes nothing anybody would notice. It matters when
+    # something ran first and left the APU off, which is what this arranges: with
+    # the power bit clear, every other sound register ignores writes, so a `beep`
+    # would be four stores into nothing.
+    test "a beep is heard even when the APU was found switched off" do
+      rom = Beeper.rom()
+      silenced = Map.put(Screen.boot_ram(rom), 0xFF26, 0x00)
+
+      {_state, _ram, _apu, peaks} =
+        Enum.reduce(1..12, {Screen.boot_state(rom), silenced, %Atomboy.APU{}, []}, fn
+          _n, {state, ram, apu, acc} ->
+            {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+            {samples, ram, apu} = Atomboy.APU.frame(ram, apu)
+            peak = for(<<v::little-signed-16 <- samples>>, do: abs(v)) |> Enum.max(fn -> 0 end)
+            {state, ram, apu, [peak | acc]}
+        end)
+
+      assert Enum.max(peaks) > 0, "the kernel left the APU off and the beep went nowhere"
+    end
+
+    test "a note the console cannot reach is refused rather than rounded" do
+      assert_raise Potion.CompileError, ~r/no note is called :c0/, fn ->
+        Potion.Compiler.compile({:beep, [], [:c0]}, Potion.Compiler.allocate(x: 0))
+      end
+    end
+
+    # The table is the console's own formula run backwards, so the numbers are
+    # checkable rather than chosen. 440 Hz is A4 by definition.
+    test "the number a note becomes is the one the hardware formula asks for" do
+      assert Potion.Compiler.notes()[:a4] == 2048 - round(131_072 / 440)
+      assert Potion.Compiler.notes()[:a5] == 2048 - round(131_072 / 880)
+    end
+  end
+
+  # One frame at a time, the APU advanced alongside, and the loudest sample of
+  # each frame kept. Loudness rather than the samples themselves because the
+  # shape of a square wave is the emulator's business and its envelope is ours.
+  defp peaks(game, count) do
+    rom = game.rom()
+
+    {_state, _ram, _apu, peaks} =
+      Enum.reduce(1..count, {Screen.boot_state(rom), Screen.boot_ram(rom), %Atomboy.APU{}, []}, fn
+        _n, {state, ram, apu, acc} ->
+          {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+          {samples, ram, apu} = Atomboy.APU.frame(ram, apu)
+
+          peak =
+            for(<<value::little-signed-16 <- samples>>, do: abs(value))
+            |> Enum.max(fn -> 0 end)
+
+          {state, ram, apu, [peak | acc]}
+      end)
+
+    Enum.reverse(peaks)
+  end
+
   describe "a routine written once and called twice" do
     test "both callers get the routine's work, on their own input" do
       addresses = Twice.addresses()

@@ -59,7 +59,10 @@ defmodule Pong do
       end
 
       every_frame do
-        if pressed?(:start), do: become(:playing)
+        if pressed?(:start) do
+          beep(:c6)
+          become(:playing)
+        end
       end
     end
 
@@ -251,8 +254,15 @@ defmodule Pong do
         # sentence a bounce wants and it sticks: a ball that lands two frames
         # running inside the same wall flips twice and swims into it. The speed
         # is left alone — a wall changes where the ball goes, not how steeply.
-        if by <= 8, do: vy = 1
-        if by >= 128, do: vy = -1
+        if by <= 8 do
+          vy = 1
+          beep(:c5)
+        end
+
+        if by >= 128 do
+          vy = -1
+          beep(:c5)
+        end
 
         # ── The left paddle, and the angle it gives ──────────────────────────
         #
@@ -261,6 +271,7 @@ defmodule Pong do
         if bx <= 16 and by >= ptop and by <= pbot do
           vx = 1
           bx = 17
+          beep(:e5)
 
           # Where it struck, 0 at the top of the overlap and 24 at the bottom,
           # so 12 is the middle. Above the middle it leaves upward, below it
@@ -280,6 +291,7 @@ defmodule Pong do
         if bx >= 136 and by >= etop and by <= ebot do
           vx = -1
           bx = 135
+          beep(:g4)
 
           off = by - etop
 
@@ -291,6 +303,7 @@ defmodule Pong do
         # reads as far right and would trigger the rival's paddle.
         if bx <= 4 do
           theirs = theirs + 1
+          beep(:c3)
           bx = 80
           by = 68
           vx = 1
@@ -301,6 +314,7 @@ defmodule Pong do
 
         if bx >= 152 do
           mine = mine + 1
+          beep(:c6)
           bx = 80
           by = 68
           vx = -1

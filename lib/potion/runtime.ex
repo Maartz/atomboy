@@ -93,6 +93,10 @@ defmodule Potion.Runtime do
   @scx 0x43
   @ly 0x44
   @dma 0x46
+  @nr50 0x24
+  @nr51 0x25
+  @nr52 0x26
+
   @bgp 0x47
   @obp0 0x48
   @irq_if 0x0F
@@ -401,6 +405,7 @@ defmodule Potion.Runtime do
       letters() ++
       art(art) ++
       copy_dma() ++
+      sound() ++
       [
         {:ld, :a, @palette},
         {:ldh, {:high, @bgp}, :a},
@@ -517,6 +522,17 @@ defmodule Potion.Runtime do
   end
 
   @doc """
+  Channel 2's four registers: duty and length, envelope, frequency low, and the
+  one that carries the trigger.
+
+  The simple pulse, and the reason it is the one a `beep` uses: channel 1 is the
+  same generator with a frequency sweep bolted on, and leaving it alone leaves a
+  voice for whatever wants to slide.
+  """
+  @spec pulse() :: {byte(), byte(), byte(), byte()}
+  def pulse, do: {0x16, 0x17, 0x18, 0x19}
+
+  @doc """
   The two palette registers, background then sprites.
 
   A fade on this console is not a fade at all: there is nothing to blend. What
@@ -569,6 +585,29 @@ defmodule Potion.Runtime do
       {:ld, :a, :b},
       {:or, :a, :c},
       {:jr, :nz, {:label, :copy_letters}}
+    ]
+  end
+
+  # The APU, powered on and routed, once.
+  #
+  # On an ordinary boot all three of these write what was already there: the DMG
+  # leaves NR52 at 0xF1 and NR50 at 0x77 after its boot ROM, and NR51 at 0xF3
+  # already sends channel 2 to both ears. Removing the block changes nothing a
+  # test could see, which is exactly why the test that pins it switches the APU
+  # off first -- it earns its place against a cartridge that was reached through
+  # something else, not against a cold start.
+  #
+  # NR52 first, and that ordering is load-bearing: with the power bit clear every
+  # other sound register ignores writes, so a volume set before it would be a
+  # volume set into nothing.
+  defp sound do
+    [
+      {:ld, :a, 0x80},
+      {:ldh, {:high, @nr52}, :a},
+      {:ld, :a, 0x77},
+      {:ldh, {:high, @nr50}, :a},
+      {:ld, :a, 0xFF},
+      {:ldh, {:high, @nr51}, :a}
     ]
   end
 
