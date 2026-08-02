@@ -88,10 +88,12 @@ defmodule Atomboy.LiveTest do
     {_module, _rom, cells} = Live.build!(path)
     seed(path, cells)
 
-    touch(path, String.replace(@game, "sprite(0, x: x, y: 40, tile: 0)", "x = x * 2"))
+    # `x = x * 2` stood here until the day it compiled; `/` is refused for
+    # good — a byte has no halves.
+    touch(path, String.replace(@game, "sprite(0, x: x, y: 40, tile: 0)", "x = x / 2"))
 
     assert {:error, message} = Live.reload(path)
-    assert message =~ "*"
+    assert message =~ "halves"
   end
 
   defp seed(path, cells) do

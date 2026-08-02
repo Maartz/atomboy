@@ -1865,7 +1865,155 @@ defmodule Potion.Compiler do
       keep_a(setup, right) ++ [{arithmetic(operator), :a, operand}]
   end
 
+  # `x = y * 10`: the multiply the processor does not have, unrolled at compile
+  # time from the multiplier's bits -- a doubling for every bit, an add of the
+  # original for every set one. B keeps the original; `keep_a` is not needed
+  # because the multiplier brings no setup of its own.
+  defp load({:*, _, [left, right]}, allocation, statement) do
+    {value, times} = factors!(left, right, statement)
+    load(value, allocation, statement) ++ multiply(times)
+  end
+
+  # `x = div(y, 10)` and `x = rem(y, 10)`: the quotient and the rest, by the
+  # kernel's restoring division -- or, for a power of two, by the shifts and
+  # the mask the byte gives away for free. The divisor is a literal so that
+  # zero is met here, where there is someone to refuse it, and not at run time
+  # where a byte has no way to say "no answer".
+  defp load({:div, _, [left, right]} = expression, allocation, statement) do
+    load(left, allocation, statement) ++ quotient(divisor!(right, expression, statement))
+  end
+
+  defp load({:rem, _, [left, right]} = expression, allocation, statement) do
+    load(left, allocation, statement) ++ remainder(divisor!(right, expression, statement))
+  end
+
+  defp load({:/, _, [_left, _right]}, _allocation, statement) do
+    raise CompileError, """
+    `/` is refused on purpose: in Elixir it is the float division, and a byte \
+    has no halves.
+
+        #{one_line(statement)}
+
+    What a byte does is `div(y, 2)` — the quotient — and `rem(y, 2)`, the \
+    rest. Potion keeps Elixir's own names so the sentence means the same \
+    thing read cold.
+    """
+  end
+
   defp load(other, _allocation, _statement), do: reject!(other)
+
+  # ── Multiplying and dividing, without the hardware for either ───────────────
+
+  defp factors!(left, right, statement) do
+    case {left, right} do
+      {_, times} when is_integer(times) -> {left, times!(times, statement)}
+      {times, _} when is_integer(times) -> {right, times!(times, statement)}
+      _ -> times!(nil, statement)
+    end
+  end
+
+  defp times!(times, _statement) when is_integer(times) and times in 1..255, do: times
+
+  defp times!(0, statement) do
+    raise CompileError, """
+    a multiplication by zero: #{one_line(statement)}
+
+    That is `x = 0`, written the long way. Say that instead — the compiler \
+    could fold it silently, but a zero standing where a multiplier should be \
+    is usually a wrong constant, and this is the moment to look at it.
+    """
+  end
+
+  defp times!(other, statement) do
+    complaint =
+      case other do
+        nil -> "neither side is one"
+        n when is_integer(n) -> "#{n} is past the byte"
+        ast -> "#{Macro.to_string(ast)} is not one"
+      end
+
+    raise CompileError, """
+    `*` takes one literal factor, 1 to 255, and #{complaint}:
+
+        #{one_line(statement)}
+
+    The multiply is unrolled at compile time from the factor's bits, so the \
+    factor must be here to read. One held in a cell would need a loop the v0 \
+    does not have; past 255 it would be a wrap the compiler can see coming.
+    """
+  end
+
+  defp multiply(1), do: []
+
+  defp multiply(times) do
+    [_leading_one | bits] = Integer.digits(times, 2)
+
+    steps =
+      Enum.flat_map(bits, fn
+        0 -> [{:add, :a, :a}]
+        1 -> [{:add, :a, :a}, {:add, :a, :b}]
+      end)
+
+    if 1 in bits, do: [{:ld, :b, :a}] ++ steps, else: steps
+  end
+
+  defp divisor!(divisor, _expression, _statement) when is_integer(divisor) and divisor in 1..255,
+    do: divisor
+
+  defp divisor!(0, expression, statement) do
+    raise CompileError, """
+    a division by zero: `#{Macro.to_string(expression)}` in #{one_line(statement)}
+
+    It has no quotient a byte could hold, and there is no `nil` in WRAM to \
+    answer with. Refused here, where there is someone to tell.
+    """
+  end
+
+  defp divisor!(other, expression, statement) do
+    raise CompileError, """
+    `#{elem(expression, 0)}` takes a literal divisor, 1 to 255, and this is \
+    not one: #{Macro.to_string(other)}
+
+        #{one_line(statement)}
+
+    A divisor in a cell would meet zero at run time, where a byte has no way \
+    to say "no answer" — the `if` that guards it is a sentence only the game \
+    can write. So for now the divisor stands where the compiler can check it.
+    """
+  end
+
+  # A power of two divides by falling off the right edge, and its remainder is
+  # what the mask keeps. `div(y, 1)` is y and costs nothing; `rem(y, 1)` is
+  # the AND with zero, which really is how a byte says 0.
+  defp quotient(1), do: []
+
+  defp quotient(divisor) do
+    case shifts(divisor) do
+      nil -> called(divisor) ++ [{:ld, :a, :d}]
+      count -> List.duplicate({:srl, :a}, count)
+    end
+  end
+
+  defp remainder(divisor) do
+    case shifts(divisor) do
+      nil -> called(divisor)
+      _count -> [{:and, :a, divisor - 1}]
+    end
+  end
+
+  # The divisor's log2 when it is a power of two -- the shifts it costs -- and
+  # nil when only the kernel's routine will do.
+  defp shifts(divisor) do
+    case Integer.digits(divisor, 2) do
+      [1 | zeros] -> if Enum.all?(zeros, &(&1 == 0)), do: length(zeros), else: nil
+    end
+  end
+
+  # The kernel's routine: dividend rides A into D, the divisor takes C, the
+  # remainder comes back in A and the quotient in D.
+  defp called(divisor) do
+    [{:ld, :d, :a}, {:ld, :c, divisor}, {:call, {:label, :divide}}]
+  end
 
   # The left-hand value is already in A when the right-hand operand is set up,
   # and setting up a cell of an array reads its index into A. Two bytes so that
@@ -2270,6 +2418,9 @@ defmodule Potion.Compiler do
         x = x + step       a second cell, reached through HL
         vx = -1            a negative literal, in two's complement
         vx = -vx           and the sentence that turns a ball around
+        x = y * 10         a literal factor, unrolled at compile time
+        h = div(score, 10) the quotient — and rem(score, 10) the rest
+        x = random(16)     a byte of chance, the bound a power of two
 
         if pressed?(:right), do: x = x + 1
         if negative?(vx), do: vx = 1

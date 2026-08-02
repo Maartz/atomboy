@@ -135,6 +135,11 @@ defmodule Potion do
       vx = -vx                           and the sentence a bounce is made of
       x = random(16)                     0..15 — the bound a power of two, 2..256
 
+      x = y * 10                         unrolled at compile time; wraps like `+`
+      h = div(score, 100)                the quotient, and rem(score, 10) the
+                                         rest — a literal divisor, never zero;
+                                         `/` is refused: a byte has no halves
+
   ### Asking
 
       if pressed?(:right), do: …         :right :left :up :down :a :b :select :start

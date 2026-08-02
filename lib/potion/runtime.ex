@@ -785,7 +785,7 @@ defmodule Potion.Runtime do
       voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave) ++
       vibrato(:vibrato_lead, @lead_pitch, @lead_phase, {@nr13, @nr14}) ++
       vibrato(:vibrato_harmony, @harm_pitch, @harm_phase, {@nr23, @nr24}) ++
-      show_room() ++ touching() ++ random()
+      show_room() ++ touching() ++ random() ++ divide()
   end
 
   defp voice(label, {tune, tune_base, tune_wait}, kind) do
@@ -1051,6 +1051,36 @@ defmodule Potion.Runtime do
       {:rlca},
       {:add, :a, 41},
       {:ld, {:mem, :hl}, :a},
+      {:ret}
+    ]
+  end
+
+  # The divide the processor does not have: restoring division, one bit a step.
+  # D is the dividend on the way in and the quotient on the way out -- SLA
+  # vacates its bottom bit exactly when INC needs it -- A collects the
+  # remainder, C is the divisor, B counts the eight steps.
+  #
+  # The textbook routine carries a ninth-bit check after the RLA, for the
+  # remainder that doubles past 255. Byte in, byte out, it cannot happen: the
+  # remainder entering step k is a (k-1)-bit number -- it is a prefix of the
+  # dividend, reduced -- so it is at most 127 before any doubling. Verified
+  # against Elixir's `div` and `rem` over all 65280 pairs: zero mismatches,
+  # zero carries. The branch would be dead weight in the frame's budget.
+  defp divide do
+    [
+      {:label, :divide},
+      {:xor, :a, :a},
+      {:ld, :b, 8},
+      {:label, :divide_step},
+      {:sla, :d},
+      {:rla},
+      {:cp, :a, :c},
+      {:jr, :c, {:label, :divide_skip}},
+      {:sub, :a, :c},
+      {:inc, :d},
+      {:label, :divide_skip},
+      {:dec, :b},
+      {:jr, :nz, {:label, :divide_step}},
       {:ret}
     ]
   end

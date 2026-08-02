@@ -1194,6 +1194,152 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # The whole new arithmetic in one actor, every path: the kernel's restoring
+  # division (100, 10, and 200 -- past 128, where a lazy routine would go
+  # wrong), the shift and the mask of a power of two (8), the unrolled multiply
+  # by a non-power (10, 3), and the composition of all of it with `+` and with
+  # itself. `score + 7` walks all 256 bytes eventually: gcd(7, 256) = 1.
+  defmodule Scored do
+    @moduledoc false
+    use Potion
+
+    defactor :scored do
+      variables score: 0,
+                hundreds: 0,
+                tens: 0,
+                units: 0,
+                reversed: 0,
+                eighth: 0,
+                low3: 0,
+                tripled: 0,
+                coarse: 0,
+                leftover: 0
+
+      every_frame do
+        score = score + 7
+        hundreds = div(score, 100)
+        tens = rem(div(score, 10), 10)
+        units = rem(score, 10)
+        reversed = units * 10 + tens
+        eighth = div(score, 8)
+        low3 = rem(score, 8)
+        tripled = score * 3
+        coarse = div(score, 200)
+        leftover = rem(score, 200)
+      end
+    end
+  end
+
+  describe "the quotient and the rest" do
+    # One frame more than usual before looking: the first turn of an actor this
+    # long spills past its frame's slice, and a probe would catch the last cell
+    # unwritten. From the second turn on, the vblank's budget holds it whole.
+
+    test "ninety frames against Elixir's own div and rem, every path at once" do
+      a = Scored.addresses()
+
+      cells =
+        sample(
+          Scored,
+          [
+            a.score,
+            a.hundreds,
+            a.tens,
+            a.units,
+            a.reversed,
+            a.eighth,
+            a.low3,
+            a.tripled,
+            a.coarse,
+            a.leftover
+          ],
+          95
+        )
+        |> Enum.drop(5)
+
+      for [s, hundreds, tens, units, reversed, eighth, low3, tripled, coarse, leftover] <- cells do
+        assert hundreds == div(s, 100)
+        assert tens == rem(div(s, 10), 10)
+        assert units == rem(s, 10)
+        assert reversed == rem(s, 10) * 10 + rem(div(s, 10), 10)
+        assert eighth == div(s, 8)
+        assert low3 == rem(s, 8)
+        assert tripled == Integer.mod(s * 3, 256)
+        assert coarse == div(s, 200)
+        assert leftover == rem(s, 200)
+      end
+
+      # The digits above are only as good as the range they were fed: make sure
+      # the walk really reached three figures and a wrap.
+      scores = Enum.map(cells, &hd/1)
+      assert Enum.max(scores) > 200
+      assert Enum.count(Enum.uniq(scores)) == length(scores)
+    end
+
+    test "a power of two divides by shifts and masks, without calling anyone" do
+      allocation = Potion.Compiler.allocate(x: 0, y: 0)
+
+      eighth = Potion.Compiler.compile(quote(do: x = div(y, 8)), allocation)
+      low3 = Potion.Compiler.compile(quote(do: x = rem(y, 8)), allocation)
+      tenth = Potion.Compiler.compile(quote(do: x = div(y, 10)), allocation)
+
+      # Three shifts for the eighth, one mask for the rest -- and no `CALL`
+      # anywhere near a power of two. Ten is not one, and calls.
+      assert Enum.count(eighth, &(&1 == {:srl, :a})) == 3
+      refute Enum.any?(eighth, &match?({:call, _}, &1))
+      assert {:and, :a, 7} in low3
+      refute Enum.any?(low3, &match?({:call, _}, &1))
+      assert {:call, {:label, :divide}} in tenth
+    end
+
+    test "`/` is refused by name, pointing at div and rem" do
+      message = reject!("Rejected.Halves", "variables x: 0, y: 8", "x = y / 2")
+
+      assert message =~ "a byte has no halves"
+      assert message =~ "div(y, 2)"
+    end
+
+    test "a division by literal zero is refused" do
+      message = reject!("Rejected.ByZero", "variables x: 0, y: 8", "x = div(y, 0)")
+
+      assert message =~ "division by zero"
+
+      message = reject!("Rejected.RemZero", "variables x: 0, y: 8", "x = rem(y, 0)")
+
+      assert message =~ "division by zero"
+    end
+
+    test "a divisor in a cell is refused: zero would be met at run time" do
+      message = reject!("Rejected.CellDivisor", "variables x: 0, y: 8, n: 2", "x = div(y, n)")
+
+      assert message =~ "literal divisor"
+      assert message =~ "meet zero at run time"
+    end
+
+    test "a multiplication by zero is refused as the sentence it really is" do
+      message = reject!("Rejected.TimesZero", "variables x: 0, y: 8", "x = y * 0")
+
+      assert message =~ "x = 0"
+    end
+
+    test "a factor in a cell, or past the byte, is refused" do
+      message = reject!("Rejected.CellFactor", "variables x: 0, y: 8, n: 2", "x = y * n")
+
+      assert message =~ "literal factor"
+
+      message = reject!("Rejected.WideFactor", "variables x: 0, y: 8", "x = y * 300")
+
+      assert message =~ "past the byte"
+    end
+
+    test "the factor may stand on either side: 2 * y is y * 2" do
+      allocation = Potion.Compiler.allocate(x: 0, y: 3)
+
+      assert Potion.Compiler.compile(quote(do: x = y * 2), allocation) ==
+               Potion.Compiler.compile(quote(do: x = 2 * y), allocation)
+    end
+  end
+
   # A mirrored cast: the same asymmetric tile -- the "1" of the score font --
   # worn straight and flipped each of the three ways, one entry picked at run
   # time, and one facing that follows the pad through an `if`'s two arms.
@@ -2626,11 +2772,13 @@ defmodule Potion.DSLTest do
       assert message =~ "negative?"
     end
 
+    # `x = x * 2` stood here for a long time as the canonical refusal; it
+    # compiles now, so the boundary has moved to what no unrolling can reach.
     test "an expression outside the subset" do
-      message = reject!("Rejected.Multiplication", "variables x: 1", "x = x * 2")
+      message = reject!("Rejected.Xor", "variables x: 1, y: 2", "x = Bitwise.bxor(x, y)")
 
       assert message =~ "outside the v0 subset"
-      assert message =~ "x * 2"
+      assert message =~ "bxor"
       assert message =~ "x = x + 1"
     end
 
