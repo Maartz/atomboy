@@ -160,7 +160,7 @@ defmodule Potion do
   """
   defmacro __using__(_opts) do
     quote do
-      import Potion, only: [defactor: 2, variables: 1, every_frame: 1]
+      import Potion, only: [defactor: 2, variables: 1, every_frame: 1, tiles: 1]
 
       @before_compile Potion
     end
@@ -198,6 +198,82 @@ defmodule Potion do
     :ok
   end
 
+  @doc """
+  Brings a drawing into the game, and gives its tiles names.
+
+      tiles from: "art/pong.png", names: [:ball, :paddle]
+
+  The file is read **here**, while the host module compiles: the sheet is cut
+  into 8x8 tiles in reading order — left to right, then down — and the bytes are
+  laid into the cartridge, where the kernel copies them into VRAM at startup.
+  Nothing about the drawing survives into the running game except sixteen bytes
+  a tile.
+
+  `names` are handed out in that same order, and there may be fewer names than
+  tiles: a sheet can carry scenery nobody needs to name. More names than tiles
+  is refused, because it can only mean the sheet is not the one that was meant.
+
+  The path is relative to the file that declares it, so a game and its art
+  travel together — `games/pong.exs` looks for `games/art/pong.png`.
+
+  The drawing is registered with the compiler as an external resource, so
+  editing the PNG recompiles the module. Without that, a redrawn sprite would
+  not appear until something else in the file changed, which is a confusing
+  half-hour the first time it happens.
+  """
+  defmacro tiles(options) do
+    module = __CALLER__.module
+    options = tile_options!(options, module)
+
+    path = Path.expand(options[:from], Path.dirname(__CALLER__.file))
+    cut = Potion.Tiles.read!(path)
+    names = options[:names] || []
+
+    if length(names) > length(cut) do
+      raise CompileError, """
+      #{length(names)} names for #{length(cut)} tiles in #{Path.relative_to_cwd(path)}.
+
+      Names are handed to tiles in reading order and there are not enough to go \
+      round, which means this is not the sheet the names were written for.
+      """
+    end
+
+    Module.put_attribute(module, :external_resource, path)
+
+    Module.put_attribute(module, :potion_art, %{
+      bytes: Enum.join(cut),
+      names: names |> Enum.with_index() |> Map.new()
+    })
+
+    :ok
+  end
+
+  defp tile_options!(options, module) do
+    with true <- Keyword.keyword?(options),
+         path when is_binary(path) <- options[:from],
+         names when is_list(names) or is_nil(names) <- options[:names] do
+      unless Module.get_attribute(module, :potion_art) == nil do
+        raise CompileError, """
+        this module declares `tiles` twice.
+
+        A cartridge has one sheet. Put every tile the game draws on it — the \
+        names are what tell them apart, and there is room for 244.
+        """
+      end
+
+      options
+    else
+      _ ->
+        raise CompileError, """
+        malformed `tiles`: #{Macro.to_string(options)}
+
+        It takes the drawing and, optionally, the names its tiles answer to:
+
+            tiles from: "art/pong.png", names: [:ball, :paddle]
+        """
+    end
+  end
+
   @doc false
   defmacro __before_compile__(env) do
     case actors(env.module) do
@@ -215,10 +291,14 @@ defmodule Potion do
             Map.merge(acc, allocation.cells)
           end)
 
+        art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
+
         fragments =
           Enum.map(actors, fn {name, allocation, body} ->
-            fragment = Compiler.compile(body, %{allocation | cells: cells})
-            verify!(fragment, name)
+            fragment =
+              Compiler.compile(body, %{allocation | cells: cells, tiles: art.names})
+
+            verify!(fragment, name, art.bytes)
             fragment
           end)
 
@@ -231,7 +311,10 @@ defmodule Potion do
           everything landed.
           """
           def program do
-            Potion.Runtime.program(unquote(Macro.escape(fragments)))
+            Potion.Runtime.program(
+              unquote(Macro.escape(fragments)),
+              unquote(Macro.escape(art.bytes))
+            )
           end
 
           @doc """
@@ -427,8 +510,8 @@ defmodule Potion do
   # rather than on the first call to `rom/0` is the whole benefit of a compiled
   # language: a fragment that is not a program shows up in `mix compile`, not
   # three weeks later on a flashcart.
-  defp verify!(fragment, name) do
-    Assembler.assemble(Runtime.program(fragment), origin: 0x0150)
+  defp verify!(fragment, name, art) do
+    Assembler.assemble(Runtime.program(fragment, art), origin: 0x0150)
     :ok
   rescue
     error in ArgumentError ->

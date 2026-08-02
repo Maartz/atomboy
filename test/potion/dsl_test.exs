@@ -411,6 +411,95 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A game with a drawing. `shades.png` is the four-shade fixture from
+  # `Potion.TilesTest`, two tiles wide, and the names are handed out in reading
+  # order — so `:bands` is tile 0 of the sheet and `:split` tile 1.
+  defmodule Painted do
+    @moduledoc false
+    use Potion
+
+    tiles(from: "fixtures/shades.png", names: [:bands, :split])
+
+    defactor :thing do
+      variables x: 40
+
+      every_frame do
+        sprite(0, x: x, y: 20, tile: :bands)
+        background(3, 4, tile: :split)
+      end
+    end
+  end
+
+  describe "a drawing brought into the game" do
+    # The whole chain in one assertion: a PNG on disk, cut while this file
+    # compiled, laid into the cartridge, copied by the kernel's init, and read
+    # back out of the emulator's VRAM. Comparing against `Potion.Tiles` rather
+    # than against bytes written here is deliberate -- the two would have to be
+    # wrong the same way to agree, and the tile cutter has its own fixture.
+    test "the sheet is copied into VRAM at the base the kernel reserved" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      base = 0x8000 + Potion.Runtime.art_base() * 16
+      copied = for i <- 0..31, do: Map.get(ram, base + i, 0)
+
+      expected = Path.join(__DIR__, "fixtures/shades.png") |> Potion.Tiles.read!() |> Enum.join()
+
+      assert :binary.list_to_bin(copied) == expected
+    end
+
+    # The game says `:bands` and the OAM holds 12. Nothing in the source names
+    # that number, and nothing should: the kernel spoke for the first twelve
+    # tiles and a game has no reason to learn how many.
+    test "a name becomes the index the kernel left room for" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      [_y, _x, tile, _flags] = oam(ram, 0)
+      assert tile == Potion.Runtime.art_base()
+    end
+
+    test "the second tile of the sheet is the second name" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      # background(3, 4, tile: :split) -- the map is 32 wide.
+      assert Map.get(ram, 0x9800 + 4 * 32 + 3) == Potion.Runtime.art_base() + 1
+    end
+
+    # The assertion above compares the index against `art_base/0`, so it would
+    # hold just as well if that base moved down onto the digits. This one states
+    # what the base is actually for: after the sheet has been copied, the
+    # kernel's own font is still where it put it.
+    test "the drawing lands past the kernel's tiles rather than on top of them" do
+      {_pixels, _state, ram} = run_frames(Painted, 10)
+
+      # All ten digits and not just the first: a base one tile too low would
+      # leave the front of the font untouched and eat the back of it, and a
+      # single glyph checked at either end would have said nothing.
+      font = Potion.Runtime.font_bytes()
+      start = 0x8000 + Potion.Runtime.digits() * 16
+      copied = for i <- 0..(byte_size(font) - 1), do: Map.get(ram, start + i, 0)
+
+      assert :binary.list_to_bin(copied) == font
+    end
+
+    test "an unknown name is refused, and the message lists the ones there are" do
+      allocation = Potion.Compiler.allocate([x: 0], tiles: %{ball: 0, paddle: 1})
+      body = {:sprite, [], [0, [x: 8, y: 8, tile: :bal]]}
+
+      assert_raise Potion.CompileError, ~r/no tile is named :bal.*:ball, :paddle/s, fn ->
+        Potion.Compiler.compile(body, allocation)
+      end
+    end
+
+    test "a game with no drawing at all says so rather than listing nothing" do
+      allocation = Potion.Compiler.allocate(x: 0)
+      body = {:sprite, [], [0, [x: 8, y: 8, tile: :ball]]}
+
+      assert_raise Potion.CompileError, ~r/declares no tiles at all/, fn ->
+        Potion.Compiler.compile(body, allocation)
+      end
+    end
+  end
+
   describe "`and` and `or`" do
     test "every path through the two operators" do
       addresses = Gate.addresses()
@@ -502,7 +591,9 @@ defmodule Potion.DSLTest do
 
       elements = Potion.Compiler.compile(body, allocation)
 
-      assert is_binary(Potion.Assembler.assemble(Potion.Runtime.program(elements), origin: 0x0150))
+      assert is_binary(
+               Potion.Assembler.assemble(Potion.Runtime.program(elements), origin: 0x0150)
+             )
     end
 
     test "the comparison loads the variable it names" do

@@ -113,7 +113,8 @@ defmodule Potion.Compiler do
           order: [atom()],
           initial: %{atom() => byte()},
           installed: non_neg_integer(),
-          prefix: String.t()
+          prefix: String.t(),
+          tiles: %{atom() => non_neg_integer()}
         }
 
   # The bits of the pad cell, as `Potion.Runtime.read_pad/0` files them. This
@@ -153,6 +154,7 @@ defmodule Potion.Compiler do
   def allocate(declarations, opts \\ []) do
     base = Keyword.get(opts, :base, Runtime.actor_state())
     prefix = Keyword.get(opts, :prefix, "potion")
+    tiles = Keyword.get(opts, :tiles, %{})
 
     list = declarations!(declarations)
     names = Keyword.keys(list)
@@ -170,7 +172,8 @@ defmodule Potion.Compiler do
       order: names,
       initial: Map.new(list),
       installed: base + length(names),
-      prefix: prefix
+      prefix: prefix,
+      tiles: tiles
     }
   end
 
@@ -355,6 +358,7 @@ defmodule Potion.Compiler do
   defp statement({:sprite, _, [index, fields]} = statement, allocation, counter) do
     base = Runtime.oam_mirror() + 4 * entry!(index, statement)
     {x, y, tile} = fields!(fields, statement)
+    tile = tile!(tile, allocation, statement)
 
     elements =
       field(y, 16, base, allocation, statement) ++
@@ -370,12 +374,58 @@ defmodule Potion.Compiler do
   defp statement({:background, _, [column, row, fields]} = statement, allocation, counter) do
     address = Runtime.background_address(square!(column, statement), square!(row, statement))
     {kind, value} = background_field!(fields, statement)
+    value = if kind == :tile, do: tile!(value, allocation, statement), else: value
     base = if kind == :digit, do: Runtime.digits(), else: 0
 
     {sprite_value(value, base, allocation, statement) ++ [{:ld, {:mem, address}, :a}], counter}
   end
 
   defp statement(other, _allocation, _counter), do: reject!(other)
+
+  # A bare atom in `tile:` is a name from `tiles from: ...`, and it can be
+  # nothing else: a variable arrives as `{name, meta, context}` and an index as
+  # an integer, so there is no ambiguity to resolve and no keyword to introduce.
+  #
+  # The base is added here for the same reason `digit:` adds the font's: a game
+  # says what it drew, and never learns that the kernel spoke for the first
+  # twelve tiles before it.
+  defp tile!(name, allocation, statement) when is_atom(name) and name not in [nil, true, false] do
+    tiles = Map.get(allocation, :tiles, %{})
+
+    case Map.fetch(tiles, name) do
+      {:ok, index} ->
+        Runtime.art_base() + index
+
+      :error ->
+        raise CompileError, """
+        no tile is named #{inspect(name)}.
+
+            #{one_line(statement)}
+
+        #{known_tiles(tiles)}
+
+        Names are given to the tiles of a sheet in reading order — left to \
+        right, then down — by the `tiles` declaration:
+
+            tiles from: "art/pong.png", names: [:ball, :paddle]
+        """
+    end
+  end
+
+  defp tile!(value, _allocation, _statement), do: value
+
+  defp known_tiles(tiles) when map_size(tiles) == 0 do
+    "This game declares no tiles at all."
+  end
+
+  defp known_tiles(tiles) do
+    names =
+      tiles
+      |> Enum.sort_by(fn {_name, index} -> index end)
+      |> Enum.map_join(", ", fn {name, _index} -> inspect(name) end)
+
+    "The ones it has, in the order they were drawn: #{names}."
+  end
 
   defp square!(value, _statement) when is_integer(value) and value in 0..31, do: value
 

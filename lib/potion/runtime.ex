@@ -129,6 +129,11 @@ defmodule Potion.Runtime do
     [0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x38, 0x00]
   ]
 
+  # Where a game's own tiles begin: after the solid square, the empty one, and
+  # the ten digits. A game never writes this number — it names a tile and the
+  # compiler adds the base, exactly as `digit:` does.
+  @art 12
+
   @wram_cleared 0x0200
 
   # LCD on, tile data at 0x8000 (unsigned indices), OBJ and BG on. 0x93 is what
@@ -152,20 +157,42 @@ defmodule Potion.Runtime do
   happens here, at assembly time, because at run time the symptom would be an
   illegal opcode thousands of cycles away from its cause.
   """
-  @spec program([Assembler.element()]) :: [Assembler.element()]
-  def program(actors) when is_list(actors) do
+  @spec program([Assembler.element()], binary()) :: [Assembler.element()]
+  def program(actors, art \\ <<>>) when is_list(actors) and is_binary(art) do
     fragments = fragments(actors)
     Enum.each(fragments, &check_actor!/1)
+    art!(art)
 
-    init() ++
+    init(art) ++
       vblank() ++
       read_pad() ++
       main_loop(length(fragments)) ++
       [{:label, :dma_source}, {:bytes, dma_bytes()}] ++
       [{:label, :font_data}, {:bytes, font_bytes()}] ++
+      art_data(art) ++
       Enum.flat_map(Enum.with_index(fragments), fn {fragment, slot} ->
         [{:label, actor_label(slot)}] ++ fragment
       end)
+  end
+
+  defp art_data(<<>>), do: []
+  defp art_data(art), do: [{:label, :art_data}, {:bytes, art}]
+
+  # 256 tiles answer to an unsigned index, and the kernel has spoken for the
+  # first twelve. The check is here rather than at the drawing, because it is
+  # only here that the kernel's own tiles and the game's are counted together.
+  defp art!(art) do
+    tiles = div(byte_size(art), 16)
+
+    if @art + tiles > 256 do
+      raise ArgumentError, """
+      #{tiles} tiles of art, and there is room for #{256 - @art}.
+
+      Tile data at 0x8000 is addressed by an unsigned byte, so a game has 256 of \
+      them and the kernel keeps the first #{@art}: the solid square, the empty \
+      one the background is filled with, and the ten digits.
+      """
+    end
   end
 
   @doc """
@@ -266,8 +293,8 @@ defmodule Potion.Runtime do
   and the background map, copy the DMA into HRAM, set the palettes, and only
   then turn the screen back on and open the interrupts.
   """
-  @spec init() :: [Assembler.element()]
-  def init do
+  @spec init(binary()) :: [Assembler.element()]
+  def init(art \\ <<>>) do
     [
       {:label, :init},
       {:di},
@@ -295,6 +322,7 @@ defmodule Potion.Runtime do
       bg_map() ++
       tiles() ++
       font() ++
+      art(art) ++
       copy_dma() ++
       [
         {:ld, :a, @palette},
@@ -394,6 +422,33 @@ defmodule Potion.Runtime do
   @spec font_bytes() :: binary()
   def font_bytes do
     for glyph <- @font, row <- glyph, into: <<>>, do: <<row, row>>
+  end
+
+  @doc "The tile index a game's own art starts at."
+  @spec art_base() :: non_neg_integer()
+  def art_base, do: @art
+
+  # The game's tiles, on the font's pattern with one difference that matters:
+  # the counter is sixteen bits. The font is 160 bytes and fits in B; a sheet is
+  # whatever was drawn, and forty tiles is already 640. `DEC BC` sets no flags on
+  # this processor -- that is the reason for the `LD A, B / OR C` rather than
+  # forgetfulness -- so the loop tests the pair by hand.
+  defp art(<<>>), do: []
+
+  defp art(bytes) do
+    [
+      {:ld, :hl, {:label, :art_data}},
+      {:ld, :de, @vram + @art * 16},
+      {:ld, :bc, byte_size(bytes)},
+      {:label, :copy_art},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:dec, :bc},
+      {:ld, :a, :b},
+      {:or, :a, :c},
+      {:jr, :nz, {:label, :copy_art}}
+    ]
   end
 
   defp tiles do
