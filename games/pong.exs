@@ -1,13 +1,16 @@
-# Pong: two paddles, a ball that leaves them at an angle, and two digits.
+# Pong: a title screen, a rally, and a winner at five.
 #
 #     mix run games/pong.exs
 #
-# writes `games/pong.gb`. Play it with `bin/play games/pong.gb` — up and down
-# move the left paddle, the right one follows the ball on its own.
+# writes `games/pong.gb`. Play it with `bin/play games/pong.gb` — start begins,
+# up and down move the left paddle, the right one plays for itself.
 #
-# The ball's vertical speed is a fraction, and where it is struck decides which:
-# near the middle of a paddle it leaves flat, near an edge it leaves steep. That
-# needs no more than eight-bit addition — see `acc` below.
+# Two things are worth reading for rather than around. The ball's vertical speed
+# is a fraction of a pixel a frame and where the paddle is struck decides which,
+# so a ball can leave at an angle other than 45 degrees — `acc` below. And the
+# rival moves through that same mechanism at a lower speed, which is what makes
+# it beatable: not a number tuned until it felt fair, but a ceiling it cannot
+# cross.
 
 defmodule Pong do
   use Potion
@@ -17,71 +20,163 @@ defmodule Pong do
   # the game refers to them from here on. Nothing below knows a tile index.
   tiles from: "art/pong.png", names: [:ball, :paddle]
 
-  # The screen is 160x144 and a tile is 8x8. Paddles are two stacked sprites,
-  # the ball is one, and tile 0 is the kernel's solid square.
+  # ── The director ───────────────────────────────────────────────────────────
   #
-  # Vertical range is 8 to 112 for a paddle top: it then occupies 8..127, which
-  # leaves the ball's 8 rows of travel visible above and below.
+  # The screens, and nothing else. It owns `playing`, which the three actors
+  # below read to know whether there is a game on — they are declared after it,
+  # and the kernel calls actors in declaration order, so what they read is what
+  # this wrote a moment ago rather than last frame's.
+  #
+  # A screen is painted in `on_enter` and never again. That is the whole reason
+  # states are here: `every_frame` would repaint PRESS START sixty times a second
+  # to no effect, and the ball would have to draw itself over it.
+
+  defactor :director do
+    variables playing: 0
+
+    state :title do
+      on_enter do
+        playing = 0
+
+        text(7, 5, "POTION")
+        text(6, 8, "P O N G")
+        text(4, 12, "PRESS START")
+
+        # Whatever the last game left: the two scores, and the five sprites. A
+        # sprite is hidden by being put below the 144 lines the panel shows —
+        # the OAM has no "off" bit, only a position nobody can see.
+        text(4, 2, " ")
+        text(15, 2, " ")
+
+        sprite(0, x: 0, y: 160, tile: :paddle)
+        sprite(1, x: 0, y: 160, tile: :paddle)
+        sprite(2, x: 0, y: 160, tile: :paddle)
+        sprite(3, x: 0, y: 160, tile: :paddle)
+        sprite(4, x: 0, y: 160, tile: :ball)
+
+        mine = 0
+        theirs = 0
+      end
+
+      every_frame do
+        if pressed?(:start), do: become(:playing)
+      end
+    end
+
+    state :playing do
+      on_enter do
+        playing = 1
+
+        # The title, wiped a square at a time. A space is the empty tile the
+        # init already filled the whole map with, so this costs nothing to say.
+        text(7, 5, "      ")
+        text(6, 8, "       ")
+        text(4, 12, "           ")
+      end
+
+      every_frame do
+        if mine >= 5, do: become(:over)
+        if theirs >= 5, do: become(:over)
+      end
+    end
+
+    state :over do
+      on_enter do
+        playing = 0
+
+        # The field goes with the game. Without this the ball freezes wherever
+        # the last point left it, which is over the O of GAME OVER as often as
+        # not — the actors have stopped writing the mirror, and the DMA keeps
+        # publishing whatever was in it.
+        sprite(0, x: 0, y: 160, tile: :paddle)
+        sprite(1, x: 0, y: 160, tile: :paddle)
+        sprite(2, x: 0, y: 160, tile: :paddle)
+        sprite(3, x: 0, y: 160, tile: :paddle)
+        sprite(4, x: 0, y: 160, tile: :ball)
+
+        text(5, 6, "GAME OVER")
+        text(4, 10, "PRESS START")
+      end
+
+      every_frame do
+        if pressed?(:start), do: become(:title)
+      end
+    end
+  end
 
   # ── The player, on the left ────────────────────────────────────────────────
-  #
-  # Declared first, and that is the schedule: actors run in declaration order,
-  # every frame, so the ball further down reads the edges this one just wrote
-  # rather than last frame's.
 
   defactor :player do
     variables py: 64, ptop: 56, pmid: 72, pbot: 80
 
     every_frame do
-      if pressed?(:up), do: py = py - 2
-      if pressed?(:down), do: py = py + 2
+      if playing == 1 do
+        if pressed?(:up), do: py = py - 2
+        if pressed?(:down), do: py = py + 2
 
-      # Clamped after both, so holding up and down at once cancels out instead
-      # of fighting. Two pixels a frame from a floor of 8 never reaches zero, so
-      # the subtraction above cannot wrap.
-      if py < 8, do: py = 8
-      if py > 112, do: py = 112
+        # Clamped after both, so holding up and down at once cancels out instead
+        # of fighting. Two pixels a frame from a floor of 8 never reaches zero,
+        # so the subtraction above cannot wrap.
+        if py < 8, do: py = 8
+        if py > 112, do: py = 112
 
-      # The edges the ball will test, computed once here rather than three times
-      # there. A comparison takes a literal or a cell and nothing else, so
-      # `by >= py - 8` has to be spelled as a cell already holding `py - 8`.
-      #
-      # `ptop` is also the origin the impact point is measured from: the ball
-      # overlaps this paddle for `by` in ptop..pbot, so `by - ptop` runs 0 to 24
-      # and never goes negative — which matters, because a byte has no sign and
-      # 0 - 1 would read as 255.
-      ptop = py - 8
-      pmid = py + 8
-      pbot = py + 16
+        # The edges the ball will test, computed once here rather than three
+        # times there. A comparison takes a literal or a cell and nothing else,
+        # so `by >= py - 8` has to be spelled as a cell already holding it.
+        #
+        # `ptop` is also the origin the impact point is measured from: the ball
+        # overlaps this paddle for `by` in ptop..pbot, so `by - ptop` runs 0 to
+        # 24 and never goes negative — which matters, because a byte has no sign
+        # and 0 - 1 would read as 255.
+        ptop = py - 8
+        pmid = py + 8
+        pbot = py + 16
 
-      sprite(0, x: 8, y: py, tile: :paddle)
-      sprite(1, x: 8, y: pmid, tile: :paddle)
+        sprite(0, x: 8, y: py, tile: :paddle)
+        sprite(1, x: 8, y: pmid, tile: :paddle)
+      end
     end
   end
 
   # ── The rival, on the right ────────────────────────────────────────────────
   #
-  # It walks one pixel a frame toward the ball, which is the whole opponent. It
-  # is beatable because a ball leaving on a steep angle now outruns it
-  # vertically — before the angles existed, one pixel a frame tracked one pixel
-  # a frame and only the reset ever gave it the slip.
+  # It walks toward the ball, and the whole of its beatability is that it walks
+  # *slower than the ball can climb*. Its speed is 96 out of 128 against a ball
+  # that leaves a paddle edge at 128, so a steep return gains a pixel every four
+  # frames — around thirty across the width of the screen, well past the sixteen
+  # of overlap it needs to make the save.
+  #
+  # It used to move a pixel a frame against a ball that also moved at most one,
+  # which made it not difficult but *impossible*: it could never fall behind by
+  # even a pixel, so no shot could ever beat it. This is that fixed, and it is
+  # the angle mechanism reused rather than a number chosen until it felt fair. A
+  # centre hit still leaves at 32 and is still caught, which is what makes
+  # aiming for the edges the way to score rather than a matter of luck.
 
   defactor :rival do
-    variables ey: 64, etop: 56, emid: 72, ebot: 80
+    variables ey: 64, etop: 56, emid: 72, ebot: 80, eacc: 0
 
     every_frame do
-      if by > ey, do: ey = ey + 1
-      if by < ey, do: ey = ey - 1
+      if playing == 1 do
+        eacc = eacc + 96
 
-      if ey < 8, do: ey = 8
-      if ey > 112, do: ey = 112
+        if eacc >= 128 do
+          eacc = eacc - 128
 
-      etop = ey - 8
-      emid = ey + 8
-      ebot = ey + 16
+          if by > ey, do: ey = ey + 1
+          if by < ey, do: ey = ey - 1
+        end
 
-      sprite(2, x: 144, y: ey, tile: :paddle)
-      sprite(3, x: 144, y: emid, tile: :paddle)
+        if ey < 8, do: ey = 8
+        if ey > 112, do: ey = 112
+
+        etop = ey - 8
+        emid = ey + 8
+        ebot = ey + 16
+
+        sprite(2, x: 144, y: ey, tile: :paddle)
+        sprite(3, x: 144, y: emid, tile: :paddle)
+      end
     end
   end
 
@@ -91,142 +186,122 @@ defmodule Pong do
     variables bx: 80, by: 68, vx: -1, vy: 1, speed: 64, acc: 0, off: 0, mine: 0, theirs: 0
 
     every_frame do
-      # Horizontally, one pixel a frame, always. Vertically, a fraction.
-      #
-      # `speed` is how much of a pixel a frame is worth, out of 128: the frame
-      # adds it to `acc` and the ball only steps when that carries past a whole
-      # one. 128 is a pixel a frame, 64 is one every two, 32 one every four.
-      # `acc` peaks at 127 + 128 = 255 and so cannot wrap, which is the reason
-      # the whole is 128 and not 256.
-      #
-      # This is the sub-pixel speed the ball needs to travel at an angle other
-      # than 45 degrees, and it costs one cell and one comparison.
-      bx = bx + vx
-
-      acc = acc + speed
-
-      if acc >= 128 do
-        by = by + vy
-        acc = acc - 128
-      end
-
-      # The walls set the direction rather than reverse it. `vy = -vy` is the
-      # sentence a bounce wants and it sticks: a ball that lands two frames
-      # running inside the same wall flips twice and swims into it. The speed is
-      # left alone — a wall changes where the ball goes, not how steeply.
-      if by <= 8, do: vy = 1
-      if by >= 128, do: vy = -1
-
-      # ── The left paddle, and the angle it gives ────────────────────────────
-      #
-      # One condition and three clauses. `and` costs nothing at run time: a
-      # condition compiles to the jumps that leave when it is false, so two of
-      # them in a row leave when either is false — which is the same bytes the
-      # three nested ifs this replaces produced, and one indentation level
-      # instead of three.
-      #
-      # `bx = 17` after the bounce is not decoration. Without it the ball can
-      # spend a second frame under 16 and bounce again, back into the paddle.
-      if bx <= 16 and by >= ptop and by <= pbot do
-        vx = 1
-        bx = 17
-
-        # Where it struck, 0 at the top of the overlap and 24 at the bottom, so
-        # 12 is the middle. Above the middle it leaves upward, below it
-        # downward, and the further from the middle the steeper — which is what
-        # lets a player aim rather than merely return.
-        off = by - ptop
-
-        # Two separate ifs rather than an if/else: the two branches want a block
-        # each, and this shape needs nothing from the language beyond what the
-        # walls above already use.
+      if playing == 1 do
+        # Horizontally, one pixel a frame, always. Vertically, a fraction.
         #
-        # The ladders count *away* from the middle, and each rung is written as
-        # a plain comparison against a literal — there is no `abs`, and
-        # `12 - off` would put a literal on the left of a subtraction, which the
-        # v0 does not spell.
-        if off < 12 do
-          vy = -1
-          speed = 32
-          if off < 9, do: speed = 64
-          if off < 6, do: speed = 96
-          if off < 3, do: speed = 128
+        # `speed` is how much of a pixel a frame is worth, out of 128: the frame
+        # adds it to `acc` and the ball only steps when that carries past a
+        # whole one. 128 is a pixel a frame, 64 is one every two, 32 one every
+        # four. `acc` peaks at 127 + 128 = 255 and so cannot wrap, which is the
+        # reason the whole is 128 and not 256.
+        bx = bx + vx
+
+        acc = acc + speed
+
+        if acc >= 128 do
+          by = by + vy
+          acc = acc - 128
         end
 
-        if off >= 12 do
+        # The walls set the direction rather than reverse it. `vy = -vy` is the
+        # sentence a bounce wants and it sticks: a ball that lands two frames
+        # running inside the same wall flips twice and swims into it. The speed
+        # is left alone — a wall changes where the ball goes, not how steeply.
+        if by <= 8, do: vy = 1
+        if by >= 128, do: vy = -1
+
+        # ── The left paddle, and the angle it gives ──────────────────────────
+        #
+        # `bx = 17` after the bounce is not decoration. Without it the ball can
+        # spend a second frame under 16 and bounce again, back into the paddle.
+        if bx <= 16 and by >= ptop and by <= pbot do
+          vx = 1
+          bx = 17
+
+          # Where it struck, 0 at the top of the overlap and 24 at the bottom,
+          # so 12 is the middle. Above the middle it leaves upward, below it
+          # downward, and the further from the middle the steeper — which is
+          # what lets a player aim rather than merely return.
+          off = by - ptop
+
+          # The ladders count *away* from the middle, and each rung is a plain
+          # comparison against a literal — there is no `abs`, and `12 - off`
+          # would put a literal on the left of a subtraction, which the v0 does
+          # not spell.
+          if off < 12 do
+            vy = -1
+            speed = 32
+            if off < 9, do: speed = 64
+            if off < 6, do: speed = 96
+            if off < 3, do: speed = 128
+          end
+
+          if off >= 12 do
+            vy = 1
+            speed = 32
+            if off > 14, do: speed = 64
+            if off > 17, do: speed = 96
+            if off > 20, do: speed = 128
+          end
+        end
+
+        # ── The rival's paddle, the same rule ────────────────────────────────
+        #
+        # Written out a second time because the language has no way to name a
+        # routine and call it. The two blocks differ in `vx` and in which
+        # paddle's top the offset is measured from, and that is the next thing
+        # worth taking back into the compiler.
+        if bx >= 136 and by >= etop and by <= ebot do
+          vx = -1
+          bx = 135
+
+          off = by - etop
+
+          if off < 12 do
+            vy = -1
+            speed = 32
+            if off < 9, do: speed = 64
+            if off < 6, do: speed = 96
+            if off < 3, do: speed = 128
+          end
+
+          if off >= 12 do
+            vy = 1
+            speed = 32
+            if off > 14, do: speed = 64
+            if off > 17, do: speed = 96
+            if off > 20, do: speed = 128
+          end
+        end
+
+        # A miss, and the reason these thresholds are 4 and 152 rather than 0
+        # and 160: a byte wraps. At bx = 0 one more step left gives 255, which
+        # reads as far right and would trigger the rival's paddle.
+        if bx <= 4 do
+          theirs = theirs + 1
+          bx = 80
+          by = 68
+          vx = 1
           vy = 1
-          speed = 32
-          if off > 14, do: speed = 64
-          if off > 17, do: speed = 96
-          if off > 20, do: speed = 128
-        end
-      end
-
-      # ── The rival's paddle, the same rule ──────────────────────────────────
-      #
-      # Written out a second time because the language has no way to name a
-      # routine and call it twice. That is the next thing worth taking back into
-      # the compiler: this block and the one above differ only in `vx` and in
-      # which paddle's `top` the offset is measured from.
-      if bx >= 136 and by >= etop and by <= ebot do
-        vx = -1
-        bx = 135
-
-        off = by - etop
-
-        if off < 12 do
-          vy = -1
-          speed = 32
-          if off < 9, do: speed = 64
-          if off < 6, do: speed = 96
-          if off < 3, do: speed = 128
+          speed = 64
+          acc = 0
         end
 
-        if off >= 12 do
+        if bx >= 152 do
+          mine = mine + 1
+          bx = 80
+          by = 68
+          vx = -1
           vy = 1
-          speed = 32
-          if off > 14, do: speed = 64
-          if off > 17, do: speed = 96
-          if off > 20, do: speed = 128
+          speed = 64
+          acc = 0
         end
+
+        sprite(4, x: bx, y: by, tile: :ball)
+
+        background(4, 2, digit: mine)
+        background(15, 2, digit: theirs)
       end
-
-      # A miss, and the reason these thresholds are 4 and 152 rather than 0 and
-      # 160: a byte wraps. At bx = 0 one more step left gives 255, which reads
-      # as far right and would trigger the rival's paddle.
-      #
-      # The serve goes back to a middling angle. Serving at the angle the point
-      # ended on would be a way of playing too, and it is one line.
-      if bx <= 4 do
-        theirs = theirs + 1
-        bx = 80
-        by = 68
-        vx = 1
-        vy = 1
-        speed = 64
-        acc = 0
-      end
-
-      if bx >= 152 do
-        mine = mine + 1
-        bx = 80
-        by = 68
-        vx = -1
-        vy = 1
-        speed = 64
-        acc = 0
-      end
-
-      # One digit each, so ten wraps to nothing. A second digit is a second
-      # `background` and a tens cell, which needs a compare and a carry the
-      # language can already write.
-      if mine > 9, do: mine = 0
-      if theirs > 9, do: theirs = 0
-
-      sprite(4, x: bx, y: by, tile: :ball)
-
-      background(4, 2, digit: mine)
-      background(15, 2, digit: theirs)
     end
   end
 end
