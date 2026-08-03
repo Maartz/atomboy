@@ -52,6 +52,36 @@ defmodule Atomboy.LiveTest do
     assert function_exported?(module, :rom, 0)
   end
 
+  # The watch, from the cells a build returns to the text the status line
+  # shows: names in declaration order (which is address order), values padded
+  # to three so the line holds still while they run.
+  test "the watch line reads the game's cells by name" do
+    cells = %{y: 0xC101, x: 0xC100, score: 0xC102}
+    ram = %{0xC100 => 80, 0xC101 => 7, 0xC102 => 255}
+
+    assert Atomboy.Play.watch_line(cells, ram) == "x  80 · y   7 · score 255"
+  end
+
+  test "a cell nobody wrote yet reads as the zero the init left" do
+    assert Atomboy.Play.watch_line(%{x: 0xC100}, %{}) == "x   0"
+  end
+
+  test "the watch reads a booted game truthfully", %{path: path} do
+    {module, rom, cells} = Live.build!(path)
+
+    {_pixels, _state, ram} =
+      Enum.reduce(
+        1..8,
+        {<<>>, Atomboy.Screen.boot_state(rom), Atomboy.Screen.boot_ram(rom)},
+        fn _, {_p, state, ram} ->
+          Atomboy.Screen.frame(state, rom, ram, false)
+        end
+      )
+
+    assert Atomboy.Play.watch_line(cells, ram) == "x  40"
+    assert function_exported?(module, :addresses, 0)
+  end
+
   test "a file that has not moved asks for nothing", %{path: path} do
     {_module, _rom, cells} = Live.build!(path)
     seed(path, cells)

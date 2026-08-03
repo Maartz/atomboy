@@ -209,6 +209,10 @@ defmodule Potion do
   the trick GOAL played on the PlayStation, and it is nearly free here because
   `Atomboy.Screen.frame/4` takes the ROM as an argument every frame.
 
+  The status line opens on the watch: every cell by name, its value live,
+  updated as you play — `w` toggles the help back. Debugging a wall that does
+  not stop the walker is *watching* `x` refuse to grow.
+
   Two things a reload cannot carry: the cells, since `variables` is an
   allocation and a new line moves the addresses; and the screen, since a title
   painted in `on_enter` has already been painted. `Mix.Tasks.Atomboy.Live` says

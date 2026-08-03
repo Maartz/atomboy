@@ -62,8 +62,10 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("r") == {[{:key, :load_state}], ""}
     assert Input.decode("\t") == {[{:key, :turbo}], ""}
     assert Input.decode("p") == {[{:key, :pause}], ""}
+    assert Input.decode("w") == {[{:key, :watch}], ""}
     assert Input.decode("\e[115;1u") == {[{:press, :save_state}], ""}
     assert Input.decode("\e[9;1u") == {[{:press, :turbo}], ""}
+    assert Input.decode("\e[119;1u") == {[{:press, :watch}], ""}
   end
 
   test "the digits pick the state slot" do

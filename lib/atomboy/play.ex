@@ -179,6 +179,11 @@ defmodule Atomboy.Play do
            # changes underneath itself.
            reload: Keyword.get(opts, :reload),
            reload_mark: 0,
+           # The watch: the game's cells by name, handed in by `atomboy.live`
+           # -- a bare `.gb` has bytes, not names. On from the start when the
+           # names are known; `w` toggles it against the help line.
+           watch: Keyword.get(opts, :watch),
+           watching: Keyword.get(opts, :watch) != nil,
            last_frame: nil,
            fps: 0.0,
            fps_mark: System.monotonic_time(:microsecond),
@@ -552,8 +557,14 @@ defmodule Atomboy.Play do
   defp apply_event({tag, :pause}, ctx) when tag in [:key, :press],
     do: %{ctx | paused: not ctx.paused}
 
+  defp apply_event({tag, :watch}, %{watch: nil} = ctx) when tag in [:key, :press],
+    do: %{ctx | note: {"no cells to watch — run mix atomboy.live", 180}}
+
+  defp apply_event({tag, :watch}, ctx) when tag in [:key, :press],
+    do: %{ctx | watching: not ctx.watching}
+
   defp apply_event({_tag, key}, ctx)
-       when key in [:save_state, :load_state, :turbo, :pause],
+       when key in [:save_state, :load_state, :turbo, :pause, :watch],
        do: ctx
 
   defp apply_event({:release, key}, %{kitty: true} = ctx),
@@ -657,8 +668,16 @@ defmodule Atomboy.Play do
         nil -> ""
       end
 
+    lead =
+      if ctx.watching and ctx.watch do
+        " ⌚ " <> watch_line(ctx.watch, ram) <> "   "
+      else
+        " ✚ arrows · x A · c B · ⏎ Start · ␣ Select · s/r state · ⇥ turbo · p pause · w watch · q quit   "
+      end
+
     [
-      "\e[0m ✚ arrows · x A · c B · ⏎ Start · ␣ Select · s/r state · ⇥ turbo · p pause · q quit   ",
+      "\e[0m",
+      lead,
       :io_lib.format(~c"~5.1f fps · bank ~2..0B", [ctx.fps, bank]),
       if(ctx.audio, do: " · ♪", else: ""),
       if(Map.has_key?(ram, :link), do: " · ⇄", else: ""),
@@ -668,6 +687,26 @@ defmodule Atomboy.Play do
       keys,
       "\e[K"
     ]
+  end
+
+  @doc """
+  The watch's text: every named cell and the byte it holds, right now.
+
+  The names come from `addresses/0` -- what `mix atomboy.live` knows about the
+  game it built -- and the order is the cells' own: sorted by address, which is
+  declaration order, because that is the order the author's eye already knows.
+  Values are padded to three so the line holds still while they run.
+
+  A pooled or arrayed name shows its first cell: the watch is a glance, not an
+  inspector, and instance zero is the glance's answer.
+  """
+  @spec watch_line(%{atom() => non_neg_integer()}, map()) :: String.t()
+  def watch_line(cells, ram) do
+    cells
+    |> Enum.sort_by(fn {_name, address} -> address end)
+    |> Enum.map_join(" · ", fn {name, address} ->
+      "#{name} #{String.pad_leading("#{Map.get(ram, address, 0)}", 3)}"
+    end)
   end
 
   # ── The keyboard ────────────────────────────────────────────────────────────

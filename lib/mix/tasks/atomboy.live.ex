@@ -12,6 +12,16 @@ defmodule Mix.Tasks.Atomboy.Live do
   position, the score its count, the cells their values, and whatever you
   changed is different on the next frame.
 
+  ## The watch
+
+  The status line opens on the game's variables instead of the help: every
+  cell by name, its value live, in declaration order. `w` toggles it back to
+  the help and forth. It is the GOAL listener's reading half: the game is not
+  a black box being fed a cartridge, it is a machine whose state has names —
+  this task built the cartridge, so it knows them. Debugging a wall that
+  does not stop the walker becomes *watching* `x` refuse to grow, rather than
+  sprinkling probes.
+
   ## Why this is nearly free
 
   `Atomboy.Screen.frame/4` takes the ROM as an argument every frame, so swapping
@@ -86,6 +96,7 @@ defmodule Mix.Tasks.Atomboy.Live do
     Mix.shell().info("""
     #{module} — #{map_size(addresses)} cells, live from #{path}
     Save the file and the running console picks it up.
+    The status line shows the cells, live — `w` toggles the help back.
     """)
 
     # The watcher's whole memory: when the file was last read, and what the cell
@@ -93,7 +104,16 @@ defmodule Mix.Tasks.Atomboy.Live do
     :persistent_term.put({__MODULE__, :seen}, {mtime(path), addresses})
 
     play =
-      [save: opts[:save], palette: palette(opts[:palette]), reload: fn -> reload(path) end]
+      [
+        save: opts[:save],
+        palette: palette(opts[:palette]),
+        reload: fn -> reload(path) end,
+        # The watch: the cell map this task just built is exactly the thing the
+        # status line needs to show the game's variables by name, live. The
+        # layout cannot move under it -- a reload that moves cells is refused
+        # above -- so the map handed over here stays true for the whole run.
+        watch: addresses
+      ]
       |> then(&if(opts[:frames], do: [{:frames, opts[:frames]} | &1], else: &1))
 
     Play.run(cartridge, play)

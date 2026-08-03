@@ -38,6 +38,7 @@ defmodule Atomboy.Play.Input do
       Backspace        rewind (hold)
       Tab              turbo (fast forward)
       p                pause
+      w                the watch — the game's cells, live (under mix atomboy.live)
       q, Escape (kitty) or Ctrl-C    quit
   """
 
@@ -57,6 +58,7 @@ defmodule Atomboy.Play.Input do
           | :load_state
           | :turbo
           | :pause
+          | :watch
           | :rewind
           | {:slot, 1..9}
   @type event ::
@@ -83,6 +85,7 @@ defmodule Atomboy.Play.Input do
     ?r => :load_state,
     9 => :turbo,
     ?p => :pause,
+    ?w => :watch,
     127 => :rewind,
     8 => :rewind,
     ?1 => {:slot, 1},
@@ -162,6 +165,9 @@ defmodule Atomboy.Play.Input do
 
   defp decode(<<c, rest::binary>>, events) when c in [?p, ?P],
     do: decode(rest, [{:key, :pause} | events])
+
+  defp decode(<<c, rest::binary>>, events) when c in [?w, ?W],
+    do: decode(rest, [{:key, :watch} | events])
 
   defp decode(<<c, rest::binary>>, events) when c in [?m, ?M],
     do: decode(rest, [{:key, :menu} | events])
