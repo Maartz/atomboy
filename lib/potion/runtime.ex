@@ -175,6 +175,15 @@ defmodule Potion.Runtime do
   # init's clearing seeds it with zero, and the hardware un-seeds it from there.
   @rng 0xC0BF
 
+  # The camera. `scroll` writes these two; the vblank handler copies them into
+  # SCX and SCY, so the panel only ever sees one camera per frame -- a torn
+  # frame cannot be written even on purpose. And the room's width, put there by
+  # `show`: `touching?` walks the room's rows at whatever stride the room was
+  # drawn to.
+  @scroll_x 0xC0C0
+  @scroll_y 0xC0C1
+  @room_width 0xC0C2
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -718,6 +727,14 @@ defmodule Potion.Runtime do
   @spec rng_cell() :: non_neg_integer()
   def rng_cell, do: @rng
 
+  @doc "The camera's two cells, x then y: written by `scroll`, read at the vblank."
+  @spec scroll_cells() :: {non_neg_integer(), non_neg_integer()}
+  def scroll_cells, do: {@scroll_x, @scroll_y}
+
+  @doc "The current room's width in tiles, written by `show`, read by `touching?`."
+  @spec width_cell() :: non_neg_integer()
+  def width_cell, do: @room_width
+
   @doc """
   The two wobble tables, sixteen signed frames each.
 
@@ -941,9 +958,17 @@ defmodule Potion.Runtime do
   defp show_room do
     [
       {:label, :show_room},
+      # The room opens on two bytes of header -- width, then height -- and the
+      # width is kept where `touching?` will want it: the stride of a room is a
+      # property of the room, not of the kernel.
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, {:mem, @room_width}, :a},
+      {:ld, :a, {:mem, :hl_inc}},
+      {:ld, :b, :a},
       # The room being shown becomes the room being *in*: `touching?` reads its
       # bytes from ROM rather than from the map, so what a `text` or a
-      # `background` scribbles over the picture never becomes an obstacle.
+      # `background` scribbles over the picture never becomes an obstacle. The
+      # pointer is taken *after* the header walk: it names the cells.
       {:ld, :a, :l},
       {:ld, {:mem, @current_room}, :a},
       {:ld, :a, :h},
@@ -951,18 +976,22 @@ defmodule Potion.Runtime do
       {:xor, :a, :a},
       {:ldh, {:high, @lcdc}, :a},
       {:ld, :de, @background},
-      {:ld, :b, 18},
       {:label, :room_row},
-      {:ld, :c, 20},
+      {:ld, :a, {:mem, @room_width}},
+      {:ld, :c, :a},
       {:label, :room_cell},
       {:ld, :a, {:mem, :hl_inc}},
       {:ld, {:mem, :de}, :a},
       {:inc, :de},
       {:dec, :c},
       {:jr, :nz, {:label, :room_cell}},
-      # The map is 32 wide and the screen 20: walk past the 12 nobody sees.
-      {:ld, :a, :e},
-      {:add, :a, 12},
+      # The map is 32 wide and the room may be less: walk past what it left
+      # blank. A room the map's full width walks past nothing.
+      {:ld, :a, {:mem, @room_width}},
+      {:ld, :c, :a},
+      {:ld, :a, 32},
+      {:sub, :a, :c},
+      {:add, :a, :e},
       {:ld, :e, :a},
       {:ld, :a, :d},
       {:adc, :a, 0},
@@ -975,13 +1004,15 @@ defmodule Potion.Runtime do
     ]
   end
 
-  # Which tile of the current room a screen pixel stands on, against the one
+  # Which tile of the current room a room pixel stands on, against the one
   # the game asked about. A = y, C = x on entry; the probe cell holds the tile;
   # Z comes back set when they match.
   #
-  # The room in ROM is 20 bytes a row -- packed, unlike the 32-wide map -- so
-  # the cell is `base + (y/8) * 20 + x/8`. Twenty is sixteen plus four, two
-  # runs of doublings and an add; the product reaches 340 and lives in HL.
+  # The room in ROM is packed at its own width -- the header `show` consumed --
+  # so the cell is `base + (y/8) * width + x/8`. The product is a loop of
+  # sixteen-bit adds, one per row, because the width is a cell and not a
+  # number: at worst thirty-one turns, some seven hundred cycles, which four
+  # corner questions a frame still leave unnoticed in the budget.
   #
   # Before any room has been shown the pointer is the zero the init left, and
   # the answer is "touching nothing": flags forced to NZ and out. A game that
@@ -1000,19 +1031,22 @@ defmodule Potion.Runtime do
       {:ret},
       {:label, :touch_room},
       {:push, :hl},
+      {:ld, :a, {:mem, @room_width}},
+      {:ld, :e, :a},
+      {:ld, :d, 0},
+      {:ld, :hl, 0},
       {:ld, :a, :b},
       {:srl, :a},
       {:srl, :a},
       {:srl, :a},
-      {:ld, :l, :a},
-      {:ld, :h, 0},
-      {:add, :hl, :hl},
-      {:add, :hl, :hl},
-      {:ld, :d, :h},
-      {:ld, :e, :l},
-      {:add, :hl, :hl},
-      {:add, :hl, :hl},
+      {:ld, :b, :a},
+      {:or, :a, :a},
+      {:jr, :z, {:label, :touch_column}},
+      {:label, :touch_rows},
       {:add, :hl, :de},
+      {:dec, :b},
+      {:jr, :nz, {:label, :touch_rows}},
+      {:label, :touch_column},
       {:ld, :a, :c},
       {:srl, :a},
       {:srl, :a},
@@ -1269,6 +1303,14 @@ defmodule Potion.Runtime do
       {:ld, :a, 0x01},
       {:ld, {:mem, @flag}, :a},
       {:call, @hram_dma},
+      # The camera, applied here and only here: whatever the actors wrote into
+      # the scroll cells during the frame, the panel sees one value per frame.
+      # A game that never scrolls writes the zeros the init left over zeros the
+      # boot left -- eight cycles of nothing happening.
+      {:ld, :a, {:mem, @scroll_x}},
+      {:ldh, {:high, @scx}, :a},
+      {:ld, :a, {:mem, @scroll_y}},
+      {:ldh, {:high, @scy}, :a},
       {:pop, :hl},
       {:pop, :de},
       {:pop, :bc},

@@ -909,8 +909,37 @@ defmodule Potion.Compiler do
 
         #{one_line(statement)}
 
-    A room is 360 bytes at a known place in the cartridge, and which place is \
+    A room is bytes at a known place in the cartridge, and which place is \
     decided while the game compiles.
+    """
+  end
+
+  # ── The camera ──────────────────────────────────────────────────────────────
+
+  # `scroll(cx, cy)`: where the camera's top-left corner stands in the room, in
+  # pixels. Two kernel cells, which the vblank handler copies into SCX and SCY
+  # -- the panel sees one camera per frame, so a torn frame cannot be written
+  # even on purpose. The background moves under the panel; the sprites do not,
+  # so a game in room coordinates says `sx = x - cx` and gives `sprite` that.
+  defp statement({:scroll, _, [x, y]} = statement, allocation, counter) do
+    {scroll_x, scroll_y} = Runtime.scroll_cells()
+
+    {scroll_value(x, allocation, statement) ++
+       [{:ld, {:mem, scroll_x}, :a}] ++
+       scroll_value(y, allocation, statement) ++
+       [{:ld, {:mem, scroll_y}, :a}], counter}
+  end
+
+  defp statement({:scroll, _, args} = statement, _allocation, _counter) when is_list(args) do
+    raise CompileError, """
+    `scroll` takes the camera's corner, x then y: #{one_line(statement)}
+
+        scroll(cx, cy)
+
+    In pixels, from the room's top-left. The camera is where the panel starts \
+    reading the map, so past `room width × 8 - 160` (and `height × 8 - 144` \
+    down) it shows the map wrapping around -- clamping is the game's business, \
+    it knows its rooms.
     """
   end
 
@@ -1276,19 +1305,27 @@ defmodule Potion.Compiler do
   @spec notes() :: %{atom() => 0..2047}
   defdelegate notes, to: Potion.Music
 
-  # The screen shows 20 columns of 18 rows, and a room is exactly a screen.
-  @room_w 20
-  @room_h 18
+  # The screen shows 20 columns of 18 rows; the map underneath it holds 32 by
+  # 32. A room is at least the first and at most the second -- smaller would
+  # show the void past its edge, larger has no map to live on.
+  @room_min_w 20
+  @room_min_h 18
+  @room_max 32
 
   @doc """
-  A drawing of a screen into the 360 bytes the background map takes.
+  A drawing of a room into the bytes the background map takes, behind a
+  two-byte header: width, then height, in tiles.
 
-  Twenty columns by eighteen rows -- the panel, exactly. A space is the empty
-  tile without being declared; every other character is named by the mapping,
-  as a tile of the game's sheet or a bare index.
+  At least a screen -- 20 columns by 18 rows -- and at most the whole map, 32
+  by 32: a room wider than the screen is what the camera is for, and one wider
+  than the map would have nowhere to be drawn. The width is the longest row's
+  (never less than the screen's), and the header is how `show` knows the
+  stride to paint at and `touching?` the stride to ask at. A space is the
+  empty tile without being declared; every other character is named by the
+  mapping, as a tile of the game's sheet or a bare index.
 
-  A row shorter than twenty columns is padded with the empty tile, and that is
-  an allowance for editors rather than looseness: most strip trailing spaces on
+  A row shorter than the room is padded with the empty tile, and that is an
+  allowance for editors rather than looseness: most strip trailing spaces on
   save, and refusing what an editor silently did would be a fight nobody wins.
   A missing *row* is refused -- there is no editor that eats lines.
   """
@@ -1308,32 +1345,46 @@ defmodule Potion.Compiler do
         rest -> Enum.reverse(rest)
       end
 
-    unless length(rows) == @room_h do
-      raise CompileError, """
-      the room #{inspect(name)} is #{length(rows)} rows tall, and a screen is #{@room_h}.
+    height = length(rows)
 
-      A room is exactly what the panel shows: #{@room_w} columns by #{@room_h} \
-      rows. Rows may run short -- editors strip trailing spaces -- but every one \
-      of the eighteen has to be there.
+    unless height in @room_min_h..@room_max do
+      raise CompileError, """
+      the room #{inspect(name)} is #{height} rows tall, and a room runs from \
+      the screen's #{@room_min_h} to the map's #{@room_max}.
+
+      Shorter, and the panel would show the void past its bottom edge; taller, \
+      and there is no map to draw the rest on -- a world past 256 pixels is a \
+      different feature. Rows may run short -- editors strip trailing spaces \
+      -- but every one has to be there.
       """
     end
 
-    for {row, y} <- Enum.with_index(rows), into: <<>> do
-      length = String.length(row)
+    width = rows |> Enum.map(&String.length/1) |> Enum.max() |> max(@room_min_w)
 
-      if length > @room_w do
-        raise CompileError, """
-        the room #{inspect(name)}'s row #{y} is #{length} columns wide, and a \
-        screen is #{@room_w}.
-        """
-      end
+    if width > @room_max do
+      wide = Enum.find_index(rows, &(String.length(&1) > @room_max))
 
-      padded = String.pad_trailing(row, @room_w)
+      raise CompileError, """
+      the room #{inspect(name)}'s row #{wide} is \
+      #{String.length(Enum.at(rows, wide))} columns wide, and the map is \
+      #{@room_max}.
 
-      for <<character::utf8 <- padded>>, into: <<>> do
-        <<cell!(character, {name, y}, mapping, tiles)>>
-      end
+      A room wider than the screen's #{@room_min_w} is what the camera is \
+      for; wider than the map's #{@room_max} there is nowhere to draw it -- a \
+      world past 256 pixels is a different feature.
+      """
     end
+
+    cells =
+      for {row, y} <- Enum.with_index(rows), into: <<>> do
+        padded = String.pad_trailing(row, width)
+
+        for <<character::utf8 <- padded>>, into: <<>> do
+          <<cell!(character, {name, y}, mapping, tiles)>>
+        end
+      end
+
+    <<width, height>> <> cells
   end
 
   # A space is the empty tile the init already filled the map with -- the same
@@ -1797,6 +1848,31 @@ defmodule Potion.Compiler do
   # that is no memory at all.
   defp attribute(0, operand), do: [{:xor, :a, :a}, {:ld, operand, :a}]
   defp attribute(flip, operand), do: [{:ld, :a, flip}, {:ld, operand, :a}]
+
+  # A camera coordinate takes what a sprite field takes -- a literal, a
+  # variable, a cell of an array -- and the refusal is its own because the
+  # sprite one talks about `x:`, `y:` and `tile:`.
+  defp scroll_value(literal, allocation, statement) when is_integer(literal),
+    do: sprite_value(literal, 0, allocation, statement)
+
+  defp scroll_value({name, _, context} = value, allocation, statement)
+       when is_atom(name) and is_atom(context),
+       do: sprite_value(value, 0, allocation, statement)
+
+  defp scroll_value({{:., _, [Access, :get]}, _, _} = value, allocation, statement),
+    do: sprite_value(value, 0, allocation, statement)
+
+  defp scroll_value(other, _allocation, statement) do
+    raise CompileError, """
+    `scroll` coordinate outside the v0 subset:
+
+        #{Macro.to_string(other)}
+
+    In #{one_line(statement)}, the camera's x and y take a declared variable, \
+    a cell of an array, or a literal from 0 to 255. A computation happens \
+    before, in a variable.
+    """
+  end
 
   # ── The right-hand side of an assignment ────────────────────────────────────
 

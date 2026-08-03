@@ -1025,16 +1025,42 @@ defmodule Potion.DSLTest do
       assert Map.get(ram, addresses.t) > 10, "the walker stopped counting"
     end
 
-    test "a drawing that is not a screen is refused, by its numbers" do
-      assert_raise Potion.CompileError, ~r/3 rows tall, and a screen is 18/, fn ->
-        Potion.Compiler.room!(:r, "##\n##\n##", %{?# => 0}, %{})
+    test "a drawing outside the screen-to-map range is refused, by its numbers" do
+      assert_raise Potion.CompileError,
+                   ~r/3 rows tall.*from the screen's 18 to the map's 32/s,
+                   fn ->
+                     Potion.Compiler.room!(:r, "##\n##\n##", %{?# => 0}, %{})
+                   end
+
+      tall = List.duplicate("##", 33) |> Enum.join("\n")
+
+      assert_raise Potion.CompileError, ~r/33 rows tall/, fn ->
+        Potion.Compiler.room!(:r, tall, %{?# => 0}, %{})
       end
 
-      wide = List.duplicate(String.duplicate("#", 21), 18) |> Enum.join("\n")
+      wide = List.duplicate(String.duplicate("#", 33), 18) |> Enum.join("\n")
 
-      assert_raise Potion.CompileError, ~r/21 columns wide, and a screen is 20/, fn ->
+      assert_raise Potion.CompileError, ~r/33 columns wide, and the map is 32/, fn ->
         Potion.Compiler.room!(:r, wide, %{?# => 0}, %{})
       end
+    end
+
+    # Between the screen and the map, the drawing decides: the longest row is
+    # the width every other row is padded to, and the header says so.
+    test "a room may outgrow the screen, and the header carries its size" do
+      ascii =
+        ([String.duplicate("#", 32)] ++
+           List.duplicate("#", 30) ++
+           [String.duplicate("#", 32)])
+        |> Enum.join("\n")
+
+      assert <<32, 32, cells::binary>> = Potion.Compiler.room!(:r, ascii, %{?# => 0}, %{})
+      assert byte_size(cells) == 32 * 32
+
+      screen = List.duplicate(String.duplicate("#", 20), 18) |> Enum.join("\n")
+
+      assert <<20, 18, small::binary>> = Potion.Compiler.room!(:r, screen, %{?# => 0}, %{})
+      assert byte_size(small) == 360
     end
 
     test "a character the mapping does not name is refused, at its row" do
@@ -1162,7 +1188,9 @@ defmodule Potion.DSLTest do
     test "the first hands from a cold boot, measured and pinned" do
       states = sample(Coin, [Potion.Runtime.rng_cell()], 10) |> List.flatten() |> Enum.drop(3)
 
-      assert states == [167, 28, 42, 108, 20, 136, 149]
+      # Re-measured when the vblank handler learned to apply the camera: a
+      # longer handler moves DIV, and DIV is the seed.
+      assert states == [169, 32, 50, 124, 51, 200, 21]
     end
 
     test "a bound that is not a power of two is refused, with the reason" do
@@ -1191,6 +1219,144 @@ defmodule Potion.DSLTest do
       message = reject!("Rejected.Unbounded", "variables x: 0", "x = random()")
 
       assert message =~ "takes one bound"
+    end
+  end
+
+  # A room the size of the whole map, and a dead-zone camera: it steps after
+  # the walker only when he leaves the middle of the screen, one pixel a frame,
+  # and never past the room's edge. Chasing instead of computing `x - 76` is
+  # not just taste -- the byte cannot tell that subtraction's -66 from its
+  # +190, and the chase never meets the ambiguity.
+  defmodule Chase do
+    @moduledoc false
+    use Potion
+
+    @field ([String.duplicate("#", 32)] ++
+              List.duplicate("#" <> String.duplicate(" ", 30) <> "#", 30) ++
+              [String.duplicate("#", 32)])
+           |> Enum.join("\n")
+
+    room :field, @field, tiles: %{?# => 0}
+
+    defactor :chaser do
+      variables x: 80,
+                y: 72,
+                ox: 0,
+                oy: 0,
+                cx: 0,
+                cy: 0,
+                sx: 0,
+                sy: 0,
+                x7: 0,
+                y7: 0,
+                arrived: 0
+
+      every_frame do
+        if arrived == 0 do
+          arrived = 1
+          show(:field)
+        end
+
+        ox = x
+        oy = y
+
+        if pressed?(:right), do: x = x + 1
+        if pressed?(:left), do: x = x - 1
+        if pressed?(:up), do: y = y - 1
+        if pressed?(:down), do: y = y + 1
+
+        x7 = x + 7
+        y7 = y + 7
+
+        if touching?(0, x, y) or touching?(0, x7, y) or touching?(0, x, y7) or
+             touching?(0, x7, y7) do
+          x = ox
+          y = oy
+        end
+
+        sx = x - cx
+        if sx > 84 and cx < 96, do: cx = cx + 1
+        if sx < 68 and cx > 0, do: cx = cx - 1
+        sy = y - cy
+        if sy > 76 and cy < 112, do: cy = cy + 1
+        if sy < 60 and cy > 0, do: cy = cy - 1
+
+        scroll(cx, cy)
+        sx = x - cx
+        sy = y - cy
+        sprite(0, x: sx, y: sy, tile: 0)
+      end
+    end
+  end
+
+  describe "a camera" do
+    test "the room paints all thirty-two columns, and the camera starts at zero" do
+      {_pixels, _state, ram} = run_frames(Chase, 8)
+
+      # Column 20 is where a screen-sized copy stopped: a wall there says the
+      # room's own width drove the stride.
+      assert Map.get(ram, 0x9800 + 20) == 0
+      assert Map.get(ram, 0x9800 + 31) == 0
+      assert Map.get(ram, 0xFF43) == 0
+      assert Map.get(ram, 0xFF42) == 0
+    end
+
+    test "the camera follows the walker and stops at the room's edge, the hardware with it" do
+      {_pixels, state, ram} = run_frames(Chase, 8)
+      a = Chase.addresses()
+
+      {_state, ram} = frames(Chase, state, Joypad.set(ram, @right, @released), 220)
+
+      # The walker stands against the *room's* right wall -- column 31, world
+      # pixel 240 -- which only a width-aware `touching?` can place there.
+      assert Map.get(ram, a.x) == 240
+      # The camera clamped at room minus panel: 256 - 160.
+      assert Map.get(ram, a.cx) == 96
+      # And the vblank carried it to the register the panel reads.
+      assert Map.get(ram, 0xFF43) == 96
+      assert Map.get(ram, 0xFF42) == 0
+    end
+
+    test "the sprite stays on the glass while the world slides under it" do
+      {_pixels, state, ram} = run_frames(Chase, 8)
+
+      {_state, ram} = frames(Chase, state, Joypad.set(ram, @right, @released), 220)
+
+      # World 240, camera 96: the walker is drawn at screen 144 -- OAM says
+      # 144 + 8, the hardware's own offset.
+      assert Map.get(ram, 0xFE01) == 144 + 8
+    end
+
+    test "the far wall reaches the glass: the panel shows the room's edge, not its middle" do
+      {_pixels, state, ram} = run_frames(Chase, 8)
+
+      {state, ram} = frames(Chase, state, Joypad.set(ram, @right, @released), 220)
+      {state, ram} = frames(Chase, state, Joypad.set(ram, @released, @released), 2)
+      {pixels, _state, _ram} = Screen.frame(state, Chase.rom(), ram, true)
+
+      ink = non_white(pixels)
+
+      # The room's right wall -- world 248..255 -- on screen at 152..159.
+      assert Enum.all?(0..143, fn line -> {155, line} in ink end)
+      # And the middle of the top border is still a wall, scrolled or not.
+      assert {80, 4} in ink
+      # The world's left wall is a screen behind the camera: the panel's left
+      # edge shows the room's inside.
+      refute {12, 72} in ink
+    end
+
+    test "a computed coordinate is refused: the camera reads cells" do
+      message =
+        reject!("Rejected.ScrollSum", "variables cx: 0", "scroll(cx + 1, 0)")
+
+      assert message =~ "scroll` coordinate"
+      assert message =~ "A computation happens before"
+    end
+
+    test "half a camera is refused, with the shape" do
+      message = reject!("Rejected.ScrollHalf", "variables cx: 0", "scroll(cx)")
+
+      assert message =~ "x then y"
     end
   end
 

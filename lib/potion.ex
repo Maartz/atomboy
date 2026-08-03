@@ -159,9 +159,14 @@ defmodule Potion do
       background(0, 0, tile: :wall)      a tile, by name or by index
       text(3, 7, "PRESS START")          words, turned into stores at compile time
 
-      room :cave, @drawing,              a screen: twenty columns, eighteen rows,
+      room :cave, @drawing,              a screen or more: 20×18 up to 32×32,
         tiles: %{?# => :wall}            each character a tile of the sheet
       show(:cave)                        painted whole, behind one dark frame
+
+      scroll(cx, cy)                     the camera's corner in the room, in
+                                         pixels — applied at the vblank, so the
+                                         panel sees one camera per frame;
+                                         sprites follow by `sx = x - cx`
 
       tiles from: "art/pong.png",        a drawing, cut into tiles and named
         names: [:ball, :paddle]
