@@ -30,7 +30,13 @@ defmodule Moananas do
           :heart
         ]
 
+  # Both imported from the concept art by `art/import_moananas.py`: cropped,
+  # shrunk to their tile budget, and quantized to the four shades with Bayer
+  # dithering -- the dither is what carries an illustration's shading into
+  # four colours. The expression survives where a drawing made of geometry
+  # never had one.
   picture(:face, from: "art/moananas_face.png")
+  picture(:logo, from: "art/moananas_logo.png")
 
   # ── The screens ─────────────────────────────────────────────────────────────
   #
@@ -50,13 +56,12 @@ defmodule Moananas do
   end
 
   @title ([border] ++
-            [air.()] ++
-            [place.(air.(), [{3, "c"}, {15, "c"}])] ++
-            List.duplicate(air.(), 10) ++
-            [place.(air.(), [{10, "p"}, {13, "m"}, {17, "P"}])] ++
-            [place.(air.(), [{10, "b"}, {13, "M"}, {17, "T"}])] ++
-            [air.()] ++
-            [air.()] ++
+            List.duplicate(air.(), 6) ++
+            [place.(air.(), [{15, "c"}])] ++
+            List.duplicate(air.(), 4) ++
+            [place.(air.(), [{11, "p"}, {14, "m"}, {17, "P"}])] ++
+            [place.(air.(), [{11, "b"}, {14, "M"}, {17, "T"}])] ++
+            List.duplicate(air.(), 3) ++
             [border])
          |> Enum.join("\n")
 
@@ -118,9 +123,8 @@ defmodule Moananas do
         leaving = 0
         primed = 0
         show(:title_screen)
-        picture(:face, 1, 4)
-        text(10, 6, "MOANANAS")
-        text(11, 8, "ISLAND")
+        picture(:logo, 4, 1)
+        picture(:face, 1, 6)
         text(5, 16, "PRESS START")
         play(:island)
       end
