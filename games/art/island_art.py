@@ -40,6 +40,30 @@ import struct, subprocess, zlib
 
 SHADES = ".-+#"
 
+# ── What the panel actually shows ──────────────────────────────────────────
+#
+# The DMG's four shades are #9BBC0F, #8BAC0F, #306230 and #0F380F. By
+# brightness that is 158, 144, 77 and 39 — **shade 0 and shade 1 are fourteen
+# apart out of two hundred and fifty-five.** They are the same green. The
+# panel does not have four values; it has two lights that cannot be told
+# apart and two darks that can.
+#
+# So nothing here may carry a shape on the difference between 0 and 1. The
+# structure is light (0) against dark (2, 3), and every value in between is
+# made the way the hardware's own games made it: by an ordered dither, two
+# shades interleaved every other pixel. Two of them do all the work —
+#
+#     %   beach: 2 and 0    (mean brightness 117 — between sky and sea)
+#     &   floor: 3 and 2    (mean 58 — the darkest mass, nearest the eye)
+#
+# Both have a period of two, and a tile is eight wide, so they carry across
+# tile edges without a seam. The one exception is a sprite, where shade 0 is
+# the console's transparent colour and cannot be used as a light at all —
+# there, and only there, shade 1 is the light.
+BEACH = lambda x, y: 2 if (x + y) % 2 == 0 else 0
+FLOOR = lambda x, y: 3 if (x + y) % 2 == 0 else 2
+PATTERNS = {"%": BEACH, "&": FLOOR}
+
 
 def read_rgba(path):
     """Any image into an RGBA pixel list via a temporary PAM."""
@@ -70,31 +94,36 @@ def luma(r, g, b):
     return (299 * r + 587 * g + 114 * b) // 1000
 
 
-def band(w, h, px, outline=True, cuts=(0.34, 0.70), fill=0):
+def band(w, h, px, outline=True, cuts=(0.34, 0.70), fill=0, light=1):
     """Auto-levelled three-ink banding, the silhouette's rim forced to ink.
 
     Levelling against the object's own range rather than absolute brightness
     is what keeps a pale rock from flattening into one shade; the rim pass is
     what keeps it from dissolving into the sky behind it.
 
-    `fill` is what transparency becomes. Zero for a sprite, where shade 0 is
-    the console's transparent colour. For a background object it must be the
-    shade of whatever it stands on — the background layer has no transparency,
-    so a rock cut out on 0 arrives in the game as a rock in a white box.
+    `fill` is what transparency becomes — a shade, or a function of x and y
+    for a patterned ground. Zero for a sprite, where shade 0 is the console's
+    transparent colour. For a background object it must be whatever the thing
+    stands on — the background layer has no transparency, so a rock cut out
+    on 0 arrives in the game as a rock in a white box.
+
+    `light` is what the brightest band becomes: 0 for a background object,
+    1 for a sprite, which cannot use 0 for anything but transparency.
     """
     lums = [luma(*p[:3]) for p in px if p[3] >= 128]
+    ground = fill if callable(fill) else (lambda _x, _y: fill)
     if not lums:
-        return [fill] * (w * h)
+        return [ground(i % w, i // w) for i in range(w * h)]
     lo, hi = min(lums), max(lums)
     span = max(1, hi - lo)
 
     out = []
-    for p in px:
+    for i, p in enumerate(px):
         if p[3] < 128:
-            out.append(fill)
+            out.append(ground(i % w, i // w))
             continue
         t = (luma(*p[:3]) - lo) / span
-        out.append(3 if t < cuts[0] else 2 if t < cuts[1] else 1)
+        out.append(3 if t < cuts[0] else 2 if t < cuts[1] else light)
 
     if outline:
         for i, p in enumerate(px):
@@ -109,7 +138,7 @@ def band(w, h, px, outline=True, cuts=(0.34, 0.70), fill=0):
     return out
 
 
-def asset(src, crop=None, size=None, outline=True, cuts=(0.34, 0.70), fill=0):
+def asset(src, crop=None, size=None, outline=True, cuts=(0.34, 0.70), fill=0, light=1):
     """A pack object, cropped and banded into a grid of shades."""
     args = ["magick", src]
     if crop:
@@ -119,16 +148,28 @@ def asset(src, crop=None, size=None, outline=True, cuts=(0.34, 0.70), fill=0):
     args += ["/tmp/island_stage.png"]
     subprocess.run(args, check=True)
     w, h, px = read_rgba("/tmp/island_stage.png")
-    flat = band(w, h, px, outline, cuts, fill)
+    flat = band(w, h, px, outline, cuts, fill, light)
     return [flat[y * w : (y + 1) * w] for y in range(h)]
 
 
 def drawn(*rows):
-    """An ASCII block into a grid of shades."""
+    """An ASCII block into a grid of shades.
+
+    `.` `-` `+` `#` are the four shades; `%` and `&` are the two dithers,
+    resolved against the pixel's own position so a row written all `%` comes
+    out as the beach's weave and joins its neighbours' without a seam.
+    """
     width = len(rows[0])
-    for i, row in enumerate(rows):
-        assert len(row) == width, f"row {i} is {len(row)} wide, not {width}"
-    return [[SHADES.index(c) for c in row] for row in rows]
+    grid = []
+    for y, row in enumerate(rows):
+        assert len(row) == width, f"row {y} is {len(row)} wide, not {width}"
+        grid.append(
+            [
+                PATTERNS[c](x, y) if c in PATTERNS else SHADES.index(c)
+                for x, c in enumerate(row)
+            ]
+        )
+    return grid
 
 
 def cut(grid, name):
@@ -146,35 +187,37 @@ def cut(grid, name):
 
 SKY = drawn(*["." * 8] * 8)
 
-# A ring, not a disc: on a white sky the sun is what the light leaves out.
+# A ring, not a disc: on a plain sky the sun is what the light leaves out.
+# Drawn in shade 2 — a ring in shade 1 is a ring in the colour of the sky.
 SUN = drawn(
-    ".....---........",
-    "...--...--......",
-    "..-.......-.....",
-    ".-.........-....",
-    "-...........-...",
-    "-............-..",
-    "-............-..",
-    "-.............-.",
-    "-.............-.",
-    "-............-..",
-    "-............-..",
-    ".-...........-..",
-    ".-..........-...",
-    "..-........-....",
-    "...--....--.....",
-    ".....----.......",
+    ".....++++.......",
+    "...++....++.....",
+    "..+........+....",
+    ".+..........+...",
+    ".+..........+...",
+    "+............+..",
+    "+............+..",
+    "+............+..",
+    "+............+..",
+    "+............+..",
+    "+............+..",
+    ".+..........+...",
+    ".+..........+...",
+    "..+........+....",
+    "...++....++.....",
+    ".....++++.......",
 )
 
-# Filled, not outlined: an outline alone on a white sky is a wire, and from
-# two feet away a wire is nothing.
+# Filled with the weave, not with shade 1: a shade-1 cloud on a shade-0 sky
+# is a cloud painted in the colour of the sky, which is what the first pass
+# shipped and what the panel refused to show.
 CLOUD = drawn(
-    "......----..............",
-    "....--------...----.....",
-    "..-------------------...",
-    ".---------------------..",
-    "-----------------------.",
-    ".+++++++++++++++++++++..",
+    "......++++..............",
+    "....++%%%%++...++++.....",
+    "..++%%%%%%%%+++%%%%++...",
+    ".+%%%%%%%%%%%%%%%%%%%%+.",
+    "+%%%%%%%%%%%%%%%%%%%%%%+",
+    ".++++++++++++++++++++++.",
     "........................",
     "........................",
 )
@@ -193,14 +236,14 @@ GULL = drawn(
 # The island out at sea: a volcano cone, its lee side in shadow, sitting on
 # the horizon line the sea's top tile draws.
 ISLE = drawn(
-    "..........###...........",
-    "........##---##.........",
-    "......##--------##......",
-    "....##-----++-----##....",
-    "..##---------++-----##..",
-    ".#------------+++-----#.",
-    "#--------------++++----#",
-    "########################",
+    "..........+++...........",
+    "........++%%%++.........",
+    "......++%%%%%%%++.......",
+    "....++%%%%%%%%%%%++.....",
+    "..++%%%%%%%%%%%%%%%++...",
+    ".+%%%%%%%%%%%%%%%%%%%+..",
+    "+%%%%%%%%%%%%%%%%%%%%%+.",
+    "++++++++++++++++++++++++",
 )
 
 # ── The sea ────────────────────────────────────────────────────────────────
@@ -212,13 +255,16 @@ ISLE = drawn(
 # one streak thirty-two tiles long, and streaks lying flat, at three different
 # heights, are what water looks like from a beach.
 
+# The horizon is the tile's own top edge, so the far island can stand on it
+# rather than float three pixels above it. The glints are shade 0 — a shade-1
+# glint on shade-2 water is a glint nobody sees.
 SEA_CREST = drawn(
-    "........",
-    "........",
-    "........",
     "########",
     "++++++++",
-    "--------",
+    "++++++++",
+    "........",
+    "++++++++",
+    "++++++++",
     "++++++++",
     "++++++++",
 )
@@ -226,11 +272,11 @@ SEA_CREST = drawn(
 SEA_A = drawn(
     "++++++++",
     "++++++++",
-    "--------",
+    "........",
     "++++++++",
     "++++++++",
     "++++++++",
-    "--------",
+    "........",
     "++++++++",
 )
 
@@ -238,7 +284,7 @@ SEA_B = drawn(
     "++++++++",
     "++++++++",
     "++++++++",
-    "--------",
+    "........",
     "++++++++",
     "++++++++",
     "++++++++",
@@ -251,27 +297,28 @@ SURF_A = drawn(
     "++++++++",
     "++++++++",
     "++.+++.+",
-    ".--..--.",
-    "--------",
-    "--------",
-    "--------",
-    "--------",
+    "........",
+    "%%%%%%%%",
+    "%%%%%%%%",
+    "%%%%%%%%",
+    "%%%%%%%%",
 )
 
 SURF_B = drawn(
     "++++++++",
     "+++++++.",
     "+.+++.++",
-    "-..--..-",
-    "--------",
-    "--------",
-    "--------",
-    "--------",
+    "........",
+    "%%%%%%%%",
+    "%%%%%%%%",
+    "%%%%%%%%",
+    "%%%%%%%%",
 )
 
-# The beach going back: flat. A texture repeated over four rows and thirty-two
-# columns is a grid whatever it is made of, and sand at a distance has none.
-DUNE = drawn(*["-" * 8] * 8)
+# The beach going back. Flat shade 1 was the whole disaster: it is the colour
+# of the sky, so the sand and the air above it were one field and the hero
+# stood in the middle of nothing. The weave puts it between them.
+DUNE = drawn(*["%" * 8] * 8)
 
 # ── The floor ──────────────────────────────────────────────────────────────
 #
@@ -281,28 +328,28 @@ DUNE = drawn(*["-" * 8] * 8)
 
 SAND = drawn(
     "########",
-    "--------",
-    "++++++++",
-    "++++++++",
-    "++++++++",
-    "++++++++",
-    "++++++++",
-    "++++++++",
+    "........",
+    "&&&&&&&&",
+    "&&&&&&&&",
+    "&&&&&&&&",
+    "&&&&&&&&",
+    "&&&&&&&&",
+    "&&&&&&&&",
 )
 
-SAND_DEEP = drawn(*["+" * 8] * 8)
+SAND_DEEP = drawn(*["&" * 8] * 8)
 
 # A board, landed on from above: its top edge is the tile's top edge, which
 # is where `nrow * 8 - 16` puts the hero's feet.
 PLANK = drawn(
     "########",
-    "-+-+-+-+",
-    "+-++-+-+",
-    "+-+-+--+",
+    ".+.+.+.+",
+    "+.++.+.+",
+    "+.+.+..+",
     "########",
-    "--------",
-    "--------",
-    "--------",
+    "%%%%%%%%",
+    "%%%%%%%%",
+    "%%%%%%%%",
 )
 
 # ── The palm ───────────────────────────────────────────────────────────────
@@ -342,73 +389,78 @@ def palm_crown():
         ]
     args += ["/tmp/island_palm.png"]
     subprocess.run(args, check=True)
-    return asset("/tmp/island_palm.png", None, "24x16!", outline=False, fill=1)
+    return asset(
+        "/tmp/island_palm.png", None, "24x16!", outline=False, fill=BEACH, light=0
+    )
 
 
 PALM_CROWN = palm_crown()
 
 PALM_TRUNK = drawn(
-    "--#--#--",
-    "--#-##--",
-    "--#--#--",
-    "--##-#--",
-    "--#--#--",
-    "--#-##--",
-    "--#--#--",
-    "--##-#--",
+    "%%#..#%%",
+    "%%#.##%%",
+    "%%#..#%%",
+    "%%##.#%%",
+    "%%#..#%%",
+    "%%#.##%%",
+    "%%#..#%%",
+    "%%##.#%%",
 )
 
 PALM_BASE = drawn(
-    "--#--#--",
-    "--#--#--",
-    "-#--#-#-",
-    "-#-#--#-",
-    "-#----#-",
-    "#--##--#",
-    "#------#",
+    "%%#..#%%",
+    "%%#..#%%",
+    "%#..#.#%",
+    "%#.#..#%",
+    "%#....#%",
+    "#..##..#",
+    "#......#",
     "########",
 )
 
 # ── The flag ───────────────────────────────────────────────────────────────
 
 FLAG_TOP = drawn(
-    "-##-----",
-    "-##+++#-",
-    "-##++++#",
-    "-##+++#-",
-    "-##++#--",
-    "-##-----",
-    "-##-----",
-    "-##-----",
+    "%##%%%%%",
+    "%##...#%",
+    "%##....#",
+    "%##...#%",
+    "%##..#%%",
+    "%##%%%%%",
+    "%##%%%%%",
+    "%##%%%%%",
 )
 
 FLAG_BASE = drawn(
-    "-##-----",
-    "-##-----",
-    "-##-----",
-    "-##-----",
-    "-##-----",
-    "-##-----",
-    "##--##--",
+    "%##%%%%%",
+    "%##%%%%%",
+    "%##%%%%%",
+    "%##%%%%%",
+    "%##%%%%%",
+    "%##%%%%%",
+    "##..##%%",
     "########",
 )
 
 # ── The pineapple and the heart ────────────────────────────────────────────
 
+# A light body with the crosshatch reduced to a few diamonds. Drawn as a full
+# hatch it was half ink, and half ink over the sea is a dark thing on dark
+# water — the fruit vanished exactly where the game floats it highest.
 PINEAPPLE = drawn(
     "...##...",
     "..#-##..",
     ".##-#-#.",
-    "..###...",
+    "..####..",
     ".######.",
-    "#-#-#-#-",
-    "#+-#-#-#",
-    "#-#-#-#-",
-    "#+-#-#-#",
-    "#-#-#-#-",
-    "#+-#-#-#",
-    ".#-#-#-.",
-    ".#+-#-#.",
+    "#------#",
+    "#-#--#-#",
+    "#------#",
+    "#--#-#--",
+    "#------#",
+    "#-#--#-#",
+    ".#----#.",
+    ".#-##-#.",
     "..####..",
     "........",
     "........",
@@ -465,9 +517,11 @@ def dress(grid, dy=0, head=9):
                 if out[y][x] != 0:
                     out[y][x] = 3
 
-    # Below the head the cream becomes a shirt; below the shirt it is skin
-    # again — he runs a beach, not a dungeon.
-    for y in range(head + dy, min(head + dy + 4, h)):
+    # Shorts, and nothing else darkened. The body stays the template's light
+    # shade: he stands on a beach woven half out of shade 2, and a shade-2
+    # shirt on it is a hero the ground swallows. Light body, ink outline —
+    # which is what every character on this console was.
+    for y in range(head + dy + 3, min(head + dy + 5, h)):
         for x in range(w):
             if out[y][x] == 1:
                 out[y][x] = 2
@@ -529,9 +583,11 @@ PACK = {
 
 
 def pack(name):
-    """A pack object as background decor: what surrounds it is the beach."""
+    """A pack object as background decor: what surrounds it is the beach, and
+    its lit face is shade 0 — on the background layer that is the light, and
+    shade 1 is only the sky wearing a different name."""
     src, crop, size = PACK[name]
-    return asset(src, crop, size, fill=1)
+    return asset(src, crop, size, fill=BEACH, light=0)
 
 
 SHEET = [

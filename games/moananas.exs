@@ -15,8 +15,12 @@
 # Every tile it draws with is built by `art/island_art.py` — the sky and the
 # sea drawn there, the rock and the log and the statue taken from the packs
 # and banded down to four shades, the hero the Eris Esra template with
-# Moananas's hair and glasses painted on. Of the cartridge's two hundred and
-# twelve tiles the cover takes a hundred and thirty and the beach sixty-one.
+# Moananas's hair and glasses painted on, and `art/title_art.py` imports the
+# cover. Of the cartridge's two hundred and twelve tiles the cover takes a
+# hundred and forty-eight and the beach sixty-one.
+#
+# Both scripts are written against one fact about the panel: its shade 0 and
+# shade 1 are the same green. See the header of `art/island_art.py`.
 defmodule Moananas do
   use Potion
 
@@ -86,11 +90,12 @@ defmodule Moananas do
         ]
 
   # The whole drawing, one screen: 360 cells folded into the tile budget by
-  # likeness — the air's dither weave repeats, the portrait does not. The
-  # tolerance is 24 rather than 16 because the beach wants the difference:
-  # forty tiles bought the sea, the palms and the sand's edge, and what they
-  # cost is a whisper of grain in the cover's air.
-  screen(:cover, from: "art/moananas_title.png", tolerance: 24)
+  # likeness — the paper repeats, the portrait does not. Twenty is as sharp as
+  # the cartridge affords: 148 tiles for the cover and 61 for the beach is 209
+  # of the 212 there are. Import it flat, as `art/title_art.py` does, and it
+  # folds far better than it did dithered — a flat fill is the same tile
+  # wherever it lands.
+  screen(:cover, from: "art/moananas_title.png", tolerance: 20)
 
   # ── The island ──────────────────────────────────────────────────────────────
   #
@@ -113,11 +118,11 @@ defmodule Moananas do
   ground =
     for row <- 0..17 do
       case row do
-        8 -> List.duplicate(?[, 32)
-        9 -> List.duplicate(?{, 32)
-        10 -> List.duplicate(?}, 32)
-        11 -> banded.(?~, ?`)
-        r when r in 12..15 -> List.duplicate(?., 32)
+        7 -> List.duplicate(?[, 32)
+        8 -> List.duplicate(?{, 32)
+        9 -> List.duplicate(?}, 32)
+        10 -> banded.(?~, ?`)
+        r when r in 11..15 -> List.duplicate(?., 32)
         16 -> List.duplicate(?S, 32)
         17 -> List.duplicate(?D, 32)
         _ -> sky.()
@@ -147,8 +152,8 @@ defmodule Moananas do
            {8, 5, "v"},
            {27, 4, "v"},
            # the far island, standing on the horizon the crest draws
-           {4, 7, "ijk"},
-           {20, 7, "ijk"},
+           {4, 6, "ijk"},
+           {20, 6, "ijk"},
            # the palms: a canopy two tiles deep, then the trunk down to the sand
            {3, 12, "PQR"},
            {3, 13, "pqr"},
