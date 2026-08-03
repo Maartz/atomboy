@@ -171,6 +171,9 @@ defmodule Potion do
       tiles from: "art/pong.png",        a drawing, cut into tiles and named
         names: [:ball, :paddle]
 
+      picture :face, from: "art/f.png"   a drawing bigger than a tile
+      picture(:face, 2, 4)               painted whole onto the map, by name
+
   ### Screens, sound, and saying a thing once
 
       state :title do                    an actor made of states instead of one body
@@ -261,7 +264,8 @@ defmodule Potion do
           room: 2,
           room: 3,
           music: 2,
-          music: 3
+          music: 3,
+          picture: 2
         ]
 
       @before_compile Potion
@@ -412,6 +416,68 @@ defmodule Potion do
     end
   end
 
+  @doc """
+  Declares a picture: a drawing bigger than a tile, cut in reading order and
+  painted whole onto the background map by the `picture(name, col, row)`
+  statement.
+
+      picture :portrait, from: "art/face.png"
+
+      on_enter do
+        picture(:portrait, 2, 4)
+      end
+
+  The tiles land in the cartridge's sheet *after* the named ones, and stay
+  consecutive — which is the whole trick: the kernel never copies a map from
+  ROM, it writes first, first+1, first+2… with the screen's stride. A title
+  screen with a face on it costs three bytes of header and no map at all.
+  """
+  defmacro picture(name, options) when is_atom(name) do
+    module = __CALLER__.module
+
+    path =
+      case Keyword.fetch(options, :from) do
+        {:ok, path} when is_binary(path) ->
+          Path.expand(path, Path.dirname(__CALLER__.file))
+
+        _ ->
+          raise CompileError, """
+          malformed `picture`: #{Macro.to_string(options)}
+
+          It takes a name and the drawing:
+
+              picture :portrait, from: "art/face.png"
+          """
+      end
+
+    image = Potion.PNG.read!(path)
+    cols = div(image.width, 8)
+    rows = div(image.height, 8)
+
+    if cols > 32 or rows > 32 do
+      raise CompileError, """
+      the picture #{inspect(name)} is #{cols}x#{rows} tiles, and the map is 32x32.
+
+      A picture is painted onto the background map, so the map is its ceiling. \
+      Crop the drawing, or cut it into more than one picture.
+      """
+    end
+
+    bytes = image |> Potion.Tiles.cut!(path) |> Enum.join()
+
+    Module.put_attribute(module, :external_resource, path)
+
+    Module.put_attribute(
+      module,
+      :potion_pictures,
+      pictures(module) ++ [{name, cols, rows, bytes}]
+    )
+
+    :ok
+  end
+
+  defp pictures(module), do: Module.get_attribute(module, :potion_pictures) || []
+
   @doc false
   defmacro __before_compile__(env) do
     case actors(env.module) do
@@ -439,6 +505,17 @@ defmodule Potion do
 
         art = Module.get_attribute(env.module, :potion_art) || %{bytes: <<>>, names: %{}}
 
+        # Pictures ride behind the sheet's tiles, consecutive by construction:
+        # the map records where each one starts and how big it is, and the
+        # `picture` statement needs nothing else.
+        {art, pictures} =
+          Enum.reduce(pictures(env.module), {art, %{}}, fn {name, cols, rows, bytes},
+                                                           {art, pictures} ->
+            first = Potion.Runtime.art_base() + div(byte_size(art.bytes), 16)
+
+            {%{art | bytes: art.bytes <> bytes}, Map.put(pictures, name, {first, cols, rows})}
+          end)
+
         screens =
           Enum.map(rooms(env.module), fn {name, ascii, opts} ->
             {name, compiled_room!(name, ascii, opts, art.names, env)}
@@ -456,6 +533,7 @@ defmodule Potion do
               | cells: cells,
                 arrays: arrays,
                 tiles: art.names,
+                pictures: pictures,
                 tunes: Map.new(songs, &described/1),
                 rooms: MapSet.new(screens, fn {name, _bytes} -> name end)
             }

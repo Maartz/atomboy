@@ -818,7 +818,7 @@ defmodule Potion.Runtime do
       voice(:play_bass, {@bass, @bass_base, @bass_wait}, :wave) ++
       vibrato(:vibrato_lead, @lead_pitch, @lead_phase, {@nr13, @nr14}) ++
       vibrato(:vibrato_harmony, @harm_pitch, @harm_phase, {@nr23, @nr24}) ++
-      show_room() ++ touching() ++ random() ++ divide()
+      show_room() ++ touching() ++ random() ++ divide() ++ draw_picture()
   end
 
   defp voice(label, {tune, tune_base, tune_wait}, kind) do
@@ -1131,6 +1131,46 @@ defmodule Potion.Runtime do
       {:label, :divide_skip},
       {:dec, :b},
       {:jr, :nz, {:label, :divide_step}},
+      {:ret}
+    ]
+  end
+
+  # A rectangle of consecutive tiles, written straight onto the map. A picture
+  # is never copied from ROM -- its tiles were cut in reading order, so the map
+  # gets first, first+1, first+2… at the screen's stride, and the only data is
+  # the three numbers in the registers. The panel is switched off for the
+  # writes and back on after: one dark frame, the bargain `show` strikes.
+  #
+  # Entry: A = first tile, B = rows, C = columns, DE = the map address.
+  defp draw_picture do
+    [
+      {:label, :draw_picture},
+      {:ld, :l, :a},
+      {:xor, :a, :a},
+      {:ldh, {:high, @lcdc}, :a},
+      {:ld, :a, :l},
+      {:label, :picture_row},
+      {:push, :bc},
+      {:label, :picture_cell},
+      {:ld, {:mem, :de}, :a},
+      {:inc, :de},
+      {:inc, :a},
+      {:dec, :c},
+      {:jr, :nz, {:label, :picture_cell}},
+      {:pop, :bc},
+      {:ld, :l, :a},
+      {:ld, :a, 32},
+      {:sub, :a, :c},
+      {:add, :a, :e},
+      {:ld, :e, :a},
+      {:ld, :a, :d},
+      {:adc, :a, 0},
+      {:ld, :d, :a},
+      {:ld, :a, :l},
+      {:dec, :b},
+      {:jr, :nz, {:label, :picture_row}},
+      {:ld, :a, @lcdc_on},
+      {:ldh, {:high, @lcdc}, :a},
       {:ret}
     ]
   end

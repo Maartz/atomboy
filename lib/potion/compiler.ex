@@ -212,6 +212,8 @@ defmodule Potion.Compiler do
       # everyone else reads with one.
       pooled: if(count > 1, do: MapSet.new(names), else: MapSet.new()),
       rooms: MapSet.new(Keyword.get(opts, :rooms, [])),
+      # name => {first tile, cols, rows}: a drawing painted whole by counting.
+      pictures: Map.new(Keyword.get(opts, :pictures, [])),
       # name => whether it has a bass voice.
       tunes:
         Map.new(Keyword.get(opts, :tunes, []), fn
@@ -911,6 +913,68 @@ defmodule Potion.Compiler do
 
     A room is bytes at a known place in the cartridge, and which place is \
     decided while the game compiles.
+    """
+  end
+
+  # ── A picture ───────────────────────────────────────────────────────────────
+
+  # `picture(:portrait, 2, 4)`: a drawing bigger than a tile, painted whole
+  # onto the map. Its tiles are consecutive in the sheet by construction, so
+  # the kernel writes first, first+1, first+2… with the screen's stride --
+  # nothing is copied, the picture is *counted*. The panel goes dark for the
+  # writes, `show`'s own bargain.
+  defp statement({:picture, _, [name, col, row]} = statement, allocation, counter)
+       when is_atom(name) and is_integer(col) and is_integer(row) do
+    pictures = Map.get(allocation, :pictures, %{})
+
+    {first, cols, rows} =
+      case Map.fetch(pictures, name) do
+        {:ok, found} ->
+          found
+
+        :error ->
+          known = pictures |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+
+          raise CompileError, """
+          no picture is called #{inspect(name)}.
+
+              #{one_line(statement)}
+
+          #{if known == "", do: "This game declares none.", else: "The ones it has: #{known}."}
+
+          A picture is declared beside the actors and painted by name:
+
+              picture :portrait, from: "art/face.png"
+              picture(:portrait, 2, 4)
+          """
+      end
+
+    if col < 0 or row < 0 or col + cols > 32 or row + rows > 32 do
+      raise CompileError, """
+      the picture #{inspect(name)} is #{cols}x#{rows} tiles, and at column \
+      #{col}, row #{row} it runs off the 32x32 map.
+
+          #{one_line(statement)}
+      """
+    end
+
+    {[
+       {:ld, :a, first},
+       {:ld, :b, rows},
+       {:ld, :c, cols},
+       {:ld, :de, Runtime.background_address(col, row)},
+       {:call, {:label, :draw_picture}}
+     ], counter}
+  end
+
+  defp statement({:picture, _, [_name, _col, _row]} = statement, _allocation, _counter) do
+    raise CompileError, """
+    `picture` takes a declared name and two literal squares, column then row:
+
+        #{one_line(statement)}
+
+    Where a picture stands is decided while the game compiles -- it is a title
+    screen's furniture, not a sprite.
     """
   end
 

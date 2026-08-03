@@ -1506,6 +1506,79 @@ defmodule Potion.DSLTest do
     end
   end
 
+  # A picture: a drawing bigger than a tile, painted onto the map by counting
+  # -- its tiles are consecutive in the sheet, so the kernel writes first,
+  # first+1… and never copies a map from ROM.
+  defmodule Postcard do
+    @moduledoc false
+    use Potion
+
+    picture(:badge, from: "fixtures/shades.png")
+
+    defactor :painter do
+      variables done: 0
+
+      every_frame do
+        if done == 0 do
+          done = 1
+          picture(:badge, 3, 2)
+        end
+      end
+    end
+  end
+
+  describe "a picture" do
+    test "it is painted as consecutive tiles, and the panel comes back on" do
+      {_pixels, _state, ram} = run_frames(Postcard, 8)
+
+      # No named tiles in this game, so the picture opens the sheet: the
+      # art base itself, then its neighbour, at the asked column and row.
+      base = Potion.Runtime.art_base()
+      assert Map.get(ram, 0x9800 + 2 * 32 + 3) == base
+      assert Map.get(ram, 0x9800 + 2 * 32 + 4) == base + 1
+      # The cell past the picture's edge keeps the empty tile.
+      assert Map.get(ram, 0x9800 + 2 * 32 + 5) == 1
+      assert Map.get(ram, 0xFF40) == 0x93
+    end
+
+    test "a picture nobody declared is refused, with the ones there are" do
+      message =
+        reject!("Rejected.NoPicture", "variables x: 0", "picture(:ghost, 0, 0)")
+
+      assert message =~ "no picture is called :ghost"
+      assert message =~ "declares none"
+    end
+
+    test "a picture that runs off the map is refused, by its numbers" do
+      fixture = Path.expand("fixtures/shades.png", __DIR__)
+
+      source = """
+      defmodule Rejected.WidePicture do
+        use Potion
+
+        picture :badge, from: "#{fixture}"
+
+        defactor :painter do
+          variables x: 0
+
+          every_frame do
+            picture(:badge, 31, 0)
+          end
+        end
+      end
+      """
+
+      assert refuse_compile!(source) =~ "runs off the 32x32 map"
+    end
+
+    test "a place chosen at run time is refused" do
+      message =
+        reject!("Rejected.MovingPicture", "variables col: 0", "picture(:badge, col, 0)")
+
+      assert message =~ "two literal squares"
+    end
+  end
+
   # A mirrored cast: the same asymmetric tile -- the "1" of the score font --
   # worn straight and flipped each of the three ways, one entry picked at run
   # time, and one facing that follows the pad through an `if`'s two arms.
