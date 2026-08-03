@@ -4,9 +4,11 @@
 #
 # writes `games/tower.gb`. Play it with `bin/play games/tower.gb` — or hot,
 # with the watch on, via `ELIXIR_ERL_OPTIONS="-noinput" mix atomboy.live
-# games/tower.exs`. Start begins; arrows walk, A jumps. Three storeys of
-# platforms, each the size of the whole map; jump through the hole in a
-# ceiling and the next storey is shown. The flag at the top is the game.
+# games/tower.exs`. Start begins; arrows walk, A jumps — tap for a hop, hold
+# for the full leap, and a held button is one jump, not one per landing.
+# Three storeys of platforms, each the size of the whole map; jump through
+# the hole in a ceiling and the next storey is shown. The flag at the top is
+# the game.
 #
 # This is the first Potion game with gravity, and the first with a drawn,
 # animated character: two walking poses swapped on a frame counter, a jump
@@ -176,7 +178,8 @@ defmodule Tower do
               y8: 0,
               frow: 0,
               nrow: 0,
-              primed: 0
+              primed: 0,
+              armed: 1
 
     state :title do
       on_enter do
@@ -214,6 +217,7 @@ defmodule Tower do
         storey = 1
         cx = 0
         cy = 112
+        armed = 1
         show(:one)
       end
 
@@ -243,11 +247,26 @@ defmodule Tower do
           x7 = x + 7
         end
 
-        # ── The jump: only off the ground, and the ground is last frame's. ──
-        if grounded == 1 and pressed?(:a) do
-          vy = -5
-          grounded = 0
-          beep(:e5)
+        # ── The jump. Two decisions live here, and both are edges rather
+        # than levels. `armed` is the debounce: a held A is one jump, not a
+        # jump per landing — the button must come up before it means again.
+        # And the *release* is the height: the impulse leaves whole, and
+        # letting go mid-rise cuts the speed to -2 — a tap is a hop, a held
+        # press the full thirty pixels, and everything between is between. ──
+        if pressed?(:a) do
+          if armed == 1 and grounded == 1 do
+            vy = -5
+            # The gravity phase restarts with the jump, or the frame you
+            # pressed on would decide between a 25- and a 20-pixel leap:
+            # pressing on a gravity frame ate the first -5 step.
+            tick = 0
+            grounded = 0
+            armed = 0
+            beep(:e5)
+          end
+        else
+          armed = 1
+          if negative?(vy) and vy < 254, do: vy = 254
         end
 
         # ── Gravity, every other frame: -5 rises thirty pixels in ten
