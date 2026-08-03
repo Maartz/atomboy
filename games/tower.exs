@@ -193,22 +193,25 @@ defmodule Tower do
 
   # ── The music ───────────────────────────────────────────────────────────────
 
-  # The climb, in A minor, arranged the way the era arranged: the melody
-  # *sings* -- long notes on the round quarter duty, held by the organ, bent
-  # by the vibrato -- while the accompaniment answers off the beat on the
-  # thin eighth, plucked so every pair of notes falls away and leaves room.
-  # The bass keeps to roots and moves late in the bar. Half the earlier
-  # tempo: the harshness was mostly hurry.
+  # The climb, arranged by the book this time -- the gb-chiptune craft:
+  # a token is an eighth note (beat 8 ≈ 133 BPM), the lead is a sung line in
+  # two-bar calls and answers with one peak (g5, once) and real breath; the
+  # harmony is THE era trick, the *echo* -- the same line two steps behind,
+  # plucked and thin, a hall instead of a second instrument; the bass pumps
+  # root and fifth and walks chromatically into every change (listen for the
+  # g#2 sliding into A); and the loop seam is a cadence -- the last bar
+  # climbs the dominant's arpeggio straight into the first note again.
+  # Chords, one a bar: Am F C G / Am F E E.
   music :anthem,
         [
           lead:
-            "a4 . . . c5 . b4 . a4 . . . e4 . . . | g4 . . . b4 . a4 . g4 . . . d5 . . . | f4 . . . a4 . c5 . d5 . c5 . a4 . . . | e5 . . . b4 . gs4 . a4 . . . . . . .",
+            "e5 . . c5 a4 . b4 c5 | d5 . c5 . a4 . . - | e5 . . g5 e5 . d5 c5 | d5 . b4 . g4 . . - | e5 . . c5 a4 . b4 c5 | d5 . e5 . f5 . d5 . | e5 . b4 . gs4 . a4 b4 | e4 . gs4 . b4 . d5 .",
           harmony:
-            "- . e3 . a3 . - . c4 . - . e3 . - . | - . d3 . g3 . - . b3 . - . d3 . - . | - . f3 . a3 . - . c4 . - . f3 . - . | - . e3 . gs3 . - . b3 . - . e3 . - .",
+            "- - e5 . . c5 a4 . | b4 c5 d5 . c5 . a4 . | . - e5 . . g5 e5 . | d5 c5 d5 . b4 . g4 . | . - e5 . . c5 a4 . | b4 c5 d5 . e5 . f5 . | d5 . e5 . b4 . gs4 . | a4 b4 e4 . gs4 . b4 .",
           bass:
-            "a2 . . . . . . . a2 . . . . . e2 . | g2 . . . . . . . g2 . . . . . d2 . | f2 . . . . . . . f2 . . . . . c2 . | e2 . . . . . . . e2 . . . . . . ."
+            "a2 . e2 . a2 . e2 . | f2 . c3 . f2 . d2 . | c2 . g2 . c3 . f2 . | g2 . d3 . g2 . gs2 . | a2 . e2 . a2 . e2 . | f2 . c3 . f2 . f2 . | e2 . b2 . e2 . d2 . | e2 . e2 . e2 . e2 ."
         ],
-        beat: 12,
+        beat: 8,
         duty: [lead: :quarter, harmony: :eighth],
         envelope: [lead: :organ, harmony: :pluck],
         gap: 2,
