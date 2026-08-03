@@ -6,70 +6,101 @@
 # with the watch on, via `ELIXIR_ERL_OPTIONS="-noinput" mix atomboy.live
 # games/tower.exs`. Start begins; arrows walk, A jumps — tap for a hop, hold
 # for the full leap, and a held button is one jump, not one per landing.
-# Three storeys of platforms, each the size of the whole map; jump through
-# the hole in a ceiling and the next storey is shown. The flag at the top is
-# the game.
+# Three storeys of planks, each the size of the whole map; jump through the
+# hole in a ceiling and the next storey is shown. The flag at the top is the
+# game.
 #
-# This is the first Potion game with gravity, and the first with a drawn,
-# animated character: two walking poses swapped on a frame counter, a jump
-# pose in the air, and `flip:` turning all three to face where he goes.
+# The hero is 16 by 16 — four OAM entries a frame, mirrored by swapping the
+# columns and flipping each — with two walking poses, a jump pose, and a
+# march on the title screen. The walls are brick courses, the rooms are
+# dressed to the last cell: the late era never left a void, and neither does
+# this.
 defmodule Tower do
   use Potion
 
-  tiles from: "art/tower.png", names: [:stand, :step, :jump, :brick, :flag, :plank]
+  tiles from: "art/tower.png",
+        names: [
+          :stand_tl,
+          :stand_tr,
+          :stand_bl,
+          :stand_br,
+          :step_tl,
+          :step_tr,
+          :step_bl,
+          :step_br,
+          :jump_tl,
+          :jump_tr,
+          :jump_bl,
+          :jump_br,
+          :brick,
+          :plank,
+          :flag_top,
+          :flag_base,
+          :backwall,
+          :window
+        ]
 
   # ── The three storeys ───────────────────────────────────────────────────────
   #
-  # Drawn by rule rather than by hand: a storey is 32 rows of 32, walls all
-  # round, platforms on every third row zig-zagging up, and a hole in the
-  # ceiling where the next storey begins. The rule is ordinary Elixir running
-  # while the module compiles; the strings it makes are what `room` gets.
+  # Drawn by rule rather than by hand: 32 rows of 32, brick walls all round, a
+  # faint masonry backwall on every interior cell, slit windows down the
+  # sides, planks on every third row zig-zagging up, and a hole in the
+  # ceiling where the next storey begins.
 
   wall = String.duplicate("#", 32)
 
   # The rungs are planks, not bricks, and the difference is the game: a plank
   # is landed on from above and passed through from below, so a jump straight
   # up pops the climber onto the rung over his head instead of knocking it.
-  brick_row = fn spans ->
+  interior_row = fn spans, windows ->
     for col <- 0..31, into: "" do
       cond do
         col in [0, 31] -> "#"
         Enum.any?(spans, fn {a, b} -> col in a..b end) -> "="
-        true -> " "
+        col in windows -> "o"
+        true -> ":"
       end
     end
   end
 
   gap_top = fn {a, b} ->
-    for col <- 0..31, into: "", do: if(col in a..b, do: " ", else: "#")
+    for col <- 0..31, into: "", do: if(col in a..b, do: ":", else: "#")
   end
 
-  flag_row = fn {a, b} ->
-    for col <- 0..31, into: "" do
-      cond do
-        col in [0, 31] -> "#"
-        col in a..b -> "F"
-        true -> " "
-      end
-    end
+  flag_rows = fn col ->
+    top =
+      for c <- 0..31,
+          into: "",
+          do: if(c == col, do: "F", else: if(c in [0, 31], do: "#", else: ":"))
+
+    base =
+      for c <- 0..31,
+          into: "",
+          do: if(c == col, do: "B", else: if(c in [0, 31], do: "#", else: ":"))
+
+    {top, base}
   end
 
-  storey = fn top, platforms, special ->
+  # Windows march down both sides every sixth row, offset per storey so no
+  # two storeys look stamped from the same plate.
+  storey = fn top, platforms, special, window_rows ->
     for row <- 0..31 do
+      windows = if row in window_rows, do: [4, 27], else: []
+
       cond do
         row == 0 -> top
         row == 31 -> wall
         Map.has_key?(special, row) -> Map.fetch!(special, row)
-        Map.has_key?(platforms, row) -> brick_row.(Map.fetch!(platforms, row))
-        true -> brick_row.([])
+        Map.has_key?(platforms, row) -> interior_row.(Map.fetch!(platforms, row), windows)
+        true -> interior_row.([], windows)
       end
     end
     |> Enum.join("\n")
   end
 
-  # Up the right side first, exit top-right. The ladder rungs are three rows
-  # apart -- 24 pixels, inside the jump's 30 -- and each rung touches the next
-  # one's columns, so no leap asks for more air than the game gives.
+  # Up the right side first, exit top-right. The rungs are three rows apart
+  # -- 24 pixels, inside the jump's 25 -- and each touches the next one's
+  # columns, so no leap asks for more air than the game gives.
   @one storey.(
          gap_top.({26, 29}),
          %{
@@ -83,7 +114,8 @@ defmodule Tower do
            25 => [{19, 23}],
            28 => [{24, 28}]
          },
-         %{}
+         %{},
+         [2, 8, 14, 20, 26]
        )
 
   # Arrive bottom-right, climb left, exit top-left.
@@ -100,66 +132,91 @@ defmodule Tower do
            25 => [{8, 12}],
            28 => [{3, 7}]
          },
-         %{}
+         %{},
+         [3, 9, 15, 21, 27]
        )
 
   # The summit: a closed ceiling, and the flag on its own platform.
-  three_platforms = %{
-    7 => [{12, 19}],
-    10 => [{6, 10}],
-    13 => [{11, 15}],
-    16 => [{16, 20}],
-    19 => [{21, 25}],
-    22 => [{16, 20}],
-    25 => [{11, 15}],
-    28 => [{6, 10}]
-  }
+  {flag_top_row, flag_base_row} = flag_rows.(15)
 
-  @three storey.(wall, three_platforms, %{6 => flag_row.({15, 16})})
+  @three storey.(
+           wall,
+           %{
+             7 => [{12, 19}],
+             10 => [{6, 10}],
+             13 => [{11, 15}],
+             16 => [{16, 20}],
+             19 => [{21, 25}],
+             22 => [{16, 20}],
+             25 => [{11, 15}],
+             28 => [{6, 10}]
+           },
+           %{5 => flag_top_row, 6 => flag_base_row},
+           [2, 11, 17, 23]
+         )
 
-  # An empty sky, for the title to stand on: `show` is also how a screen is
-  # wiped.
+  # The facade, for the title to stand on: brick frame, masonry night,
+  # windows lit down the middle heights.
   @sky (for row <- 0..31 do
-          if row in [0, 31], do: wall, else: brick_row.([])
+          cond do
+            row in [0, 31] -> wall
+            row in [3, 8, 13] -> interior_row.([], [6, 12, 19, 25])
+            true -> interior_row.([], [])
+          end
         end)
        |> Enum.join("\n")
 
-  room :one, @one, tiles: %{?# => :brick, ?= => :plank, ?F => :flag}
-  room :two, @two, tiles: %{?# => :brick, ?= => :plank, ?F => :flag}
-  room :three, @three, tiles: %{?# => :brick, ?= => :plank, ?F => :flag}
-  room :sky, @sky, tiles: %{?# => :brick}
+  @tiles %{
+    ?# => :brick,
+    ?= => :plank,
+    ?F => :flag_top,
+    ?B => :flag_base,
+    ?: => :backwall,
+    ?o => :window
+  }
+
+  room :one, @one, tiles: @tiles
+  room :two, @two, tiles: @tiles
+  room :three, @three, tiles: @tiles
+  room :sky, @sky, tiles: @tiles
 
   # ── The music ───────────────────────────────────────────────────────────────
 
-  # A minor, walking down a4-g4-f4-e4 under an arpeggio: the anthem plays on
-  # the title and keeps climbing with you.
+  # The climb, in A minor: a rising phrase asked three times, a step higher
+  # each time, and answered on the way down into the cadence -- the bass
+  # walks its fifths under it and the harmony arpeggiates the chord of the
+  # bar. Plucked, breathing (gap 3), with the gentle wobble on held notes.
   music :anthem,
         [
           lead:
-            "a4 . c5 e5 a4 . c5 e5 | g4 . b4 d5 g4 . b4 d5 | f4 . a4 c5 f4 . a4 c5 | e4 g4 b4 g4 e5 . b4 .",
+            "e5 . c5 . a4 . . . b4 c5 b4 . g4 . . . | a4 . c5 . e5 . . . d5 e5 d5 . b4 . . . | c5 . e5 . g5 . . . f5 g5 f5 . d5 . . . | e5 . d5 c5 b4 . d5 . c5 . a4 . . . . .",
           harmony:
-            "a3 c4 e4 c4 a3 c4 e4 c4 | g3 b3 d4 b3 g3 b3 d4 b3 | f3 a3 c4 a3 f3 a3 c4 a3 | e3 g3 b3 g3 e3 g3 b3 g3",
-          bass: "a2 . . . . . . . | g2 . . . . . . . | f2 . . . . . . . | e2 . . e2 . . e2 ."
+            "a3 e4 c4 e4 a3 e4 c4 e4 a3 e4 c4 e4 g3 d4 b3 d4 | f3 c4 a3 c4 f3 c4 a3 c4 f3 c4 a3 c4 e3 c4 g3 c4 | c4 g4 e4 g4 c4 g4 e4 g4 g3 d4 b3 d4 g3 d4 b3 d4 | a3 e4 c4 e4 e3 b3 gs3 b3 a3 e4 c4 e4 a3 c4 e4 a4",
+          bass:
+            "a2 . . a2 . . a2 . a2 . . a2 . . g2 . | f2 . . f2 . . f2 . f2 . . f2 . . e2 . | c2 . . c2 . . c2 . g2 . . g2 . . g2 . | a2 . . a2 e2 . . e2 a1 . . . . . . ."
         ],
-        beat: 10,
-        duty: :quarter,
-        gap: 2,
-        vibrato: :gentle
+        beat: 9,
+        duty: :eighth,
+        gap: 3,
+        vibrato: :gentle,
+        envelope: :pluck
 
+  # The summit fanfare: the triad climbed whole, a breath, and the tonic
+  # planted twice with its fourth-and-fifth underneath.
   music :fanfare,
         [
-          lead: "c5 . e5 . g5 . c6 . . . g5 c6 . . . .",
-          harmony: "e4 . g4 . c5 . e5 . . . c5 e5 . . . .",
-          bass: "c2 . . . c2 . . . c2 . . . c2 . . ."
+          lead: "c5 e5 g5 c6 . . a5 b5 c6 . . g5 c6 . . .",
+          harmony: "e4 g4 c5 e5 . . f5 g5 e5 . . e5 e5 . . .",
+          bass: "c2 . c2 . c2 . f1 g1 c2 . . c2 c2 . . ."
         ],
         beat: 8,
-        gap: 1
+        gap: 2
 
   # ── The climber ─────────────────────────────────────────────────────────────
 
   defactor :climber do
     variables x: 16,
-              y: 240,
+              y: 232,
               ox: 0,
               oy: 0,
               vy: 0,
@@ -173,9 +230,12 @@ defmodule Tower do
               cy: 112,
               sx: 0,
               sy: 0,
-              x7: 0,
-              y7: 0,
-              y8: 0,
+              sx8: 0,
+              sy8: 0,
+              x15: 0,
+              y15: 0,
+              y16: 0,
+              ymid: 0,
               frow: 0,
               nrow: 0,
               primed: 0,
@@ -188,13 +248,28 @@ defmodule Tower do
         cx = 0
         cy = 0
         primed = 0
-        text(7, 4, "TOWER")
-        text(4, 10, "PRESS START")
+        text(7, 5, "TOWER")
+        text(4, 15, "PRESS START")
         play(:anthem)
       end
 
       every_frame do
-        sprite(0, x: 80, y: 200, tile: :stand)
+        # The hero marches in place under the title: the same two poses the
+        # climb uses, at a strolling eight frames each.
+        anim = anim + 1
+        if anim == 16, do: anim = 0
+
+        if anim < 8 do
+          sprite(0, x: 72, y: 88, tile: :stand_tl)
+          sprite(1, x: 80, y: 88, tile: :stand_tr)
+          sprite(2, x: 72, y: 96, tile: :stand_bl)
+          sprite(3, x: 80, y: 96, tile: :stand_br)
+        else
+          sprite(0, x: 72, y: 88, tile: :step_tl)
+          sprite(1, x: 80, y: 88, tile: :step_tr)
+          sprite(2, x: 72, y: 96, tile: :step_bl)
+          sprite(3, x: 80, y: 96, tile: :step_br)
+        end
 
         # `pressed?` reads a level, not an edge: coming back from the summit
         # with Start still held would sail through this screen. The title
@@ -210,7 +285,7 @@ defmodule Tower do
     state :climb do
       on_enter do
         x = 16
-        y = 240
+        y = 232
         vy = 0
         grounded = 0
         facing = 0
@@ -222,7 +297,10 @@ defmodule Tower do
       end
 
       every_frame do
-        # ── Walking. The step is taken and unmade, walk.exs's bargain. ──
+        # ── Walking. The step is taken and unmade, walk.exs's bargain. A
+        # sixteen-tall body can straddle three brick rows, so the middle
+        # row is asked too -- the corners alone would walk through the
+        # side of a one-brick ledge. ──
         moving = 0
         ox = x
 
@@ -238,13 +316,15 @@ defmodule Tower do
           moving = 1
         end
 
-        x7 = x + 7
-        y7 = y + 7
+        x15 = x + 15
+        y15 = y + 15
+        ymid = y + 8
 
-        if touching?(:brick, x, y) or touching?(:brick, x7, y) or touching?(:brick, x, y7) or
-             touching?(:brick, x7, y7) do
+        if touching?(:brick, x, y) or touching?(:brick, x15, y) or touching?(:brick, x, ymid) or
+             touching?(:brick, x15, ymid) or touching?(:brick, x, y15) or
+             touching?(:brick, x15, y15) do
           x = ox
-          x7 = x + 7
+          x15 = x + 15
         end
 
         # ── The jump. Two decisions live here, and both are edges rather
@@ -252,13 +332,13 @@ defmodule Tower do
         # jump per landing — the button must come up before it means again.
         # And the *release* is the height: the impulse leaves whole, and
         # letting go mid-rise cuts the speed to -2 — a tap is a hop, a held
-        # press the full thirty pixels, and everything between is between. ──
+        # press the full twenty-five pixels, and everything between is
+        # between. ──
         if pressed?(:a) do
           if armed == 1 and grounded == 1 do
             vy = -5
             # The gravity phase restarts with the jump, or the frame you
-            # pressed on would decide between a 25- and a 20-pixel leap:
-            # pressing on a gravity frame ate the first -5 step.
+            # pressed on would decide between a 25- and a 20-pixel leap.
             tick = 0
             grounded = 0
             armed = 0
@@ -269,8 +349,8 @@ defmodule Tower do
           if negative?(vy) and vy < 254, do: vy = 254
         end
 
-        # ── Gravity, every other frame: -5 rises thirty pixels in ten
-        # frames, and the fall is capped under the platforms' eight. ──
+        # ── Gravity, every other frame; the fall is capped under the
+        # bricks' eight so nothing tunnels. ──
         tick = tick + 1
 
         if tick == 2 do
@@ -288,16 +368,16 @@ defmodule Tower do
         # also why rising needs no test at all: going up, the feet's row
         # never grows. ──
         oy = y
-        frow = y + 7
+        frow = y + 15
         frow = div(frow, 8)
         y = y + vy
-        y7 = y + 7
-        nrow = div(y7, 8)
+        y15 = y + 15
+        nrow = div(y15, 8)
 
-        if touching?(:brick, x, y) or touching?(:brick, x7, y) or touching?(:brick, x, y7) or
-             touching?(:brick, x7, y7) do
+        if touching?(:brick, x, y) or touching?(:brick, x15, y) or touching?(:brick, x, y15) or
+             touching?(:brick, x15, y15) do
           y = oy
-          y7 = y + 7
+          y15 = y + 15
 
           # There is no `not`: rising or falling is an `else`, and only the
           # falling arm knocks -- a head bump is the same sentence, silent.
@@ -308,79 +388,102 @@ defmodule Tower do
             vy = 0
           end
         else
-          if nrow > frow and (touching?(:plank, x, y7) or touching?(:plank, x7, y7)) do
+          if nrow > frow and (touching?(:plank, x, y15) or touching?(:plank, x15, y15)) do
             # Landed on a plank: the feet snap to its top edge.
             y = nrow * 8
-            y = y - 8
-            y7 = y + 7
+            y = y - 16
+            y15 = y + 15
             if grounded == 0, do: noise(:tick)
             vy = 0
           end
         end
 
         # ── Standing on something? One pixel below the feet answers. ──
-        y8 = y7 + 1
+        y16 = y15 + 1
         grounded = 0
 
-        if touching?(:brick, x, y8) or touching?(:brick, x7, y8) or touching?(:plank, x, y8) or
-             touching?(:plank, x7, y8),
+        if touching?(:brick, x, y16) or touching?(:brick, x15, y16) or
+             touching?(:plank, x, y16) or touching?(:plank, x15, y16),
            do: grounded = 1
 
         # ── The ceilings' holes. A door is a place, not an edge: the row
         # *and* the columns, or the top of every jump would change storeys. ──
-        if storey == 1 and y < 6 and x > 204 and x < 236 do
+        if storey == 1 and y < 6 and x > 204 and x < 226 do
           storey = 2
           show(:two)
-          y = 232
+          y = 224
           cy = 112
+          beep(:a5)
         end
 
-        if storey == 2 and y < 6 and x > 12 and x < 44 do
+        if storey == 2 and y < 6 and x > 12 and x < 34 do
           storey = 3
           show(:three)
-          y = 232
+          y = 224
           cy = 112
+          beep(:a5)
         end
 
-        # ── The flag. The top corners are enough: it stands at head height. ──
-        if touching?(:flag, x, y) or touching?(:flag, x7, y), do: become(:won)
+        # ── The flag: its base stands at the feet's height when the hero
+        # is on its plank, so the bottom corners are the question. ──
+        if touching?(:flag_base, x, y15) or touching?(:flag_base, x15, y15), do: become(:won)
 
         # ── The camera, chasing on both axes: roam.exs's dead zone. ──
         sx = x - cx
-        if sx > 84 and cx < 96, do: cx = cx + 1
-        if sx < 68 and cx > 0, do: cx = cx - 1
+        if sx > 80 and cx < 96, do: cx = cx + 1
+        if sx < 64 and cx > 0, do: cx = cx - 1
         sy = y - cy
-        if sy > 76 and cy < 112, do: cy = cy + 1
-        if sy < 60 and cy > 0, do: cy = cy - 1
+        if sy > 68 and cy < 112, do: cy = cy + 1
+        if sy < 52 and cy > 0, do: cy = cy - 1
 
         scroll(cx, cy)
         sx = x - cx
         sy = y - cy
+        sx8 = sx + 8
+        sy8 = sy + 8
 
-        # ── The climber himself: jump pose in the air, two walking poses
-        # swapped every eight frames on the ground, all of them mirrored to
-        # face where he goes. ──
+        # ── The hero, in four quarters. Mirroring a 16-wide drawing is a
+        # swap and a flip: the right tile drawn at the left, each half
+        # turned by the hardware's own bit. ──
         anim = anim + 1
         if anim == 16, do: anim = 0
 
         if grounded == 0 do
           if facing == 0 do
-            sprite(0, x: sx, y: sy, tile: :jump)
+            sprite(0, x: sx, y: sy, tile: :jump_tl)
+            sprite(1, x: sx8, y: sy, tile: :jump_tr)
+            sprite(2, x: sx, y: sy8, tile: :jump_bl)
+            sprite(3, x: sx8, y: sy8, tile: :jump_br)
           else
-            sprite(0, x: sx, y: sy, tile: :jump, flip: :x)
+            sprite(0, x: sx, y: sy, tile: :jump_tr, flip: :x)
+            sprite(1, x: sx8, y: sy, tile: :jump_tl, flip: :x)
+            sprite(2, x: sx, y: sy8, tile: :jump_br, flip: :x)
+            sprite(3, x: sx8, y: sy8, tile: :jump_bl, flip: :x)
           end
         else
           if moving == 0 or anim < 8 do
             if facing == 0 do
-              sprite(0, x: sx, y: sy, tile: :stand)
+              sprite(0, x: sx, y: sy, tile: :stand_tl)
+              sprite(1, x: sx8, y: sy, tile: :stand_tr)
+              sprite(2, x: sx, y: sy8, tile: :stand_bl)
+              sprite(3, x: sx8, y: sy8, tile: :stand_br)
             else
-              sprite(0, x: sx, y: sy, tile: :stand, flip: :x)
+              sprite(0, x: sx, y: sy, tile: :stand_tr, flip: :x)
+              sprite(1, x: sx8, y: sy, tile: :stand_tl, flip: :x)
+              sprite(2, x: sx, y: sy8, tile: :stand_br, flip: :x)
+              sprite(3, x: sx8, y: sy8, tile: :stand_bl, flip: :x)
             end
           else
             if facing == 0 do
-              sprite(0, x: sx, y: sy, tile: :step)
+              sprite(0, x: sx, y: sy, tile: :step_tl)
+              sprite(1, x: sx8, y: sy, tile: :step_tr)
+              sprite(2, x: sx, y: sy8, tile: :step_bl)
+              sprite(3, x: sx8, y: sy8, tile: :step_br)
             else
-              sprite(0, x: sx, y: sy, tile: :step, flip: :x)
+              sprite(0, x: sx, y: sy, tile: :step_tr, flip: :x)
+              sprite(1, x: sx8, y: sy, tile: :step_tl, flip: :x)
+              sprite(2, x: sx, y: sy8, tile: :step_br, flip: :x)
+              sprite(3, x: sx8, y: sy8, tile: :step_bl, flip: :x)
             end
           end
         end
