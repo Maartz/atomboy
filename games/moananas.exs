@@ -11,25 +11,66 @@
 # chasing, moai statues planted in the sand that cost a heart to touch,
 # pineapples floating over the path and the planks, and the flag at the far
 # end of the island. Three hearts; the flag is the game.
+#
+# Every tile it draws with is built by `art/island_art.py` — the sky and the
+# sea drawn there, the rock and the log and the statue taken from the packs
+# and banded down to four shades, the hero the Eris Esra template with
+# Moananas's hair and glasses painted on. Of the cartridge's two hundred and
+# twelve tiles the cover takes a hundred and thirty and the beach sixty-one.
 defmodule Moananas do
   use Potion
 
   tiles from: "art/moananas_sheet.png",
         names: [
-          :pineapple_top,
-          :pineapple_body,
-          :moai_head,
-          :moai_base,
-          :palm_crown,
-          :palm_trunk,
-          :cloud,
-          :border,
-          :sand,
-          :heart,
+          :sky,
+          :sun_tl,
+          :sun_tr,
+          :sun_bl,
+          :sun_br,
+          :cloud_l,
+          :cloud_m,
+          :cloud_r,
+          :gull,
+          :isle_l,
+          :isle_m,
+          :isle_r,
+          :sea_crest,
+          :sea_a,
+          :sea_b,
+          :surf_a,
+          :surf_b,
+          :dune,
+          :beach_sand,
+          :sand_deep,
           :plank,
+          :palm_a,
+          :palm_b,
+          :palm_c,
+          :palm_d,
+          :palm_e,
+          :palm_f,
+          :trunk,
+          :trunk_base,
+          :rock_tl,
+          :rock_tr,
+          :rock_bl,
+          :rock_br,
+          :bush_tl,
+          :bush_tr,
+          :bush_bl,
+          :bush_br,
+          :wood_l,
+          :wood_m,
+          :wood_r,
+          :moai_hl,
+          :moai_hr,
+          :moai_base,
+          :moai_br,
           :flag_top,
           :flag_base,
-          :beach_sand,
+          :heart,
+          :pineapple_top,
+          :pineapple_body,
           :m1_tl,
           :m1_tr,
           :m1_bl,
@@ -41,67 +82,150 @@ defmodule Moananas do
           :m3_tl,
           :m3_tr,
           :m3_bl,
-          :m3_br,
-          :m4_tl,
-          :m4_tr,
-          :m4_bl,
-          :m4_br
+          :m3_br
         ]
 
   # The whole drawing, one screen: 360 cells folded into the tile budget by
-  # likeness — the air's dither weave repeats, the portrait does not.
-  screen(:cover, from: "art/moananas_title.png", tolerance: 16)
+  # likeness — the air's dither weave repeats, the portrait does not. The
+  # tolerance is 24 rather than 16 because the beach wants the difference:
+  # forty tiles bought the sea, the palms and the sand's edge, and what they
+  # cost is a whisper of grain in the cover's air.
+  screen(:cover, from: "art/moananas_title.png", tolerance: 24)
 
   # ── The island ──────────────────────────────────────────────────────────────
   #
-  # One room, 32 by 18: 256 pixels of beach under a horizontal camera. Sand
-  # floor, planks in the air with pineapples over them, moai standing in the
-  # sand — passable, and they hurt — and the flag planted at the far end.
+  # One room, 32 by 18: 256 pixels of beach under a horizontal camera.
+  #
+  # The composition, top to bottom, is the whole of why it reads: white sky
+  # with a sun and clouds, a volcano out on the horizon, the sea in mid shade,
+  # the surf, then the beach going back in light shade, and the floor in front
+  # in mid shade under a line of ink. Four bands, four values, near to far.
+  #
+  # Only two tiles are ever asked a question: `:beach_sand`, which is the
+  # floor, and `:plank`. Everything else is scenery the hero runs in front of
+  # — which is what lets the beach be crowded without costing a single
+  # `touching?` in the frame.
 
-  edge = fn -> "#" <> String.duplicate(" ", 30) <> "#" end
+  sky = fn -> List.duplicate(?\s, 32) end
 
-  place = fn row, spots ->
-    Enum.reduce(spots, row, fn {col, char}, row ->
-      {head, tail} = String.split_at(row, col)
-      head <> char <> String.slice(tail, 1..-1//1)
+  banded = fn a, b -> for c <- 0..31, do: if(rem(c, 2) == 0, do: a, else: b) end
+
+  ground =
+    for row <- 0..17 do
+      case row do
+        8 -> List.duplicate(?[, 32)
+        9 -> List.duplicate(?{, 32)
+        10 -> List.duplicate(?}, 32)
+        11 -> banded.(?~, ?`)
+        r when r in 12..15 -> List.duplicate(?., 32)
+        16 -> List.duplicate(?S, 32)
+        17 -> List.duplicate(?D, 32)
+        _ -> sky.()
+      end
+    end
+
+  paint = fn rows, marks ->
+    Enum.reduce(marks, rows, fn {col, row, text}, rows ->
+      List.update_at(rows, row, fn line ->
+        text
+        |> String.to_charlist()
+        |> Enum.with_index()
+        |> Enum.reduce(line, fn {char, i}, line -> List.replace_at(line, col + i, char) end)
+      end)
     end)
   end
 
-  # The planks sit 24 pixels over the sand -- inside the jump's 25 -- and the
-  # moai keep out of their columns. Row 13 planks, rows 14-15 statues, palm
-  # and flag; rows 16-17 sand.
-  @beach ([place.(edge.(), [{6, "c"}, {22, "c"}])] ++
-            List.duplicate(edge.(), 12) ++
-            [
-              place.(edge.(), [
-                {9, "="},
-                {10, "="},
-                {11, "="},
-                {16, "="},
-                {17, "="},
-                {18, "="},
-                {24, "="},
-                {25, "="},
-                {26, "="}
-              ])
-            ] ++
-            [place.(edge.(), [{2, "P"}, {6, "m"}, {13, "m"}, {19, "m"}, {28, "m"}, {30, "F"}])] ++
-            [place.(edge.(), [{2, "T"}, {6, "M"}, {13, "M"}, {19, "M"}, {28, "M"}, {30, "B"}])] ++
-            ["#" <> String.duplicate("f", 30) <> "#"] ++
-            ["#" <> String.duplicate("f", 30) <> "#"])
-         |> Enum.join("\n")
+  # The planks sit 24 pixels over the sand — inside the jump's 25 — and every
+  # standing thing keeps out of their columns.
+  @beach paint.(ground, [
+           # the sky
+           {25, 0, "01"},
+           {25, 1, "23"},
+           {2, 2, "cde"},
+           {18, 3, "cde"},
+           {12, 4, "v"},
+           {8, 5, "v"},
+           {27, 4, "v"},
+           # the far island, standing on the horizon the crest draws
+           {4, 7, "ijk"},
+           {20, 7, "ijk"},
+           # the palms: a canopy two tiles deep, then the trunk down to the sand
+           {3, 12, "PQR"},
+           {3, 13, "pqr"},
+           {4, 14, "T"},
+           {4, 15, "U"},
+           {27, 12, "PQR"},
+           {27, 13, "pqr"},
+           {28, 14, "T"},
+           {28, 15, "U"},
+           # what the hero lands on
+           {8, 13, "==="},
+           {15, 13, "==="},
+           {22, 13, "==="},
+           # what stands in the sand
+           {6, 14, "ab"},
+           {6, 15, "AB"},
+           {21, 14, "no"},
+           {21, 15, "NO"},
+           {9, 15, "wxy"},
+           {12, 14, "mM"},
+           {12, 15, "zZ"},
+           {18, 14, "mM"},
+           {18, 15, "zZ"},
+           {25, 14, "mM"},
+           {25, 15, "zZ"},
+           {30, 14, "F"},
+           {30, 15, "G"}
+         ])
+         |> Enum.map_join("\n", &List.to_string/1)
 
   @tiles %{
-    ?# => :border,
-    ?f => :beach_sand,
-    ?c => :cloud,
-    ?m => :moai_head,
-    ?M => :moai_base,
-    ?P => :palm_crown,
-    ?T => :palm_trunk,
+    ?\s => :sky,
+    ?0 => :sun_tl,
+    ?1 => :sun_tr,
+    ?2 => :sun_bl,
+    ?3 => :sun_br,
+    ?c => :cloud_l,
+    ?d => :cloud_m,
+    ?e => :cloud_r,
+    ?v => :gull,
+    ?i => :isle_l,
+    ?j => :isle_m,
+    ?k => :isle_r,
+    ?[ => :sea_crest,
+    ?{ => :sea_a,
+    ?} => :sea_b,
+    ?~ => :surf_a,
+    ?` => :surf_b,
+    ?. => :dune,
+    ?S => :beach_sand,
+    ?D => :sand_deep,
+    ?= => :plank,
+    ?P => :palm_a,
+    ?Q => :palm_b,
+    ?R => :palm_c,
+    ?p => :palm_d,
+    ?q => :palm_e,
+    ?r => :palm_f,
+    ?T => :trunk,
+    ?U => :trunk_base,
+    ?a => :rock_tl,
+    ?b => :rock_tr,
+    ?A => :rock_bl,
+    ?B => :rock_br,
+    ?n => :bush_tl,
+    ?o => :bush_tr,
+    ?N => :bush_bl,
+    ?O => :bush_br,
+    ?w => :wood_l,
+    ?x => :wood_m,
+    ?y => :wood_r,
+    ?m => :moai_hl,
+    ?M => :moai_hr,
+    ?z => :moai_base,
+    ?Z => :moai_br,
     ?F => :flag_top,
-    ?B => :flag_base,
-    ?= => :plank
+    ?G => :flag_base
   }
 
   room :beach, @beach, tiles: @tiles
@@ -339,9 +463,14 @@ defmodule Moananas do
           if flick < 4, do: hidden = 1
         end
 
+        # The statue is two tiles wide now, so the question is asked of its
+        # foot rather than its face: both bottom tiles, at both of the hero's
+        # edges, at the height his feet are at. Four questions, the same four
+        # the frame could always afford — and a jump that grazes the head is
+        # let through, which is the forgiving way round.
         if blink == 0 do
-          if touching?(:moai_head, x, ymid) or touching?(:moai_head, x15, ymid) or
-               touching?(:moai_base, x, y15) or touching?(:moai_base, x15, y15) do
+          if touching?(:moai_base, x, y15) or touching?(:moai_base, x15, y15) or
+               touching?(:moai_br, x, y15) or touching?(:moai_br, x15, y15) do
             hearts = hearts - 1
             blink = 90
             noise(:boom)
@@ -393,7 +522,9 @@ defmodule Moananas do
           do: sprite(8, x: 152, y: 8, tile: :heart),
           else: sprite(8, x: 0, y: 200, tile: :heart)
 
-        # ── The elf, four quarters, the Tower's poses. ──
+        # ── Moananas, four quarters and three poses: standing, mid-stride,
+        # airborne. The mirror is the flip and a swap of the columns, so the
+        # left-facing run costs no tiles at all. ──
         anim = anim + 1
         if anim == 16, do: anim = 0
 
@@ -403,19 +534,7 @@ defmodule Moananas do
           sprite(2, x: 0, y: 200, tile: :m1_bl)
           sprite(3, x: 0, y: 200, tile: :m1_br)
         else
-          if moving == 0 or anim < 8 do
-            if facing == 0 do
-              sprite(0, x: sx, y: sy, tile: :m1_tl)
-              sprite(1, x: sx8, y: sy, tile: :m1_tr)
-              sprite(2, x: sx, y: sy8, tile: :m1_bl)
-              sprite(3, x: sx8, y: sy8, tile: :m1_br)
-            else
-              sprite(0, x: sx, y: sy, tile: :m1_tr, flip: :x)
-              sprite(1, x: sx8, y: sy, tile: :m1_tl, flip: :x)
-              sprite(2, x: sx, y: sy8, tile: :m1_br, flip: :x)
-              sprite(3, x: sx8, y: sy8, tile: :m1_bl, flip: :x)
-            end
-          else
+          if grounded == 0 do
             if facing == 0 do
               sprite(0, x: sx, y: sy, tile: :m3_tl)
               sprite(1, x: sx8, y: sy, tile: :m3_tr)
@@ -426,6 +545,32 @@ defmodule Moananas do
               sprite(1, x: sx8, y: sy, tile: :m3_tl, flip: :x)
               sprite(2, x: sx, y: sy8, tile: :m3_br, flip: :x)
               sprite(3, x: sx8, y: sy8, tile: :m3_bl, flip: :x)
+            end
+          else
+            if moving == 0 or anim < 8 do
+              if facing == 0 do
+                sprite(0, x: sx, y: sy, tile: :m1_tl)
+                sprite(1, x: sx8, y: sy, tile: :m1_tr)
+                sprite(2, x: sx, y: sy8, tile: :m1_bl)
+                sprite(3, x: sx8, y: sy8, tile: :m1_br)
+              else
+                sprite(0, x: sx, y: sy, tile: :m1_tr, flip: :x)
+                sprite(1, x: sx8, y: sy, tile: :m1_tl, flip: :x)
+                sprite(2, x: sx, y: sy8, tile: :m1_br, flip: :x)
+                sprite(3, x: sx8, y: sy8, tile: :m1_bl, flip: :x)
+              end
+            else
+              if facing == 0 do
+                sprite(0, x: sx, y: sy, tile: :m2_tl)
+                sprite(1, x: sx8, y: sy, tile: :m2_tr)
+                sprite(2, x: sx, y: sy8, tile: :m2_bl)
+                sprite(3, x: sx8, y: sy8, tile: :m2_br)
+              else
+                sprite(0, x: sx, y: sy, tile: :m2_tr, flip: :x)
+                sprite(1, x: sx8, y: sy, tile: :m2_tl, flip: :x)
+                sprite(2, x: sx, y: sy8, tile: :m2_br, flip: :x)
+                sprite(3, x: sx8, y: sy8, tile: :m2_bl, flip: :x)
+              end
             end
           end
         end
