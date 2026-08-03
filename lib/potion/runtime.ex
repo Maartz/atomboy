@@ -184,6 +184,14 @@ defmodule Potion.Runtime do
   @scroll_y 0xC0C1
   @room_width 0xC0C2
 
+  # The harmony's own instrument. The lead's duty and envelope live above at
+  # 0xC0AD and 0xC0BB from the days the two pulses shared them; these two let
+  # a tune give each voice its own -- a round, held melody over a plucked
+  # accompaniment that recedes, which is most of what the era's arrangements
+  # were made of.
+  @harm_duty 0xC0C3
+  @harm_env 0xC0C4
+
   @state 0xC100
   @hram_dma 0xFF80
   @stack 0xDFFF
@@ -727,6 +735,14 @@ defmodule Potion.Runtime do
   @spec rng_cell() :: non_neg_integer()
   def rng_cell, do: @rng
 
+  @doc "The harmony's duty cell: the lead's is `duty_cell/0`."
+  @spec harmony_duty_cell() :: non_neg_integer()
+  def harmony_duty_cell, do: @harm_duty
+
+  @doc "The harmony's envelope cell: the lead's is `env_cell/0`."
+  @spec harmony_env_cell() :: non_neg_integer()
+  def harmony_env_cell, do: @harm_env
+
   @doc "The camera's two cells, x then y: written by `scroll`, read at the vblank."
   @spec scroll_cells() :: {non_neg_integer(), non_neg_integer()}
   def scroll_cells, do: {@scroll_x, @scroll_y}
@@ -910,15 +926,15 @@ defmodule Potion.Runtime do
     ] ++ remember(@lead_pitch, @lead_phase)
   end
 
-  # Channel 2 is channel 1 without the sweep register, and it shares the duty
-  # the tune asked for -- two pulses in parallel thirds want the same instrument,
-  # and a harmony in a different one reads as a second melody rather than as
-  # thickness.
+  # Channel 2 is channel 1 without the sweep register, and it carries its own
+  # duty and envelope: the shared-instrument days ended when the first real
+  # arrangement wanted a held melody over an accompaniment that gets out of
+  # its way.
   defp sound(:pulse_two) do
     [
-      {:ld, :a, {:mem, @tune_duty}},
+      {:ld, :a, {:mem, @harm_duty}},
       {:ldh, {:high, @nr21}, :a},
-      {:ld, :a, {:mem, @tune_env}},
+      {:ld, :a, {:mem, @harm_env}},
       {:ldh, {:high, @nr22}, :a},
       {:ld, :a, :c},
       {:ldh, {:high, @nr23}, :a},

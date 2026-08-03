@@ -193,7 +193,24 @@ defmodule Potion.Music do
     }
   end
 
-  defp duty!(duty, name) do
+  # One name gives both pulses the same instrument; `[lead: …, harmony: …]`
+  # gives each its own -- which is most of what the era's arrangements did:
+  # a round, held melody over a thin accompaniment that gets out of its way.
+  defp duty!(duty, name) when is_atom(duty) do
+    bits = duty_bits!(duty, name)
+    {bits, bits}
+  end
+
+  defp duty!([_ | _] = per_voice, name) do
+    per_voice!(per_voice, name, "duty")
+
+    {duty_bits!(Keyword.get(per_voice, :lead, :half), name),
+     duty_bits!(Keyword.get(per_voice, :harmony, :half), name)}
+  end
+
+  defp duty!(other, name), do: duty_bits!(other, name)
+
+  defp duty_bits!(duty, name) do
     case Map.fetch(@duties, duty) do
       {:ok, bits} ->
         bits
@@ -204,8 +221,24 @@ defmodule Potion.Music do
 
         There are three: #{@duties |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)} \
         — the fraction of each period the square wave is high, and so which \
-        instrument the lead sounds like. It does not reach the bass, which is not \
-        a square.
+        instrument a pulse voice sounds like. One name serves both pulses; \
+        `duty: [lead: :quarter, harmony: :eighth]` gives each its own. It does \
+        not reach the bass, which is not a square.
+        """
+    end
+  end
+
+  defp per_voice!(per_voice, name, setting) do
+    case Keyword.keys(per_voice) -- [:lead, :harmony] do
+      [] ->
+        :ok
+
+      [bad | _] ->
+        raise Potion.CompileError, """
+        the tune #{inspect(name)}'s #{setting} names a voice called #{inspect(bad)}.
+
+        Per voice, a #{setting} is `[lead: …, harmony: …]` — the two pulses. \
+        The bass is not a square and has neither.
         """
     end
   end
@@ -225,7 +258,21 @@ defmodule Potion.Music do
     """
   end
 
-  defp envelope!(envelope, name) do
+  defp envelope!(envelope, name) when is_atom(envelope) do
+    byte = envelope_byte!(envelope, name)
+    {byte, byte}
+  end
+
+  defp envelope!([_ | _] = per_voice, name) do
+    per_voice!(per_voice, name, "envelope")
+
+    {envelope_byte!(Keyword.get(per_voice, :lead, :organ), name),
+     envelope_byte!(Keyword.get(per_voice, :harmony, :organ), name)}
+  end
+
+  defp envelope!(other, name), do: envelope_byte!(other, name)
+
+  defp envelope_byte!(envelope, name) do
     case Map.fetch(@envelopes, envelope) do
       {:ok, byte} ->
         byte
@@ -236,7 +283,9 @@ defmodule Potion.Music do
 
         There are two: `:organ` holds a note at full volume until the next one, \
         and `:pluck` lets it die away on its own, the way a struck string does. \
-        It shapes the two pulse voices; the bass has no envelope hardware.
+        One name serves both pulses; `envelope: [lead: :organ, harmony: :pluck]` \
+        gives each its own — a melody that sings over an accompaniment that \
+        recedes. The bass has no envelope hardware.
         """
     end
   end

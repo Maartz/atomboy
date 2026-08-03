@@ -134,16 +134,16 @@ table is the thing it will choose instead of.
 | setting | values | what it is |
 |---|---|---|
 | `beat:` | 1–255, default 12 | frames per token — five beats a second by default |
-| `duty:` | `:eighth` `:quarter` `:half` | which square the pulses are: the fraction of each period the wave is high. The eighth is the thin, nasal classic; the half sounds like a test tone |
+| `duty:` | `:eighth` `:quarter` `:half` | which square the pulses are: the fraction of each period the wave is high. The eighth is the thin, nasal classic; the half sounds like a test tone. One name serves both pulses; `duty: [lead: :quarter, harmony: :eighth]` gives each voice its own |
 | `gap:` | 0 to beat−1 | every note ends this many frames early — the difference between notes that run into each other and notes with a rhythm. Cut at compile time: a note becomes a shorter note and a rest, and nothing new runs |
 | `vibrato:` | `:none` `:gentle` `:deep` | the kernel bends a sounding note's pitch every frame, trigger bit clear so it never restarts. The wobble table opens on four zeros — a note is struck in tune and walks into it — so short notes never wobble at all |
-| `envelope:` | `:organ` `:pluck` | organ holds a note until the next one; pluck lets it die away on its own, the way a struck string does |
+| `envelope:` | `:organ` `:pluck` | organ holds a note until the next one; pluck lets it die away on its own, the way a struck string does. Per voice like the duty: `envelope: [lead: :organ, harmony: :pluck]` is a melody that sings over an accompaniment that recedes — most of what the era's arrangements were made of |
 
-The duty and the envelope reach both pulses and not the bass; the vibrato
-likewise. Named rather than numbered throughout, and for the vibrato the reason
-is the hardware: the register holds a *period*, so the same deviation is four
-hertz at c5 and a third of one at c2 — a number would mean something different
-on every note.
+The duty and the envelope reach the pulses and not the bass; the vibrato
+likewise, and it stays shared. Named rather than numbered throughout, and for
+the vibrato the reason is the hardware: the register holds a *period*, so the
+same deviation is four hertz at c5 and a third of one at c2 — a number would
+mean something different on every note.
 
 ### What is in the cartridge
 

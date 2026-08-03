@@ -155,13 +155,24 @@ defmodule Tower do
            [2, 11, 17, 23]
          )
 
-  # The facade, for the title to stand on: brick frame, masonry night,
-  # windows lit down the middle heights.
-  @sky (for row <- 0..31 do
+  # The facade, for the title to stand on. Exactly the screen -- 20 by 18 --
+  # so its frame is symmetric on the glass: a 32-wide room would show its
+  # left wall and hide its right one, which is what made the boot look odd.
+  facade_row = fn windows ->
+    for col <- 0..19, into: "" do
+      cond do
+        col in [0, 19] -> "#"
+        col in windows -> "o"
+        true -> ":"
+      end
+    end
+  end
+
+  @sky (for row <- 0..17 do
           cond do
-            row in [0, 31] -> wall
-            row in [3, 8, 13] -> interior_row.([], [6, 12, 19, 25])
-            true -> interior_row.([], [])
+            row in [0, 17] -> String.duplicate("#", 20)
+            row in [3, 8, 13] -> facade_row.([5, 14])
+            true -> facade_row.([])
           end
         end)
        |> Enum.join("\n")
@@ -182,34 +193,38 @@ defmodule Tower do
 
   # ── The music ───────────────────────────────────────────────────────────────
 
-  # The climb, in A minor: a rising phrase asked three times, a step higher
-  # each time, and answered on the way down into the cadence -- the bass
-  # walks its fifths under it and the harmony arpeggiates the chord of the
-  # bar. Plucked, breathing (gap 3), with the gentle wobble on held notes.
+  # The climb, in A minor, arranged the way the era arranged: the melody
+  # *sings* -- long notes on the round quarter duty, held by the organ, bent
+  # by the vibrato -- while the accompaniment answers off the beat on the
+  # thin eighth, plucked so every pair of notes falls away and leaves room.
+  # The bass keeps to roots and moves late in the bar. Half the earlier
+  # tempo: the harshness was mostly hurry.
   music :anthem,
         [
           lead:
-            "e5 . c5 . a4 . . . b4 c5 b4 . g4 . . . | a4 . c5 . e5 . . . d5 e5 d5 . b4 . . . | c5 . e5 . g5 . . . f5 g5 f5 . d5 . . . | e5 . d5 c5 b4 . d5 . c5 . a4 . . . . .",
+            "a4 . . . c5 . b4 . a4 . . . e4 . . . | g4 . . . b4 . a4 . g4 . . . d5 . . . | f4 . . . a4 . c5 . d5 . c5 . a4 . . . | e5 . . . b4 . gs4 . a4 . . . . . . .",
           harmony:
-            "a3 e4 c4 e4 a3 e4 c4 e4 a3 e4 c4 e4 g3 d4 b3 d4 | f3 c4 a3 c4 f3 c4 a3 c4 f3 c4 a3 c4 e3 c4 g3 c4 | c4 g4 e4 g4 c4 g4 e4 g4 g3 d4 b3 d4 g3 d4 b3 d4 | a3 e4 c4 e4 e3 b3 gs3 b3 a3 e4 c4 e4 a3 c4 e4 a4",
+            "- . e3 . a3 . - . c4 . - . e3 . - . | - . d3 . g3 . - . b3 . - . d3 . - . | - . f3 . a3 . - . c4 . - . f3 . - . | - . e3 . gs3 . - . b3 . - . e3 . - .",
           bass:
-            "a2 . . a2 . . a2 . a2 . . a2 . . g2 . | f2 . . f2 . . f2 . f2 . . f2 . . e2 . | c2 . . c2 . . c2 . g2 . . g2 . . g2 . | a2 . . a2 e2 . . e2 a1 . . . . . . ."
+            "a2 . . . . . . . a2 . . . . . e2 . | g2 . . . . . . . g2 . . . . . d2 . | f2 . . . . . . . f2 . . . . . c2 . | e2 . . . . . . . e2 . . . . . . ."
         ],
-        beat: 9,
-        duty: :eighth,
-        gap: 3,
-        vibrato: :gentle,
-        envelope: :pluck
+        beat: 12,
+        duty: [lead: :quarter, harmony: :eighth],
+        envelope: [lead: :organ, harmony: :pluck],
+        gap: 2,
+        vibrato: :gentle
 
   # The summit fanfare: the triad climbed whole, a breath, and the tonic
-  # planted twice with its fourth-and-fifth underneath.
+  # planted -- the harmony echoing plucked underneath instead of doubling.
   music :fanfare,
         [
-          lead: "c5 e5 g5 c6 . . a5 b5 c6 . . g5 c6 . . .",
-          harmony: "e4 g4 c5 e5 . . f5 g5 e5 . . e5 e5 . . .",
-          bass: "c2 . c2 . c2 . f1 g1 c2 . . c2 c2 . . ."
+          lead: "c5 e5 g5 . c6 . . . b5 c6 . . . . . .",
+          harmony: "- . e4 g4 e5 . g4 . f5 e5 . . . . . .",
+          bass: "c2 . . . c2 . g1 . c2 . . . . . . ."
         ],
-        beat: 8,
+        beat: 9,
+        duty: [lead: :quarter, harmony: :eighth],
+        envelope: [lead: :organ, harmony: :pluck],
         gap: 2
 
   # ── The climber ─────────────────────────────────────────────────────────────
@@ -239,10 +254,15 @@ defmodule Tower do
               frow: 0,
               nrow: 0,
               primed: 0,
-              armed: 1
+              armed: 1,
+              veil: 0
 
     state :title do
       on_enter do
+        # Painted in the dark and lifted in three steps: the facade fades in
+        # rather than snapping on, at boot and coming back from the summit.
+        fade(3)
+        veil = 30
         show(:sky)
         scroll(0, 0)
         cx = 0
@@ -254,6 +274,13 @@ defmodule Tower do
       end
 
       every_frame do
+        if veil > 0 do
+          veil = veil - 1
+          if veil == 20, do: fade(2)
+          if veil == 10, do: fade(1)
+          if veil == 0, do: fade(0)
+        end
+
         # The hero marches in place under the title: the same two poses the
         # climb uses, at a strolling eight frames each.
         anim = anim + 1
@@ -342,7 +369,7 @@ defmodule Tower do
             tick = 0
             grounded = 0
             armed = 0
-            beep(:e5)
+            beep(:a4)
           end
         else
           armed = 1
@@ -413,7 +440,7 @@ defmodule Tower do
           show(:two)
           y = 224
           cy = 112
-          beep(:a5)
+          beep(:e5)
         end
 
         if storey == 2 and y < 6 and x > 12 and x < 34 do
@@ -421,7 +448,7 @@ defmodule Tower do
           show(:three)
           y = 224
           cy = 112
-          beep(:a5)
+          beep(:e5)
         end
 
         # ── The flag: its base stands at the feet's height when the hero

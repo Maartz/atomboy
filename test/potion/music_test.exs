@@ -134,11 +134,29 @@ defmodule Potion.MusicTest do
     end
 
     test "the envelope is named, defaults to the organ, and is refused by name" do
-      assert Music.compile!("c4", :t).envelope == 0xF0
-      assert Music.compile!("c4", :t, envelope: :pluck).envelope == 0xF2
+      assert Music.compile!("c4", :t).envelope == {0xF0, 0xF0}
+      assert Music.compile!("c4", :t, envelope: :pluck).envelope == {0xF2, 0xF2}
 
       assert_raise Potion.CompileError, ~r/envelope of :zing.*:organ.*:pluck/s, fn ->
         Music.compile!("c4", :t, envelope: :zing)
+      end
+    end
+
+    # The era's arrangements: a melody that sings, an accompaniment that
+    # recedes. One name serves both pulses; a keyword gives each its own, and
+    # a voice left unnamed keeps its default.
+    test "the envelope and the duty split per voice" do
+      tune = Music.compile!("c4", :t, envelope: [lead: :organ, harmony: :pluck])
+      assert tune.envelope == {0xF0, 0xF2}
+
+      tune = Music.compile!("c4", :t, duty: [lead: :quarter, harmony: :eighth])
+      assert tune.duty == {0x40, 0x00}
+
+      tune = Music.compile!("c4", :t, duty: [harmony: :eighth])
+      assert tune.duty == {0x80, 0x00}
+
+      assert_raise Potion.CompileError, ~r/names a voice called :bass/s, fn ->
+        Music.compile!("c4", :t, duty: [bass: :eighth])
       end
     end
   end
@@ -216,9 +234,9 @@ defmodule Potion.MusicTest do
     end
 
     test "the duty is the fraction the square is high, and reaches the register" do
-      assert Music.compile!("c4", :t, duty: :eighth).duty == 0x00
-      assert Music.compile!("c4", :t, duty: :quarter).duty == 0x40
-      assert Music.compile!("c4", :t).duty == 0x80
+      assert Music.compile!("c4", :t, duty: :eighth).duty == {0x00, 0x00}
+      assert Music.compile!("c4", :t, duty: :quarter).duty == {0x40, 0x40}
+      assert Music.compile!("c4", :t).duty == {0x80, 0x80}
     end
 
     test "a duty nobody has heard of is refused, with the three" do

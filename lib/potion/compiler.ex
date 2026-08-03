@@ -1021,12 +1021,18 @@ defmodule Potion.Compiler do
   # base says it started.
   defp statement({:play, _, [name]} = statement, allocation, counter) when is_atom(name) do
     voices = tune!(name, allocation, statement)
+    {lead_duty, harm_duty} = voices.duty
+    {lead_env, harm_env} = voices.envelope
 
     {[
-       {:ld, :a, voices.duty},
+       {:ld, :a, lead_duty},
        {:ld, {:mem, Runtime.duty_cell()}, :a},
-       {:ld, :a, voices.envelope},
-       {:ld, {:mem, Runtime.env_cell()}, :a}
+       {:ld, :a, harm_duty},
+       {:ld, {:mem, Runtime.harmony_duty_cell()}, :a},
+       {:ld, :a, lead_env},
+       {:ld, {:mem, Runtime.env_cell()}, :a},
+       {:ld, :a, harm_env},
+       {:ld, {:mem, Runtime.harmony_env_cell()}, :a}
      ] ++
        wobble(voices.vibrato) ++
        arm(Runtime.music_cells(), :"potion_tune_#{name}") ++

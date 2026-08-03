@@ -1868,6 +1868,54 @@ defmodule Potion.DSLTest do
     test "the bass is not the lead's numbers" do
       assert Potion.Music.wave_notes()[:c2] != Potion.Music.notes()[:c2]
     end
+
+    # The split reaches the hardware: one channel's registers carry the
+    # lead's instrument, the other's the harmony's, from the same `play`.
+    test "each pulse carries its own duty and envelope" do
+      defmodule Split.Voices do
+        @moduledoc false
+        use Potion
+
+        music :song,
+              [lead: "c5 e5 g5 c6", harmony: "e4 g4 c5 e5"],
+              beat: 6,
+              duty: [lead: :quarter, harmony: :eighth],
+              envelope: [lead: :organ, harmony: :pluck]
+
+        defactor :voice do
+          variables t: 0
+
+          every_frame do
+            t = t + 1
+            if t == 3, do: play(:song)
+          end
+        end
+      end
+
+      rom = Split.Voices.rom()
+
+      {_state, _ram, seen} =
+        Enum.reduce(1..12, {Screen.boot_state(rom), Screen.boot_ram(rom), nil}, fn
+          _n, {state, ram, seen} ->
+            {_pixels, state, ram} = Screen.frame(state, rom, ram, false)
+
+            seen =
+              seen ||
+                if Map.get(ram, 0xFF11) do
+                  {Map.get(ram, 0xFF11), Map.get(ram, 0xFF12), Map.get(ram, 0xFF16),
+                   Map.get(ram, 0xFF17)}
+                end
+
+            {state, ram, seen}
+        end)
+
+      {nr11, nr12, nr21, nr22} = seen
+
+      assert Bitwise.bsr(nr11, 6) == 1, "the lead is not the quarter it asked for"
+      assert Bitwise.bsr(nr21 || 0, 6) == 0, "the harmony is not the eighth it asked for"
+      assert nr12 == 0xF0, "the lead's organ did not reach NR12"
+      assert nr22 == 0xF2, "the harmony's pluck did not reach NR22"
+    end
   end
 
   # The three frequency registers, frame by frame: channels 1, 2 and 3.
