@@ -237,35 +237,21 @@ defmodule Atomboy.Play.Input do
   defp text(<<>>, elements), do: {Enum.reverse(elements), ""}
 
   # A CSI-u keystroke, read as text: presses and repeats only -- the shifted
-  # codepoint when the terminal reports one ("code:shifted;mods"), the plain
-  # one otherwise. The event number lives in the *modifier* field's colon
-  # part; `parse_event/1` cannot be reused here, it splits the whole params
-  # and a shifted code would land where the event belongs.
+  # codepoint when the terminal reports one ("code:shifted;mods"), because
+  # that is what the key *typed*, and the plain one otherwise.
   defp text_csi(<<??, _::binary>>, ?u), do: []
 
   defp text_csi(params, ?u) do
-    [codes | mods] = String.split(params, ";")
-
-    event =
-      case mods do
-        [first | _] ->
-          case String.split(first, ":") do
-            [_, event | _] -> Integer.parse(event) |> event_number()
-            _ -> 1
-          end
-
-        [] ->
-          1
-      end
+    [codes | _mods] = String.split(params, ";")
 
     code =
       case String.split(codes, ":") do
-        [plain, shifted | _] -> Integer.parse(shifted) |> shifted_or(plain)
-        [plain] -> Integer.parse(plain) |> shifted_or(plain)
+        [plain, shifted | _] -> int(shifted) || int(plain)
+        [plain] -> int(plain)
       end
 
     cond do
-      event not in [1, 2] -> []
+      parse_event(params) not in [1, 2] -> []
       code == 13 -> [:enter]
       code == 27 -> [:cancel]
       code in [127, 8] -> [:backspace]
@@ -275,18 +261,6 @@ defmodule Atomboy.Play.Input do
   end
 
   defp text_csi(_params, _final), do: []
-
-  defp event_number({n, _}), do: n
-  defp event_number(:error), do: 1
-
-  defp shifted_or({n, _}, _plain) when n > 0, do: n
-
-  defp shifted_or(_, plain) do
-    case Integer.parse(plain) do
-      {n, _} -> n
-      :error -> nil
-    end
-  end
 
   # ── The CSI sequence, taken apart ───────────────────────────────────────────
 
@@ -313,14 +287,25 @@ defmodule Atomboy.Play.Input do
   defp csi_events(<<??, params::binary>>, ?u), do: [{:kitty, flags(params)}]
 
   defp csi_events(params, ?u) do
-    [code | mods] = String.split(params, ";")
+    [codes | mods] = String.split(params, ";")
 
-    with {code, ""} <- Integer.parse(code),
-         key when key != nil <- Map.get(@codes, code) do
-      key = if ctrl?(mods) and code == ?c, do: :quit, else: key
-      tag(parse_event(params), key)
-    else
-      _ -> []
+    # "code:shifted" -- flag 4 makes a shifted key carry what it *typed* in
+    # the second slot. The plain code is looked up first (the game's keys are
+    # all unshifted); the shifted one is the fallback that lets Shift-; open
+    # the listener on the layouts where ":" lives there.
+    {plain, shifted} =
+      case String.split(codes, ":") do
+        [plain, shifted | _] -> {int(plain), int(shifted)}
+        [plain] -> {int(plain), nil}
+      end
+
+    case Map.get(@codes, plain) || Map.get(@codes, shifted) do
+      nil ->
+        []
+
+      key ->
+        key = if ctrl?(mods) and plain == ?c, do: :quit, else: key
+        tag(parse_event(params), key)
     end
   end
 
@@ -331,13 +316,29 @@ defmodule Atomboy.Play.Input do
   defp tag(3, key), do: [{:release, key}]
   defp tag(_, _key), do: []
 
-  # The event lives after the ":" of the modifier field; absent = press.
+  defp int(text) do
+    case Integer.parse(text) do
+      {n, _} -> n
+      :error -> nil
+    end
+  end
+
+  # The event lives after the ":" of the *modifier* field; absent = press.
+  # The field is found by ";" first: splitting the whole params on ":" reads
+  # a shifted codepoint as an event number, and a release with an alternate
+  # key would come back as garbage -- a stuck key, one release in a thousand.
   defp parse_event(params) do
-    case String.split(params, ":") do
-      [_, event | _] ->
-        case Integer.parse(event) do
-          {n, _} -> n
-          _ -> 1
+    case String.split(params, ";") do
+      [_codes, mods | _] ->
+        case String.split(mods, ":") do
+          [_, event | _] ->
+            case Integer.parse(event) do
+              {n, _} -> n
+              _ -> 1
+            end
+
+          _ ->
+            1
         end
 
       _ ->

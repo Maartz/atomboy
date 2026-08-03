@@ -854,11 +854,14 @@ defmodule Atomboy.Play do
     IO.write("\e[?1049h\e[?25l\e[2J")
 
     # The kitty keyboard protocol, if it is spoken: push the flags
-    # (1 disambiguate, 2 press/release events, 8 all keys as sequences) then
-    # query — the "CSI ? … u" answer confirms it, and the releases give the
-    # real keyboard state (diagonals, chords). A mute terminal ignores the
+    # (1 disambiguate, 2 press/release events, 4 alternate keys, 8 all keys
+    # as sequences) then query — the "CSI ? … u" answer confirms it, and the
+    # releases give the real keyboard state (diagonals, chords). Flag 4 is
+    # what lets a shifted key say what it *typed*: with 8 on, no plain bytes
+    # arrive at all, so without it Shift-; is the code for ";" and a ":" is
+    # untypable — the listener could never open. A mute terminal ignores the
     # whole thing: the frame-based hold stays in place.
-    if tty, do: IO.write("\e[>11u\e[?u")
+    if tty, do: IO.write("\e[>15u\e[?u")
 
     # And the graphics protocol: transmit one pixel as a query (a=q) —
     # "OK" in reply = real images rather than half blocks.

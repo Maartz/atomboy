@@ -81,6 +81,19 @@ defmodule Atomboy.Play.InputTest do
 
   test "the listener opens on the colon" do
     assert Input.decode(":") == {[{:key, :listen}], ""}
+
+    # Under kitty with "report all keys", no plain bytes arrive at all -- and
+    # on the layouts where ":" is Shift-;, the colon lives in the *shifted*
+    # slot of the codes field. Both roads must open the prompt.
+    assert Input.decode("\e[58;1u") == {[{:press, :listen}], ""}
+    assert Input.decode("\e[59:58;2u") == {[{:press, :listen}], ""}
+  end
+
+  test "a release carrying an alternate code is still a release" do
+    # Splitting the whole params on ":" would read the shifted code 88 as the
+    # event number and drop this -- a stuck key, one release in a thousand.
+    assert Input.decode("\e[120:88;1:3u") == {[{:release, :a}], ""}
+    assert Input.decode("\e[120:88;1:2u") == {[{:repeat, :a}], ""}
   end
 
   # Text mode: the prompt's decoder, where "x" stays a letter.
@@ -116,6 +129,11 @@ defmodule Atomboy.Play.InputTest do
   test "text mode takes the shifted codepoint when the terminal reports one" do
     # ";" shifted into ":" -- "code:shifted;mods".
     assert Input.text("\e[59:58;2u") == {[{:char, ?:}], ""}
+
+    # An AZERTY digit: the base key is "é" (233), the shifted slot holds the
+    # "2" actually typed. Without the shifted road, digits cannot be typed
+    # into the prompt on that layout at all.
+    assert Input.text("\e[233:50;2u") == {[{:char, ?2}], ""}
   end
 
   test "text mode swallows what a line of text cannot use" do
