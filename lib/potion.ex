@@ -265,7 +265,8 @@ defmodule Potion do
           room: 3,
           music: 2,
           music: 3,
-          picture: 2
+          picture: 2,
+          screen: 2
         ]
 
       @before_compile Potion
@@ -478,6 +479,115 @@ defmodule Potion do
 
   defp pictures(module), do: Module.get_attribute(module, :potion_pictures) || []
 
+  @doc """
+  Declares a whole drawing as a screen: cut into cells, the cells
+  deduplicated into tiles, and the result registered as a room — shown by
+  name, faded, walked on like any other.
+
+      screen :cover, from: "art/title.png", tolerance: 16
+      show(:cover)
+
+  A 20x18 image is 360 cells and a cartridge has about 212 tiles to give, so
+  no screen survives without repetition — and title drawings repeat plenty:
+  flat air, borders, the dither's own weave. `tolerance:` is how far two
+  cells may differ (summed shade distance over the 64 pixels) and still be
+  drawn with one tile. 0 keeps only exact repeats; around 16 trades whispers
+  of texture for a hundred tiles. The compiler refuses a screen that still
+  will not fit, by its numbers, through the art budget check.
+  """
+  defmacro screen(name, options) when is_atom(name) do
+    module = __CALLER__.module
+
+    path =
+      case Keyword.fetch(options, :from) do
+        {:ok, path} when is_binary(path) ->
+          Path.expand(path, Path.dirname(__CALLER__.file))
+
+        _ ->
+          raise CompileError, """
+          malformed `screen`: #{Macro.to_string(options)}
+
+          It takes a name, the drawing, and how much likeness one tile may
+          stand for:
+
+              screen :cover, from: "art/title.png", tolerance: 16
+          """
+      end
+
+    tolerance = Keyword.get(options, :tolerance, 0)
+
+    unless is_integer(tolerance) and tolerance >= 0 do
+      raise CompileError, """
+      the screen #{inspect(name)}'s tolerance is #{inspect(tolerance)} — it is \
+      a small whole number of summed shade steps, 0 for exact repeats only.
+      """
+    end
+
+    Module.put_attribute(module, :external_resource, path)
+
+    Module.put_attribute(
+      module,
+      :potion_screens,
+      screens(module) ++ [{name, path, tolerance}]
+    )
+
+    :ok
+  end
+
+  defp screens(module), do: Module.get_attribute(module, :potion_screens) || []
+
+  # A declared screen into art tiles and room bytes. The cells walk in reading
+  # order; each is drawn by the first already-kept tile within tolerance, or
+  # becomes a new tile itself.
+  defp canvas!({name, path, tolerance}, art) do
+    image = Potion.PNG.read!(path)
+    cols = div(image.width, 8)
+    rows = div(image.height, 8)
+
+    if cols > 32 or rows > 32 do
+      raise CompileError, """
+      the screen #{inspect(name)} is #{cols}x#{rows} tiles, and the map is 32x32.
+      """
+    end
+
+    shades = Enum.map(image.pixels, &Potion.Tiles.shade/1)
+
+    grids =
+      for ty <- 0..(rows - 1), tx <- 0..(cols - 1) do
+        for j <- 0..7 do
+          base = (ty * 8 + j) * image.width + tx * 8
+          for i <- 0..7, do: Enum.at(shades, base + i)
+        end
+      end
+
+    base_index = Runtime.art_base() + div(byte_size(art.bytes), 16)
+
+    {kept, cells} =
+      Enum.reduce(grids, {[], []}, fn grid, {kept, cells} ->
+        match =
+          Enum.find_index(kept, fn rep ->
+            likeness(rep, grid) <= tolerance
+          end)
+
+        case match do
+          nil -> {kept ++ [grid], cells ++ [length(kept)]}
+          index -> {kept, cells ++ [index]}
+        end
+      end)
+
+    bytes = Enum.map_join(kept, "", &Potion.Tiles.encode_grid/1)
+    map = for cell <- cells, into: <<cols, rows>>, do: <<base_index + cell>>
+
+    {%{art | bytes: art.bytes <> bytes}, {name, map}}
+  end
+
+  defp likeness(a, b) do
+    Enum.zip(a, b)
+    |> Enum.reduce(0, fn {ra, rb}, acc ->
+      acc + (Enum.zip(ra, rb) |> Enum.reduce(0, fn {x, y}, s -> s + abs(x - y) end))
+    end)
+  end
+
   @doc false
   defmacro __before_compile__(env) do
     case actors(env.module) do
@@ -516,10 +626,18 @@ defmodule Potion do
             {%{art | bytes: art.bytes <> bytes}, Map.put(pictures, name, {first, cols, rows})}
           end)
 
+        # Screens ride behind the pictures: whole drawings deduplicated into
+        # tiles, registered as rooms below.
+        {art, canvases} =
+          Enum.reduce(screens(env.module), {art, []}, fn declared, {art, acc} ->
+            {art, canvas} = canvas!(declared, art)
+            {art, acc ++ [canvas]}
+          end)
+
         screens =
           Enum.map(rooms(env.module), fn {name, ascii, opts} ->
             {name, compiled_room!(name, ascii, opts, art.names, env)}
-          end)
+          end) ++ canvases
 
         songs =
           Enum.map(tunes(env.module), fn {name, notation, opts} ->

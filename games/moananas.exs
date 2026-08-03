@@ -1,23 +1,19 @@
-# Moananas Island — collect the pineapples, dodge the moai.
+# Moananas Island — run the beach, jump the moai, gather the pineapples.
 #
 #     mix run games/moananas.exs
 #
 # writes `games/moananas.gb`. Play it with `bin/play games/moananas.gb`, or
 # hot via `ELIXIR_ERL_OPTIONS="-noinput" mix atomboy.live games/moananas.exs`.
 #
-# The title is the concept art itself — portrait and bubble logo imported
-# through the Bayer dither — and Start fades to black before the beach fades
-# up. On the beach: run with the d-pad, catch pineapples (30 wins), and the
-# moai falling among them cost a heart each — three hearts and the island
-# keeps them. The hero is the SGQ elf's walk cycle, four frames, mirrored to
-# face where he runs; the sand is SGQ ground; the big mossy moai watches from
-# the shore, dithered to four shades.
+# The title is the concept art — the whole of it, deduplicated into the tile
+# budget by `screen` — and Start fades to black before the beach fades up.
+# The beach is a sideways-scrolling run: 256 pixels of island, the camera
+# chasing, moai statues planted in the sand that cost a heart to touch,
+# pineapples floating over the path and the planks, and the flag at the far
+# end of the island. Three hearts; the flag is the game.
 defmodule Moananas do
   use Potion
 
-  # The sheet is composed by art/prepare_moananas.py: the hand-drawn island
-  # furniture, one SGQ sand tile, then the elf's four 16x16 frames as
-  # TL/TR/BL/BR quads.
   tiles from: "art/moananas_sheet.png",
         names: [
           :pineapple_top,
@@ -30,6 +26,9 @@ defmodule Moananas do
           :border,
           :sand,
           :heart,
+          :plank,
+          :flag_top,
+          :flag_base,
           :beach_sand,
           :m1_tl,
           :m1_tr,
@@ -49,17 +48,17 @@ defmodule Moananas do
           :m4_br
         ]
 
-  # Imported from the concept art and the asset shelf by the two importers:
-  # dithered pictures, painted whole by the kernel.
-  picture(:face, from: "art/moananas_face.png")
-  picture(:logo, from: "art/moananas_logo.png")
-  picture(:sentinel, from: "art/moananas_moai_deco.png")
+  # The whole drawing, one screen: 360 cells folded into the tile budget by
+  # likeness — the air's dither weave repeats, the portrait does not.
+  screen(:cover, from: "art/moananas_title.png", tolerance: 16)
 
-  # ── The screens ─────────────────────────────────────────────────────────────
+  # ── The island ──────────────────────────────────────────────────────────────
+  #
+  # One room, 32 by 18: 256 pixels of beach under a horizontal camera. Sand
+  # floor, planks in the air with pineapples over them, moai standing in the
+  # sand — passable, and they hurt — and the flag planted at the far end.
 
-  border = String.duplicate("*", 20)
-
-  air = fn -> "*" <> String.duplicate(".", 18) <> "*" end
+  edge = fn -> "#" <> String.duplicate(" ", 30) <> "#" end
 
   place = fn row, spots ->
     Enum.reduce(spots, row, fn {col, char}, row ->
@@ -68,49 +67,47 @@ defmodule Moananas do
     end)
   end
 
-  @title ([border] ++
-            List.duplicate(air.(), 6) ++
-            [place.(air.(), [{15, "c"}])] ++
-            List.duplicate(air.(), 4) ++
-            [place.(air.(), [{11, "p"}, {14, "m"}, {17, "P"}])] ++
-            [place.(air.(), [{11, "b"}, {14, "M"}, {17, "T"}])] ++
-            List.duplicate(air.(), 3) ++
-            [border])
-         |> Enum.join("\n")
-
-  # The beach: sky with clouds, a palm on the left, two rows of SGQ sand, and
-  # room on the right for the sentinel moai the on_enter paints.
-  @beach ([border] ++
-            [air.()] ++
-            [place.(air.(), [{4, "c"}, {14, "c"}])] ++
-            List.duplicate(air.(), 10) ++
-            [place.(air.(), [{2, "P"}])] ++
-            [place.(air.(), [{2, "T"}])] ++
-            ["*" <> String.duplicate("f", 18) <> "*"] ++
-            ["*" <> String.duplicate("f", 18) <> "*"] ++
-            [border])
+  # The planks sit 24 pixels over the sand -- inside the jump's 25 -- and the
+  # moai keep out of their columns. Row 13 planks, rows 14-15 statues, palm
+  # and flag; rows 16-17 sand.
+  @beach ([place.(edge.(), [{6, "c"}, {22, "c"}])] ++
+            List.duplicate(edge.(), 12) ++
+            [
+              place.(edge.(), [
+                {9, "="},
+                {10, "="},
+                {11, "="},
+                {16, "="},
+                {17, "="},
+                {18, "="},
+                {24, "="},
+                {25, "="},
+                {26, "="}
+              ])
+            ] ++
+            [place.(edge.(), [{2, "P"}, {6, "m"}, {13, "m"}, {19, "m"}, {28, "m"}, {30, "F"}])] ++
+            [place.(edge.(), [{2, "T"}, {6, "M"}, {13, "M"}, {19, "M"}, {28, "M"}, {30, "B"}])] ++
+            ["#" <> String.duplicate("f", 30) <> "#"] ++
+            ["#" <> String.duplicate("f", 30) <> "#"])
          |> Enum.join("\n")
 
   @tiles %{
-    ?* => :border,
-    ?. => :sand,
+    ?# => :border,
     ?f => :beach_sand,
     ?c => :cloud,
-    ?p => :pineapple_top,
-    ?b => :pineapple_body,
     ?m => :moai_head,
     ?M => :moai_base,
     ?P => :palm_crown,
-    ?T => :palm_trunk
+    ?T => :palm_trunk,
+    ?F => :flag_top,
+    ?B => :flag_base,
+    ?= => :plank
   }
 
-  room :title_screen, @title, tiles: @tiles
   room :beach, @beach, tiles: @tiles
 
   # ── The music ───────────────────────────────────────────────────────────────
 
-  # The island tune: major, bouncy, off-beat — and it never stops, title to
-  # beach to game over; the island does not care how you are doing.
   music :island,
         [
           lead:
@@ -143,7 +140,13 @@ defmodule Moananas do
               leaving: 0,
               primed: 0,
               anim: 0,
-              x: 72,
+              x: 16,
+              y: 112,
+              ox: 0,
+              oy: 0,
+              vy: 0,
+              tick: 0,
+              grounded: 0,
               facing: 0,
               moving: 0,
               blink: 0,
@@ -151,11 +154,25 @@ defmodule Moananas do
               hidden: 0,
               hearts: 3,
               score: 0,
-              tens: 0,
-              units: 0,
+              tens_tile: 2,
+              units_tile: 2,
               playing: 0,
+              cx: 0,
+              sx: 0,
+              sy: 0,
+              sx8: 0,
+              sy8: 0,
+              x15: 0,
+              y15: 0,
+              y16: 0,
+              ymid: 0,
+              frow: 0,
+              nrow: 0,
+              armed: 1,
               hxm8: 0,
               hxp16: 0,
+              ym16: 0,
+              yp16: 0,
               slot: 0
 
     state :title do
@@ -165,18 +182,25 @@ defmodule Moananas do
         leaving = 0
         primed = 0
         playing = 0
-        show(:title_screen)
-        picture(:logo, 4, 1)
-        picture(:face, 1, 6)
-        text(5, 16, "PRESS START")
+        scroll(0, 0)
+        cx = 0
+        show(:cover)
+        # The cover's own small type melts under the dedup tolerance; the
+        # kernel's font is sharper than a mushed tile — overlay it.
+        text(5, 13, "PRESS START")
         play(:island)
       end
 
       every_frame do
-        sprite(0, x: 80, y: 200, tile: :heart)
-        sprite(1, x: 80, y: 200, tile: :heart)
-        sprite(2, x: 80, y: 200, tile: :heart)
-        sprite(3, x: 80, y: 200, tile: :heart)
+        sprite(0, x: 0, y: 200, tile: :heart)
+        sprite(1, x: 0, y: 200, tile: :heart)
+        sprite(2, x: 0, y: 200, tile: :heart)
+        sprite(3, x: 0, y: 200, tile: :heart)
+        sprite(4, x: 0, y: 200, tile: :heart)
+        sprite(5, x: 0, y: 200, tile: :heart)
+        sprite(6, x: 0, y: 200, tile: :heart)
+        sprite(7, x: 0, y: 200, tile: :heart)
+        sprite(8, x: 0, y: 200, tile: :heart)
 
         if veil > 0 do
           veil = veil - 1
@@ -185,13 +209,13 @@ defmodule Moananas do
           if veil == 0, do: fade(0)
         end
 
-        # The fondu au noir: Start pulls the veil down before the beach.
+        # The fondu au noir: Start pulls the veil down before the island.
         if leaving > 0 do
           leaving = leaving - 1
           if leaving == 16, do: fade(1)
           if leaving == 8, do: fade(2)
           if leaving == 1, do: fade(3)
-          if leaving == 0, do: become(:shore)
+          if leaving == 0, do: become(:run)
         end
 
         if pressed?(:start) do
@@ -202,18 +226,21 @@ defmodule Moananas do
       end
     end
 
-    state :shore do
+    state :run do
       on_enter do
         show(:beach)
-        picture(:sentinel, 14, 10)
         veil = 30
-        x = 72
+        x = 16
+        y = 112
+        vy = 0
+        cx = 0
         facing = 0
         blink = 0
         hearts = 3
         score = 0
         playing = 1
         primed = 0
+        armed = 1
       end
 
       every_frame do
@@ -224,40 +251,86 @@ defmodule Moananas do
           if veil == 0, do: fade(0)
         end
 
-        # ── Running. Two pixels a frame, walls at the border. ──
+        # ── Running. The island's ends are numbers, not walls: nothing else
+        # on the beach blocks sideways, so no wall is asked about. ──
         moving = 0
 
         if pressed?(:right) do
-          x = x + 2
+          x = x + 1
           facing = 0
           moving = 1
         end
 
         if pressed?(:left) do
-          x = x - 2
+          x = x - 1
           facing = 1
           moving = 1
         end
 
         if x < 8, do: x = 8
-        if x > 136, do: x = 136
+        if x > 232, do: x = 232
 
-        # The catch window the drops read: one byte each side of the body.
-        hxm8 = x - 8
-        hxp16 = x + 16
+        # ── The jump, whole from the Tower: armed is the debounce, and the
+        # release cuts the rise — a tap hops, a held press leaps. ──
+        if pressed?(:a) do
+          if armed == 1 and grounded == 1 do
+            vy = -5
+            tick = 0
+            grounded = 0
+            armed = 0
+            beep(:a4)
+          end
+        else
+          armed = 1
+          if negative?(vy) and vy < 254, do: vy = 254
+        end
 
-        # ── The scoreboard: two digits and three hearts, redrawn every
-        # frame — cheaper than remembering what changed. ──
-        tens = div(score, 10)
-        units = rem(score, 10)
-        background(1, 1, digit: tens)
-        background(2, 1, digit: units)
+        tick = tick + 1
 
-        if hearts > 0, do: background(14, 1, tile: :heart), else: background(14, 1, tile: :sand)
-        if hearts > 1, do: background(16, 1, tile: :heart), else: background(16, 1, tile: :sand)
-        if hearts > 2, do: background(18, 1, tile: :heart), else: background(18, 1, tile: :sand)
+        if tick == 2 do
+          tick = 0
 
-        # ── The blink: hit, the hero flickers and cannot be hit again. ──
+          if negative?(vy) do
+            vy = vy + 1
+          else
+            if vy < 4, do: vy = vy + 1
+          end
+        end
+
+        # ── The vertical move: the sand is solid, the planks are landed on
+        # when the feet cross downward into their row. ──
+        oy = y
+        frow = y + 15
+        frow = div(frow, 8)
+        y = y + vy
+        y15 = y + 15
+        nrow = div(y15, 8)
+
+        if touching?(:beach_sand, x, y15) or touching?(:beach_sand, x15, y15) do
+          y = oy
+          y15 = y + 15
+          if grounded == 0, do: noise(:tick)
+          vy = 0
+        else
+          if nrow > frow and (touching?(:plank, x, y15) or touching?(:plank, x15, y15)) do
+            y = nrow * 8
+            y = y - 16
+            y15 = y + 15
+            if grounded == 0, do: noise(:tick)
+            vy = 0
+          end
+        end
+
+        x15 = x + 15
+        ymid = y + 8
+        y16 = y15 + 1
+        grounded = 0
+
+        if touching?(:beach_sand, x, y16) or touching?(:beach_sand, x15, y16) or
+             touching?(:plank, x, y16) or touching?(:plank, x15, y16),
+           do: grounded = 1
+
+        # ── The moai: passable, and they cost. The blink is the mercy. ──
         hidden = 0
 
         if blink > 0 do
@@ -266,11 +339,61 @@ defmodule Moananas do
           if flick < 4, do: hidden = 1
         end
 
-        # ── The verdicts. ──
-        if hearts == 0, do: become(:sunk)
-        if score > 29, do: become(:crowned)
+        if blink == 0 do
+          if touching?(:moai_head, x, ymid) or touching?(:moai_head, x15, ymid) or
+               touching?(:moai_base, x, y15) or touching?(:moai_base, x15, y15) do
+            hearts = hearts - 1
+            blink = 90
+            noise(:boom)
+          end
+        end
 
-        # ── The elf, four quarters, walk cycle on the ground. ──
+        # ── The flag: the end of the island. ──
+        if touching?(:flag_top, x, ymid) or touching?(:flag_top, x15, ymid) or
+             touching?(:flag_base, x, y15) or touching?(:flag_base, x15, y15),
+           do: become(:crowned)
+
+        if hearts == 0, do: become(:sunk)
+
+        # ── The window the pineapples read. ──
+        hxm8 = x - 8
+        hxp16 = x + 16
+        ym16 = y - 16
+        yp16 = y + 16
+
+        # ── The camera, chasing sideways. ──
+        sx = x - cx
+        if sx > 80 and cx < 96, do: cx = cx + 1
+        if sx < 64 and cx > 0, do: cx = cx - 1
+        scroll(cx, 0)
+        sx = x - cx
+        sy = y
+        sx8 = sx + 8
+        sy8 = sy + 8
+
+        # ── The HUD rides in sprites, so the world scrolls under it: two
+        # digits of score, three hearts. The digit tiles are the kernel's
+        # font, reached by arithmetic — tile 2 is the zero. ──
+        tens_tile = div(score, 10)
+        tens_tile = tens_tile + 2
+        units_tile = rem(score, 10)
+        units_tile = units_tile + 2
+        sprite(4, x: 8, y: 8, tile: tens_tile)
+        sprite(5, x: 16, y: 8, tile: units_tile)
+
+        if hearts > 0,
+          do: sprite(6, x: 128, y: 8, tile: :heart),
+          else: sprite(6, x: 0, y: 200, tile: :heart)
+
+        if hearts > 1,
+          do: sprite(7, x: 140, y: 8, tile: :heart),
+          else: sprite(7, x: 0, y: 200, tile: :heart)
+
+        if hearts > 2,
+          do: sprite(8, x: 152, y: 8, tile: :heart),
+          else: sprite(8, x: 0, y: 200, tile: :heart)
+
+        # ── The elf, four quarters, the Tower's poses. ──
         anim = anim + 1
         if anim == 16, do: anim = 0
 
@@ -282,27 +405,27 @@ defmodule Moananas do
         else
           if moving == 0 or anim < 8 do
             if facing == 0 do
-              sprite(0, x: x, y: 104, tile: :m1_tl)
-              sprite(1, x: x, y: 104, tile: :m1_tr)
-              sprite(2, x: x, y: 112, tile: :m1_bl)
-              sprite(3, x: x, y: 112, tile: :m1_br)
+              sprite(0, x: sx, y: sy, tile: :m1_tl)
+              sprite(1, x: sx8, y: sy, tile: :m1_tr)
+              sprite(2, x: sx, y: sy8, tile: :m1_bl)
+              sprite(3, x: sx8, y: sy8, tile: :m1_br)
             else
-              sprite(0, x: x, y: 104, tile: :m1_tr, flip: :x)
-              sprite(1, x: x, y: 104, tile: :m1_tl, flip: :x)
-              sprite(2, x: x, y: 112, tile: :m1_br, flip: :x)
-              sprite(3, x: x, y: 112, tile: :m1_bl, flip: :x)
+              sprite(0, x: sx, y: sy, tile: :m1_tr, flip: :x)
+              sprite(1, x: sx8, y: sy, tile: :m1_tl, flip: :x)
+              sprite(2, x: sx, y: sy8, tile: :m1_br, flip: :x)
+              sprite(3, x: sx8, y: sy8, tile: :m1_bl, flip: :x)
             end
           else
             if facing == 0 do
-              sprite(0, x: x, y: 104, tile: :m3_tl)
-              sprite(1, x: x, y: 104, tile: :m3_tr)
-              sprite(2, x: x, y: 112, tile: :m3_bl)
-              sprite(3, x: x, y: 112, tile: :m3_br)
+              sprite(0, x: sx, y: sy, tile: :m3_tl)
+              sprite(1, x: sx8, y: sy, tile: :m3_tr)
+              sprite(2, x: sx, y: sy8, tile: :m3_bl)
+              sprite(3, x: sx8, y: sy8, tile: :m3_br)
             else
-              sprite(0, x: x, y: 104, tile: :m3_tr, flip: :x)
-              sprite(1, x: x, y: 104, tile: :m3_tl, flip: :x)
-              sprite(2, x: x, y: 112, tile: :m3_br, flip: :x)
-              sprite(3, x: x, y: 112, tile: :m3_bl, flip: :x)
+              sprite(0, x: sx, y: sy, tile: :m3_tr, flip: :x)
+              sprite(1, x: sx8, y: sy, tile: :m3_tl, flip: :x)
+              sprite(2, x: sx, y: sy8, tile: :m3_br, flip: :x)
+              sprite(3, x: sx8, y: sy8, tile: :m3_bl, flip: :x)
             end
           end
         end
@@ -345,84 +468,51 @@ defmodule Moananas do
     end
   end
 
-  # ── The sky's opinion ───────────────────────────────────────────────────────
+  # ── The pineapples ──────────────────────────────────────────────────────────
   #
-  # Four falling things in one pool: the first two are pineapples, the other
-  # two moai — `me` is the kind. Each falls, is caught or lands, and returns
-  # to the top at a column the island picks at random. The fall quickens as
-  # the score grows: the division earns its keep.
-  # `slot` lives in the hero's cells on purpose: the pool rewrites its own
-  # names into arrays indexed by `me`, and a sprite's entry number must be a
-  # plain cell. Instances run one after another, so sharing one scratch cell
-  # is safe.
-  defactor :drop, count: 4 do
-    variables dy: 200, dx: 40, dy8: 0, spd: 1, wait: 60
+  # Six of them, planted along the island: the even ones low over the sand,
+  # the odd ones over the planks — a low jump and a climb. Each is a world
+  # position and a `taken` flag; the sprite is the position minus the camera,
+  # parked once it leaves the glass or the ground. `slot` is the hero's
+  # scratch cell: a pooled name cannot number a sprite.
+  defactor :pineapple, count: 6 do
+    variables wx: 0, wy: 0, taken: 0, seeded: 0, px: 0, py8: 0
 
     every_frame do
+      if seeded == 0 do
+        seeded = 1
+        wx = me * 32
+        wx = wx + 44
+        wy = 90
+        if rem(me, 2) == 1, do: wy = 56
+      end
+
       slot = me * 2
-      slot = slot + 4
+      slot = slot + 9
 
       if playing == 0 do
-        wait = 30
-        dy = 200
-        sprite(slot, x: 0, y: 200, tile: :moai_head)
+        taken = 0
+        sprite(slot, x: 0, y: 200, tile: :pineapple_top)
         slot = slot + 1
-        sprite(slot, x: 0, y: 200, tile: :moai_head)
+        sprite(slot, x: 0, y: 200, tile: :pineapple_top)
       else
-        # Waiting in the wings: parked, counting down to the drop.
-        if wait > 0 do
-          wait = wait - 1
+        if taken == 0 and wx > hxm8 and wx < hxp16 and wy > ym16 and wy < yp16 do
+          taken = 1
+          score = score + 1
+          beep(:c6)
+        end
 
-          if wait == 1 do
-            dy = 16
-            dx = random(128)
-            dx = dx + 10
-          end
+        px = wx - cx
 
-          sprite(slot, x: 0, y: 200, tile: :moai_head)
+        if taken == 0 and px < 153 do
+          py8 = wy + 8
+          sprite(slot, x: px, y: wy, tile: :pineapple_top)
           slot = slot + 1
-          sprite(slot, x: 0, y: 200, tile: :moai_head)
+          sprite(slot, x: px, y: py8, tile: :pineapple_body)
         else
-          spd = div(score, 8)
-          spd = spd + 1
-          if spd > 3, do: spd = 3
-          dy = dy + spd
-
-          # Caught, or landed? The hero's window was computed this frame.
-          if dy > 90 and dy < 112 and dx > hxm8 and dx < hxp16 do
-            if me < 2 do
-              score = score + 1
-              beep(:c6)
-            else
-              if blink == 0 do
-                hearts = hearts - 1
-                blink = 90
-                noise(:boom)
-              end
-            end
-
-            dy = 200
-            wait = random(64)
-            wait = wait + 20
-          end
-
-          if dy > 103 do
-            dy = 200
-            wait = random(64)
-            wait = wait + 20
-          end
-
-          dy8 = dy + 8
-
-          if me < 2 do
-            sprite(slot, x: dx, y: dy, tile: :pineapple_top)
-            slot = slot + 1
-            sprite(slot, x: dx, y: dy8, tile: :pineapple_body)
-          else
-            sprite(slot, x: dx, y: dy, tile: :moai_head)
-            slot = slot + 1
-            sprite(slot, x: dx, y: dy8, tile: :moai_base)
-          end
+          sprite(slot, x: 0, y: 200, tile: :pineapple_top)
+          slot = slot + 1
+          sprite(slot, x: 0, y: 200, tile: :pineapple_top)
         end
       end
     end

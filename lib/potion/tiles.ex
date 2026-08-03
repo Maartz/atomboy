@@ -117,6 +117,23 @@ defmodule Potion.Tiles do
     3 - div(luma, 64)
   end
 
+  @doc """
+  One 8x8 grid of shades into the console's sixteen bytes — the two bitplanes,
+  a row at a time, leftmost pixel in bit 7.
+
+  The private path below encodes straight out of an image; this public door is
+  for callers that rework grids first — a screen conversion deduplicating
+  tiles holds grids, not images.
+  """
+  @spec encode_grid([[0..3]]) :: binary()
+  def encode_grid(rows) do
+    for line <- rows, into: <<>> do
+      low = Enum.reduce(line, 0, fn shade, acc -> acc * 2 + rem(shade, 2) end)
+      high = Enum.reduce(line, 0, fn shade, acc -> acc * 2 + div(shade, 2) end)
+      <<low, high>>
+    end
+  end
+
   # One tile, from the flat list of shades. The two planes are built a row at a
   # time and the leftmost pixel lands in bit 7, which is the order the console
   # reads them out in.
