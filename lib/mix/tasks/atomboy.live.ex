@@ -22,6 +22,16 @@ defmodule Mix.Tasks.Atomboy.Live do
   does not stop the walker becomes *watching* `x` refuse to grow, rather than
   sprinkling probes.
 
+  ## The listener
+
+  And the writing half: press `:` and the status line becomes a prompt. Type
+  `x = 20`, Enter, and the cell is written between two frames — the game reads
+  it on its next one and the square jumps. `x` alone reads the cell back;
+  negatives take the two's complement the language writes; Escape closes the
+  prompt. The game keeps running while you type — the pad is released, the
+  letters belong to the sentence — because watching the world go on around
+  the value you are about to change is what a listener *is*.
+
   ## Why this is nearly free
 
   `Atomboy.Screen.frame/4` takes the ROM as an argument every frame, so swapping

@@ -82,6 +82,52 @@ defmodule Atomboy.LiveTest do
     assert function_exported?(module, :addresses, 0)
   end
 
+  # The listener's sentence, from the text to the RAM. `poke` is pure -- the
+  # machine is never half-written -- which is what makes it testable here
+  # without a terminal.
+  test "the listener writes a named cell, and the game reads it next frame", %{path: path} do
+    {_module, rom, cells} = Live.build!(path)
+
+    {_pixels, state, ram} =
+      Enum.reduce(
+        1..8,
+        {<<>>, Atomboy.Screen.boot_state(rom), Atomboy.Screen.boot_ram(rom)},
+        fn _, {_p, state, ram} ->
+          Atomboy.Screen.frame(state, rom, ram, false)
+        end
+      )
+
+    assert {:ok, ram, "x ← 120"} = Atomboy.Play.poke(cells, ram, "x = 120")
+
+    {_pixels, _state, ram} = Atomboy.Screen.frame(state, rom, ram, false)
+
+    # The game's own frame put the poked value into the sprite: the mirror
+    # holds x + 8, the hardware's offset. The write reached the machine, not
+    # just the map.
+    assert Map.get(ram, 0xC001) == 120 + 8
+  end
+
+  test "the listener reads a cell back, and honours the language's negatives" do
+    cells = %{vx: 0xC100}
+
+    assert {:ok, ram, "vx ← 255"} = Atomboy.Play.poke(cells, %{}, "vx = -1")
+    assert {:ok, ^ram, "vx = 255"} = Atomboy.Play.poke(cells, ram, "vx")
+  end
+
+  test "the listener refuses whole: bad names and bad bytes write nothing" do
+    cells = %{x: 0xC100}
+
+    assert {:error, "no cell named vy"} = Atomboy.Play.poke(cells, %{}, "vy = 3")
+    assert {:error, message} = Atomboy.Play.poke(cells, %{}, "x = 300")
+    assert message =~ "a cell holds a byte"
+    assert {:error, message} = Atomboy.Play.poke(cells, %{}, "x = fast")
+    assert message =~ "not a number"
+
+    # A typo must not mint an atom: the name is looked up among the existing.
+    assert {:error, "no cell named xyzzy_never_seen"} =
+             Atomboy.Play.poke(cells, %{}, "xyzzy_never_seen = 1")
+  end
+
   test "a file that has not moved asks for nothing", %{path: path} do
     {_module, _rom, cells} = Live.build!(path)
     seed(path, cells)

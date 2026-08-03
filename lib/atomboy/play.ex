@@ -184,6 +184,8 @@ defmodule Atomboy.Play do
            # names are known; `w` toggles it against the help line.
            watch: Keyword.get(opts, :watch),
            watching: Keyword.get(opts, :watch) != nil,
+           # The listener's prompt: nil closed, the line typed so far open.
+           prompt: nil,
            last_frame: nil,
            fps: 0.0,
            fps_mark: System.monotonic_time(:microsecond),
@@ -234,21 +236,34 @@ defmodule Atomboy.Play do
   defp loop(%{frame: n, max_frames: max} = ctx) when n >= max, do: finish(ctx)
 
   defp loop(ctx) do
-    {events, pending} = Input.decode(ctx.pending <> collect_input([]))
+    buffer = ctx.pending <> collect_input([])
 
-    if Enum.any?(events, &match?({tag, :quit} when tag != :release, &1)) do
-      finish(ctx)
+    # The listener's prompt owns the whole keyboard while it is open: "x" is a
+    # letter and not the A button, and `q` quits nothing. The machine keeps
+    # running underneath -- the pad was released when the prompt opened, and
+    # the world going on while you type is the point.
+    if ctx.prompt != nil do
+      {elements, pending} = Input.text(buffer)
+      continue(Enum.reduce(elements, %{ctx | pending: pending}, &prompt_element/2))
     else
-      ctx = Enum.reduce(events, %{ctx | pending: pending}, &apply_event/2)
+      {events, pending} = Input.decode(buffer)
 
-      case ensure_size(ctx) do
-        {:error, _} = error ->
-          finish(ctx)
-          error
-
-        _ ->
-          ctx |> reload() |> resume()
+      if Enum.any?(events, &match?({tag, :quit} when tag != :release, &1)) do
+        finish(ctx)
+      else
+        continue(Enum.reduce(events, %{ctx | pending: pending}, &apply_event/2))
       end
+    end
+  end
+
+  defp continue(ctx) do
+    case ensure_size(ctx) do
+      {:error, _} = error ->
+        finish(ctx)
+        error
+
+      _ ->
+        ctx |> reload() |> resume()
     end
   end
 
@@ -563,8 +578,16 @@ defmodule Atomboy.Play do
   defp apply_event({tag, :watch}, ctx) when tag in [:key, :press],
     do: %{ctx | watching: not ctx.watching}
 
+  # The listener opens on `:` -- with the keys in flight released, because the
+  # first letter of a cell's name must not also steer the game.
+  defp apply_event({tag, :listen}, %{watch: nil} = ctx) when tag in [:key, :press],
+    do: %{ctx | note: {"the listener needs names — run mix atomboy.live", 180}}
+
+  defp apply_event({tag, :listen}, %{menu: nil} = ctx) when tag in [:key, :press],
+    do: %{ctx | prompt: "", down: MapSet.new(), hold: %{}}
+
   defp apply_event({_tag, key}, ctx)
-       when key in [:save_state, :load_state, :turbo, :pause, :watch],
+       when key in [:save_state, :load_state, :turbo, :pause, :watch, :listen],
        do: ctx
 
   defp apply_event({:release, key}, %{kitty: true} = ctx),
@@ -584,6 +607,23 @@ defmodule Atomboy.Play do
 
   # A release with no confirmed protocol: ignored.
   defp apply_event(_event, ctx), do: ctx
+
+  # ── The listener's line editor ──────────────────────────────────────────────
+
+  defp prompt_element({:char, c}, ctx), do: %{ctx | prompt: ctx.prompt <> <<c>>}
+  defp prompt_element(:backspace, ctx), do: %{ctx | prompt: String.slice(ctx.prompt, 0..-2//1)}
+  defp prompt_element(:cancel, ctx), do: %{ctx | prompt: nil}
+
+  defp prompt_element(:enter, ctx) do
+    if String.trim(ctx.prompt) == "" do
+      %{ctx | prompt: nil}
+    else
+      case poke(ctx.watch, ctx.ram, ctx.prompt) do
+        {:ok, ram, text} -> %{ctx | ram: ram, prompt: nil, note: {text, 150}}
+        {:error, text} -> %{ctx | prompt: nil, note: {"× " <> text, 240}}
+      end
+    end
+  end
 
   defp turbo_toggle(ctx) do
     turbo = not ctx.turbo
@@ -669,10 +709,15 @@ defmodule Atomboy.Play do
       end
 
     lead =
-      if ctx.watching and ctx.watch do
-        " ⌚ " <> watch_line(ctx.watch, ram) <> "   "
-      else
-        " ✚ arrows · x A · c B · ⏎ Start · ␣ Select · s/r state · ⇥ turbo · p pause · w watch · q quit   "
+      cond do
+        ctx.prompt != nil ->
+          " : " <> ctx.prompt <> "▮   "
+
+        ctx.watching and ctx.watch ->
+          " ⌚ " <> watch_line(ctx.watch, ram) <> "   "
+
+        true ->
+          " ✚ arrows · x A · c B · ⏎ Start · ␣ Select · s/r state · ⇥ turbo · p pause · w watch · q quit   "
       end
 
     [
@@ -707,6 +752,60 @@ defmodule Atomboy.Play do
     |> Enum.map_join(" · ", fn {name, address} ->
       "#{name} #{String.pad_leading("#{Map.get(ram, address, 0)}", 3)}"
     end)
+  end
+
+  @doc """
+  One sentence of the listener, applied to the machine.
+
+  `x = 20` writes the byte into the named cell -- the game reads it on its
+  very next frame, which is the whole point. `x` alone answers with the value,
+  a read without a write. A negative takes the two's complement the language
+  itself writes, so `vx = -1` at the prompt means what it means in the source.
+
+  Returns `{:ok, ram, said}` or `{:error, said}` -- the machine is never
+  half-written: a sentence that cannot be honoured whole changes nothing.
+  """
+  @spec poke(%{atom() => non_neg_integer()}, map(), String.t()) ::
+          {:ok, map(), String.t()} | {:error, String.t()}
+  def poke(cells, ram, line) do
+    case line |> String.split("=", parts: 2) |> Enum.map(&String.trim/1) do
+      [name, value] ->
+        with {:ok, address} <- cell(cells, name),
+             {:ok, byte} <- byte(value) do
+          {:ok, Map.put(ram, address, byte), "#{name} ← #{byte}"}
+        end
+
+      [name] ->
+        with {:ok, address} <- cell(cells, name) do
+          {:ok, ram, "#{name} = #{Map.get(ram, address, 0)}"}
+        end
+    end
+  end
+
+  # The name against the cells the cartridge was built with. `to_existing_atom`
+  # because the names all exist -- the watch map holds them -- and a typo must
+  # not mint an atom per keystroke for the rest of the session.
+  defp cell(cells, name) do
+    address =
+      try do
+        Map.get(cells, String.to_existing_atom(name))
+      rescue
+        ArgumentError -> nil
+      end
+
+    case address do
+      nil -> {:error, "no cell named #{name}"}
+      address -> {:ok, address}
+    end
+  end
+
+  defp byte(value) do
+    case Integer.parse(value) do
+      {n, ""} when n in 0..255 -> {:ok, n}
+      {n, ""} when n in -128..-1 -> {:ok, 256 + n}
+      {_n, ""} -> {:error, "a cell holds a byte: 0..255, or a negative down to -128"}
+      _ -> {:error, "not a number: #{value}"}
+    end
   end
 
   # ── The keyboard ────────────────────────────────────────────────────────────

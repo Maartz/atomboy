@@ -39,6 +39,7 @@ defmodule Atomboy.Play.Input do
       Tab              turbo (fast forward)
       p                pause
       w                the watch — the game's cells, live (under mix atomboy.live)
+      :                the listener — type `x = 20` into the running game
       q, Escape (kitty) or Ctrl-C    quit
   """
 
@@ -59,6 +60,7 @@ defmodule Atomboy.Play.Input do
           | :turbo
           | :pause
           | :watch
+          | :listen
           | :rewind
           | {:slot, 1..9}
   @type event ::
@@ -86,6 +88,7 @@ defmodule Atomboy.Play.Input do
     9 => :turbo,
     ?p => :pause,
     ?w => :watch,
+    ?: => :listen,
     127 => :rewind,
     8 => :rewind,
     ?1 => {:slot, 1},
@@ -169,6 +172,8 @@ defmodule Atomboy.Play.Input do
   defp decode(<<c, rest::binary>>, events) when c in [?w, ?W],
     do: decode(rest, [{:key, :watch} | events])
 
+  defp decode(<<?:, rest::binary>>, events), do: decode(rest, [{:key, :listen} | events])
+
   defp decode(<<c, rest::binary>>, events) when c in [?m, ?M],
     do: decode(rest, [{:key, :menu} | events])
 
@@ -181,6 +186,107 @@ defmodule Atomboy.Play.Input do
   # Everything else on the keyboard: silence.
   defp decode(<<_, rest::binary>>, events), do: decode(rest, events)
   defp decode(<<>>, events), do: {Enum.reverse(events), ""}
+
+  # ── Text mode: the listener's prompt ────────────────────────────────────────
+
+  @doc """
+  Decodes the buffer as *text* -- for the listener's prompt, where "x" must
+  stay an x rather than become the A button. Returns `{elements, leftover}`;
+  an element is `{:char, codepoint}`, `:enter`, `:backspace` or `:cancel`.
+
+  Under the kitty protocol printable presses arrive as plain bytes -- the
+  flags this program pushes stop short of "report all keys" -- and releases
+  arrive as CSI-u sequences, which are recognised and dropped: a release is
+  not a letter. Everything a line of text has no use for (arrows, the
+  graphics answers) is swallowed the same way.
+  """
+  @spec text(binary()) :: {[{:char, byte()} | :enter | :backspace | :cancel], binary()}
+  def text(buffer), do: text(buffer, [])
+
+  defp text(<<"\e[", rest::binary>> = all, elements) do
+    case csi(rest, "") do
+      {params, final, rest} -> text(rest, text_csi(params, final) ++ elements)
+      :partial -> {Enum.reverse(elements), all}
+    end
+  end
+
+  defp text(<<"\e_", rest::binary>> = all, elements) do
+    case :binary.split(rest, "\e\\") do
+      [_payload, rest] -> text(rest, elements)
+      _ -> {Enum.reverse(elements), all}
+    end
+  end
+
+  defp text(<<?\e, o>>, elements) when o in ~c"[O_", do: {Enum.reverse(elements), <<?\e, o>>}
+  defp text(<<"\e">>, elements), do: {Enum.reverse(elements), "\e"}
+  defp text(<<?\e, ?O, rest::binary>>, elements), do: text(rest, elements)
+  defp text(<<"\e", rest::binary>>, elements), do: text(rest, [:cancel | elements])
+
+  defp text(<<c, rest::binary>>, elements) when c in [?\r, ?\n],
+    do: text(rest, [:enter | elements])
+
+  defp text(<<c, rest::binary>>, elements) when c in [0x7F, 0x08],
+    do: text(rest, [:backspace | elements])
+
+  defp text(<<0x03, rest::binary>>, elements), do: text(rest, [:cancel | elements])
+
+  defp text(<<c, rest::binary>>, elements) when c in 0x20..0x7E,
+    do: text(rest, [{:char, c} | elements])
+
+  defp text(<<_, rest::binary>>, elements), do: text(rest, elements)
+  defp text(<<>>, elements), do: {Enum.reverse(elements), ""}
+
+  # A CSI-u keystroke, read as text: presses and repeats only -- the shifted
+  # codepoint when the terminal reports one ("code:shifted;mods"), the plain
+  # one otherwise. The event number lives in the *modifier* field's colon
+  # part; `parse_event/1` cannot be reused here, it splits the whole params
+  # and a shifted code would land where the event belongs.
+  defp text_csi(<<??, _::binary>>, ?u), do: []
+
+  defp text_csi(params, ?u) do
+    [codes | mods] = String.split(params, ";")
+
+    event =
+      case mods do
+        [first | _] ->
+          case String.split(first, ":") do
+            [_, event | _] -> Integer.parse(event) |> event_number()
+            _ -> 1
+          end
+
+        [] ->
+          1
+      end
+
+    code =
+      case String.split(codes, ":") do
+        [plain, shifted | _] -> Integer.parse(shifted) |> shifted_or(plain)
+        [plain] -> Integer.parse(plain) |> shifted_or(plain)
+      end
+
+    cond do
+      event not in [1, 2] -> []
+      code == 13 -> [:enter]
+      code == 27 -> [:cancel]
+      code in [127, 8] -> [:backspace]
+      is_integer(code) and code in 0x20..0x7E -> [{:char, code}]
+      true -> []
+    end
+  end
+
+  defp text_csi(_params, _final), do: []
+
+  defp event_number({n, _}), do: n
+  defp event_number(:error), do: 1
+
+  defp shifted_or({n, _}, _plain) when n > 0, do: n
+
+  defp shifted_or(_, plain) do
+    case Integer.parse(plain) do
+      {n, _} -> n
+      :error -> nil
+    end
+  end
 
   # ── The CSI sequence, taken apart ───────────────────────────────────────────
 

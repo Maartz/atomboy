@@ -79,6 +79,51 @@ defmodule Atomboy.Play.InputTest do
     assert Input.decode("\eOx") == {[{:key, :a}], ""}
   end
 
+  test "the listener opens on the colon" do
+    assert Input.decode(":") == {[{:key, :listen}], ""}
+  end
+
+  # Text mode: the prompt's decoder, where "x" stays a letter.
+  test "text mode reads letters as letters, not as buttons" do
+    assert Input.text("x = 20") ==
+             {[
+                {:char, ?x},
+                {:char, ?\s},
+                {:char, ?=},
+                {:char, ?\s},
+                {:char, ?2},
+                {:char, ?0}
+              ], ""}
+
+    assert Input.text("q") == {[{:char, ?q}], ""}
+  end
+
+  test "text mode: enter, backspace and the cancels" do
+    assert Input.text("\r") == {[:enter], ""}
+    assert Input.text(<<0x7F>>) == {[:backspace], ""}
+    assert Input.text(<<0x03>>) == {[:cancel], ""}
+  end
+
+  test "text mode under kitty: presses become chars, releases vanish" do
+    assert Input.text("\e[120;1u") == {[{:char, ?x}], ""}
+    assert Input.text("\e[120;1:2u") == {[{:char, ?x}], ""}
+    assert Input.text("\e[120;1:3u") == {[], ""}
+    assert Input.text("\e[13;1u") == {[:enter], ""}
+    assert Input.text("\e[27;1u") == {[:cancel], ""}
+    assert Input.text("\e[127;1u") == {[:backspace], ""}
+  end
+
+  test "text mode takes the shifted codepoint when the terminal reports one" do
+    # ";" shifted into ":" -- "code:shifted;mods".
+    assert Input.text("\e[59:58;2u") == {[{:char, ?:}], ""}
+  end
+
+  test "text mode swallows what a line of text cannot use" do
+    assert Input.text("\e[A") == {[], ""}
+    assert Input.text("\e[?11u") == {[], ""}
+    assert Input.text("a\e[") == {[{:char, ?a}], "\e["}
+  end
+
   test "held keys become register lines, active at zero" do
     assert Input.dpad_lines([]) == 0x0F
     assert Input.dpad_lines([:right]) == 0x0E
