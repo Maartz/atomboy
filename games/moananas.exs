@@ -8,16 +8,17 @@
 # The title is the concept art — the whole of it, deduplicated into the tile
 # budget by `screen` — and Start fades to black before the beach fades up.
 # The beach is a sideways-scrolling run: 256 pixels of island, the camera
-# chasing, moai statues planted in the sand that cost a heart to touch,
-# pineapples floating over the path and the planks, and the flag at the far
-# end of the island. Three hearts; the flag is the game.
+# chasing, totem idols planted in the sand that cost a heart to touch, a
+# slime patrolling the stretch between them, pineapples floating over the
+# path and the planks, and the chest and flag at the far end of the island.
+# Three hearts; the flag is the game.
 #
-# Every tile it draws with is built by `art/island_art.py` — the sky and the
-# sea drawn there, the rock and the log and the statue taken from the packs
-# and banded down to four shades, the hero the Eris Esra template with
-# Moananas's hair and glasses painted on, and `art/title_art.py` imports the
-# cover. Of the cartridge's two hundred and twelve tiles the cover takes a
-# hundred and forty-eight and the beach sixty-one.
+# Every tile it draws with is built by `art/island_art.py`. The sand, the
+# plank, the boulder, the totems, the chest, the skull and the slime are
+# SGQ_Dungeon's pixels mapped colour-for-shade — the pack is native Game Boy
+# art and arrives untouched — while the sky, the sea and the palm are drawn
+# there in flat fields, and `art/title_art.py` imports the cover. The hero
+# is the Eris Esra template with Moananas's hair and glasses painted on.
 #
 # Both scripts are written against one fact about the panel: its shade 0 and
 # shade 1 are the same green. See the header of `art/island_art.py`.
@@ -43,7 +44,8 @@ defmodule Moananas do
           :sea_b,
           :surf_a,
           :surf_b,
-          :dune,
+          :sand_a,
+          :sand_b,
           :beach_sand,
           :sand_deep,
           :plank,
@@ -59,15 +61,24 @@ defmodule Moananas do
           :rock_tr,
           :rock_bl,
           :rock_br,
-          :bush_tl,
-          :bush_tr,
-          :bush_bl,
-          :bush_br,
-          :wood_l,
-          :wood_m,
-          :wood_r,
-          :moai_hl,
-          :moai_hr,
+          :plant_tl,
+          :plant_tr,
+          :plant_bl,
+          :plant_br,
+          :skull_tl,
+          :skull_tr,
+          :skull_bl,
+          :skull_br,
+          :chest_tl,
+          :chest_tr,
+          :chest_bl,
+          :chest_br,
+          :totem_a,
+          :totem_b,
+          :totem_c,
+          :totem_d,
+          :totem_e,
+          :totem_f,
           :moai_base,
           :moai_br,
           :flag_top,
@@ -86,25 +97,37 @@ defmodule Moananas do
           :m3_tl,
           :m3_tr,
           :m3_bl,
-          :m3_br
+          :m3_br,
+          :sl1_tl,
+          :sl1_tr,
+          :sl1_bl,
+          :sl1_br,
+          :sl2_tl,
+          :sl2_tr,
+          :sl2_bl,
+          :sl2_br
         ]
 
   # The whole drawing, one screen: 360 cells folded into the tile budget by
-  # likeness — the paper repeats, the portrait does not. Twenty is as sharp as
-  # the cartridge affords: 148 tiles for the cover and 61 for the beach is 209
-  # of the 212 there are. Import it flat, as `art/title_art.py` does, and it
-  # folds far better than it did dithered — a flat fill is the same tile
-  # wherever it lands.
-  screen(:cover, from: "art/moananas_title.png", tolerance: 20)
+  # likeness — the paper repeats, the portrait does not. Twenty-two is as
+  # sharp as the cartridge affords: 132 tiles for the cover and 79 for the
+  # beach is 211 of the 212 there are. The folding only works because
+  # `art/title_art.py` hands over *clean* paper — a three-pixel fleck is
+  # within tolerance of blank, so before the despeckle every elected tile
+  # stamped its fleck across the page.
+  screen(:cover, from: "art/moananas_title.png", tolerance: 22)
 
   # ── The island ──────────────────────────────────────────────────────────────
   #
   # One room, 32 by 18: 256 pixels of beach under a horizontal camera.
   #
-  # The composition, top to bottom, is the whole of why it reads: white sky
-  # with a sun and clouds, a volcano out on the horizon, the sea in mid shade,
-  # the surf, then the beach going back in light shade, and the floor in front
-  # in mid shade under a line of ink. Four bands, four values, near to far.
+  # The composition, top to bottom: flat light sky with a sun and clouds, a
+  # volcano on the horizon, flat mid sea with staggered glints, the surf
+  # line, then the beach — the same flat light as the sky, the dark sea
+  # between them keeping them apart, with the artist's shell-marks scattered
+  # through it — and the floor's dark face under an ink crest. Flat fields,
+  # sparse specks, ink silhouettes; the one dither left is the strip of wet
+  # sand inside the surf tiles.
   #
   # Only two tiles are ever asked a question: `:beach_sand`, which is the
   # floor, and `:plank`. Everything else is scenery the hero runs in front of
@@ -119,8 +142,8 @@ defmodule Moananas do
     for row <- 0..17 do
       case row do
         7 -> List.duplicate(?[, 32)
-        8 -> List.duplicate(?{, 32)
-        9 -> List.duplicate(?}, 32)
+        8 -> banded.(?{, ?})
+        9 -> banded.(?}, ?{)
         10 -> banded.(?~, ?`)
         r when r in 11..15 -> List.duplicate(?., 32)
         16 -> List.duplicate(?S, 32)
@@ -141,8 +164,31 @@ defmodule Moananas do
   end
 
   # The planks sit 24 pixels over the sand — inside the jump's 25 — and every
-  # standing thing keeps out of their columns.
+  # standing thing keeps out of their columns. The shell-marks go down first,
+  # so anything standing on one simply covers it.
   @beach paint.(ground, [
+           # the shell-marks in the sand
+           {2, 11, ";"},
+           {9, 11, ","},
+           {17, 11, ","},
+           {24, 11, ";"},
+           {29, 11, ","},
+           {7, 12, ";"},
+           {16, 12, ","},
+           {23, 12, ";"},
+           {31, 12, ";"},
+           {2, 13, ";"},
+           {11, 13, ","},
+           {20, 13, ";"},
+           {26, 13, ";"},
+           {1, 14, ";"},
+           {15, 14, ","},
+           {23, 14, ","},
+           {29, 14, ";"},
+           {3, 15, ";"},
+           {14, 15, ","},
+           {24, 15, ";"},
+           {31, 15, ","},
            # the sky
            {25, 0, "01"},
            {25, 1, "23"},
@@ -167,25 +213,35 @@ defmodule Moananas do
            {8, 13, "==="},
            {15, 13, "==="},
            {22, 13, "==="},
-           # what stands in the sand
+           # what stands in the sand: the boulder, the skull under the
+           # boardwalk, the two totems, the plant, the chest, the flag
            {6, 14, "ab"},
            {6, 15, "AB"},
-           {21, 14, "no"},
-           {21, 15, "NO"},
-           {9, 15, "wxy"},
+           {9, 14, "wx"},
+           {9, 15, "WX"},
+           {12, 12, "gh"},
+           {12, 13, "IJ"},
            {12, 14, "mM"},
            {12, 15, "zZ"},
+           {18, 12, "gh"},
+           {18, 13, "IJ"},
            {18, 14, "mM"},
            {18, 15, "zZ"},
-           {25, 14, "mM"},
-           {25, 15, "zZ"},
+           {21, 14, "no"},
+           {21, 15, "NO"},
+           {25, 14, "<>"},
+           {25, 15, "()"},
            {30, 14, "F"},
            {30, 15, "G"}
          ])
          |> Enum.map_join("\n", &List.to_string/1)
 
+  # `.` is the open sand and it maps to `:sky` on purpose: both are the same
+  # flat light tile, and naming one tile twice would spend a budget slot on
+  # a duplicate bitmap.
   @tiles %{
     ?\s => :sky,
+    ?. => :sky,
     ?0 => :sun_tl,
     ?1 => :sun_tr,
     ?2 => :sun_bl,
@@ -202,7 +258,8 @@ defmodule Moananas do
     ?} => :sea_b,
     ?~ => :surf_a,
     ?` => :surf_b,
-    ?. => :dune,
+    ?, => :sand_a,
+    ?; => :sand_b,
     ?S => :beach_sand,
     ?D => :sand_deep,
     ?= => :plank,
@@ -218,17 +275,26 @@ defmodule Moananas do
     ?b => :rock_tr,
     ?A => :rock_bl,
     ?B => :rock_br,
-    ?n => :bush_tl,
-    ?o => :bush_tr,
-    ?N => :bush_bl,
-    ?O => :bush_br,
-    ?w => :wood_l,
-    ?x => :wood_m,
-    ?y => :wood_r,
-    ?m => :moai_hl,
-    ?M => :moai_hr,
+    ?n => :plant_tl,
+    ?o => :plant_tr,
+    ?N => :plant_bl,
+    ?O => :plant_br,
+    ?w => :skull_tl,
+    ?x => :skull_tr,
+    ?W => :skull_bl,
+    ?X => :skull_br,
+    ?g => :totem_a,
+    ?h => :totem_b,
+    ?I => :totem_c,
+    ?J => :totem_d,
+    ?m => :totem_e,
+    ?M => :totem_f,
     ?z => :moai_base,
     ?Z => :moai_br,
+    ?< => :chest_tl,
+    ?> => :chest_tr,
+    ?( => :chest_bl,
+    ?) => :chest_br,
     ?F => :flag_top,
     ?G => :flag_base
   }
@@ -459,7 +525,7 @@ defmodule Moananas do
              touching?(:plank, x, y16) or touching?(:plank, x15, y16),
            do: grounded = 1
 
-        # ── The moai: passable, and they cost. The blink is the mercy. ──
+        # ── The totems: passable, and they cost. The blink is the mercy. ──
         hidden = 0
 
         if blink > 0 do
@@ -468,11 +534,11 @@ defmodule Moananas do
           if flick < 4, do: hidden = 1
         end
 
-        # The statue is two tiles wide now, so the question is asked of its
-        # foot rather than its face: both bottom tiles, at both of the hero's
-        # edges, at the height his feet are at. Four questions, the same four
-        # the frame could always afford — and a jump that grazes the head is
-        # let through, which is the forgiving way round.
+        # The totem is four tiles tall, but the question is asked only of its
+        # feet — the two bottom tiles, at both of the hero's edges, at the
+        # height his own feet are at. Four questions, the same four the frame
+        # could always afford — and a jump that grazes the wings is let
+        # through, which is the forgiving way round.
         if blink == 0 do
           if touching?(:moai_base, x, y15) or touching?(:moai_base, x15, y15) or
                touching?(:moai_br, x, y15) or touching?(:moai_br, x15, y15) do
@@ -625,6 +691,80 @@ defmodule Moananas do
   # position and a `taken` flag; the sprite is the position minus the camera,
   # parked once it leaves the glass or the ground. `slot` is the hero's
   # scratch cell: a pooled name cannot number a sprite.
+  # ── The slime ───────────────────────────────────────────────────────────────
+  #
+  # SGQ's slime, patrolling the open stretch of sand between the two totems
+  # at half the hero's walking pace, squashing against the ground every
+  # half-second. It shares the hero's `blink` mercy, so a totem graze and a
+  # slime touch draw from the same ninety frames of grace, and it asks no
+  # `touching?` at all — its world is the same box test the pineapples use.
+  defactor :slime do
+    variables swx: 0, sdir: 0, sgo: 0, sstep: 0, sbounce: 0, spx: 0, spy: 0, spx8: 0, spy8: 0
+
+    every_frame do
+      if sgo == 0 do
+        sgo = 1
+        swx = 112
+      end
+
+      if playing == 0 do
+        sprite(21, x: 0, y: 200, tile: :sl1_tl)
+        sprite(22, x: 0, y: 200, tile: :sl1_tr)
+        sprite(23, x: 0, y: 200, tile: :sl1_bl)
+        sprite(24, x: 0, y: 200, tile: :sl1_br)
+      else
+        sstep = sstep + 1
+
+        if sstep == 2 do
+          sstep = 0
+
+          if sdir == 0 do
+            swx = swx + 1
+            if swx > 127, do: sdir = 1
+          else
+            swx = swx - 1
+            if swx < 113, do: sdir = 0
+          end
+        end
+
+        sbounce = sbounce + 1
+        if sbounce == 32, do: sbounce = 0
+
+        if blink == 0 do
+          if swx > hxm8 and swx < hxp16 and yp16 > 115 do
+            hearts = hearts - 1
+            blink = 90
+            noise(:boom)
+          end
+        end
+
+        spx = swx - cx
+        spy = 112
+        spx8 = spx + 8
+        spy8 = spy + 8
+
+        if spx < 153 do
+          if sbounce < 16 do
+            sprite(21, x: spx, y: spy, tile: :sl1_tl)
+            sprite(22, x: spx8, y: spy, tile: :sl1_tr)
+            sprite(23, x: spx, y: spy8, tile: :sl1_bl)
+            sprite(24, x: spx8, y: spy8, tile: :sl1_br)
+          else
+            sprite(21, x: spx, y: spy, tile: :sl2_tl)
+            sprite(22, x: spx8, y: spy, tile: :sl2_tr)
+            sprite(23, x: spx, y: spy8, tile: :sl2_bl)
+            sprite(24, x: spx8, y: spy8, tile: :sl2_br)
+          end
+        else
+          sprite(21, x: 0, y: 200, tile: :sl1_tl)
+          sprite(22, x: 0, y: 200, tile: :sl1_tr)
+          sprite(23, x: 0, y: 200, tile: :sl1_bl)
+          sprite(24, x: 0, y: 200, tile: :sl1_br)
+        end
+      end
+    end
+  end
+
   defactor :pineapple, count: 6 do
     variables wx: 0, wy: 0, taken: 0, seeded: 0, px: 0, py8: 0
 

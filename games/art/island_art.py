@@ -1,30 +1,32 @@
 """Moananas Island — the cartridge's whole tile sheet, composed here.
 
 `tiles from:` reads one PNG per cartridge, so every tile the beach needs is
-built in this file and laid end to end into `moananas_sheet.png`. Three kinds
-of tile, three ways of making one:
+built in this file and laid end to end into `moananas_sheet.png`. Two kinds
+of tile now, and the split is the lesson of three reworks:
 
-- **Drawn here.** Sky, sea, sand, the plank, the palm, the flag: things that
-  have to tile seamlessly against their own neighbours, where a pack asset
-  cropped to 8x8 would show a seam. They are written as ASCII, one character
-  a pixel: `.` white, `-` light, `+` mid, `#` ink.
+- **Taken from SGQ_Dungeon, pixel for pixel.** The pack is *native* Game Boy
+  art: every sheet is exactly four flat colours — #D4D29B, #78A46A, #5E8549,
+  #584422 — with the artist's own one-pixel ink outlines already in place.
+  Such art is not "adapted"; it is *mapped*, each colour to a shade, and
+  arrives untouched. (The old pipeline levelled and re-outlined it as if it
+  were a photograph, which is how gorgeous sprites came out as mush.) The
+  sand, the plank, the boulder, the totem, the chest, the skull, the plant
+  and the slime are all the artist's pixels.
 
-- **Taken from a pack.** The rock, the bush, the driftwood, the moai: organic
-  shapes nobody draws better by hand at this size. Each is cropped by its own
-  bounding box (see `objects.py` for how they were found), resized, then
-  banded — and banding is the whole trick. A pack asset is full colour; the
-  console has four shades. Levelling each object against *its own* darkest and
-  lightest pixel keeps its internal contrast, and forcing every pixel on the
-  silhouette's rim to ink gives it the black outline that makes a Game Boy
-  sprite read at all.
+- **Drawn here.** Sky, sun, sea, surf, clouds, the far island, the palm, the
+  flag: the tropical things a dungeon pack does not have. They are ASCII,
+  one character a pixel — `.` light, `-` shade 1, `+` mid, `#` ink — and
+  they are *flat*. The panel's shade 0 and shade 1 are the same green
+  (brightness 158 and 144 of 255), so structure is light against dark; and
+  the ordered dither, which an earlier pass spread across every field until
+  the screen was one texture, is demoted to what the hardware's games used
+  it for: a strip of wet sand where the surf ends, nothing else. Flat
+  fields, sparse specks, ink silhouettes — the way the console's own
+  beaches were drawn.
 
-- **Dressed.** The hero is Eris Esra's 16x16 template — a clean cream body
-  with an ink outline, which bands perfectly — with Moananas painted onto it:
-  the long hair, the dark glasses, the shirt. The template gives the
-  silhouette and the animation; the overlay gives the face.
-
-Sources, all licensed for use: Eris Esra's Character Template 4, PineTrees
-(Decorations) by toadzillart-style packs, SGQ_Dungeon by superdark, Moai.png.
+The hero is Eris Esra's 16x16 template with Moananas painted on: the hair,
+the glasses, the shirt. Sources, all licensed: SGQ_Dungeon by superdark,
+Eris Esra's Character Template 4.
 
 Run from `games/art/`:
 
@@ -36,33 +38,7 @@ It writes `moananas_sheet.png` and prints the `names:` list to paste into
 
 import struct, subprocess, zlib
 
-# ── Reading and banding ────────────────────────────────────────────────────
-
 SHADES = ".-+#"
-
-# ── What the panel actually shows ──────────────────────────────────────────
-#
-# The DMG's four shades are #9BBC0F, #8BAC0F, #306230 and #0F380F. By
-# brightness that is 158, 144, 77 and 39 — **shade 0 and shade 1 are fourteen
-# apart out of two hundred and fifty-five.** They are the same green. The
-# panel does not have four values; it has two lights that cannot be told
-# apart and two darks that can.
-#
-# So nothing here may carry a shape on the difference between 0 and 1. The
-# structure is light (0) against dark (2, 3), and every value in between is
-# made the way the hardware's own games made it: by an ordered dither, two
-# shades interleaved every other pixel. Two of them do all the work —
-#
-#     %   beach: 2 and 0    (mean brightness 117 — between sky and sea)
-#     &   floor: 3 and 2    (mean 58 — the darkest mass, nearest the eye)
-#
-# Both have a period of two, and a tile is eight wide, so they carry across
-# tile edges without a seam. The one exception is a sprite, where shade 0 is
-# the console's transparent colour and cannot be used as a light at all —
-# there, and only there, shade 1 is the light.
-BEACH = lambda x, y: 2 if (x + y) % 2 == 0 else 0
-FLOOR = lambda x, y: 3 if (x + y) % 2 == 0 else 2
-PATTERNS = {"%": BEACH, "&": FLOOR}
 
 
 def read_rgba(path):
@@ -90,85 +66,45 @@ def read_rgba(path):
     return w, h, px
 
 
+# ── SGQ_Dungeon, mapped ────────────────────────────────────────────────────
+#
+# The pack's four colours, brightest to darkest. A background object maps
+# cream to the light and both greens to the mid — the panel cannot tell two
+# mid-greens apart any better than it tells its own shades 0 and 1 — and a
+# sprite maps cream to shade 1, the only light a sprite has, shade 0 being
+# its transparency.
+
+SGQ = "SGQ_Dungeon/"
+SGQ_INK = {(212, 210, 155): ".", (120, 164, 106): "-", (94, 133, 73): "+", (88, 68, 34): "#"}
+
+BG = {".": 0, "-": 2, "+": 3, "#": 3}
+SPRITE = {".": 1, "-": 2, "+": 3, "#": 3}
+
+
+def sgq(src, x0, y0, w, h, cmap=BG, fill=0):
+    """A window of an SGQ sheet, each colour to its shade, nothing else done."""
+    sw, sh, px = read_rgba(SGQ + src)
+    grid = []
+    for y in range(h):
+        row = []
+        for x in range(w):
+            r, g, b, a = px[(y0 + y) * sw + x0 + x]
+            row.append(fill if a < 128 else cmap[SGQ_INK[(r, g, b)]])
+        grid.append(row)
+    return grid
+
+
 def luma(r, g, b):
     return (299 * r + 587 * g + 114 * b) // 1000
 
 
-def band(w, h, px, outline=True, cuts=(0.34, 0.70), fill=0, light=1):
-    """Auto-levelled three-ink banding, the silhouette's rim forced to ink.
-
-    Levelling against the object's own range rather than absolute brightness
-    is what keeps a pale rock from flattening into one shade; the rim pass is
-    what keeps it from dissolving into the sky behind it.
-
-    `fill` is what transparency becomes — a shade, or a function of x and y
-    for a patterned ground. Zero for a sprite, where shade 0 is the console's
-    transparent colour. For a background object it must be whatever the thing
-    stands on — the background layer has no transparency, so a rock cut out
-    on 0 arrives in the game as a rock in a white box.
-
-    `light` is what the brightest band becomes: 0 for a background object,
-    1 for a sprite, which cannot use 0 for anything but transparency.
-    """
-    lums = [luma(*p[:3]) for p in px if p[3] >= 128]
-    ground = fill if callable(fill) else (lambda _x, _y: fill)
-    if not lums:
-        return [ground(i % w, i // w) for i in range(w * h)]
-    lo, hi = min(lums), max(lums)
-    span = max(1, hi - lo)
-
-    out = []
-    for i, p in enumerate(px):
-        if p[3] < 128:
-            out.append(ground(i % w, i // w))
-            continue
-        t = (luma(*p[:3]) - lo) / span
-        out.append(3 if t < cuts[0] else 2 if t < cuts[1] else light)
-
-    if outline:
-        for i, p in enumerate(px):
-            if p[3] < 128:
-                continue
-            x, y = i % w, i // w
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                nx, ny = x + dx, y + dy
-                if not (0 <= nx < w and 0 <= ny < h) or px[ny * w + nx][3] < 128:
-                    out[i] = 3
-                    break
-    return out
-
-
-def asset(src, crop=None, size=None, outline=True, cuts=(0.34, 0.70), fill=0, light=1):
-    """A pack object, cropped and banded into a grid of shades."""
-    args = ["magick", src]
-    if crop:
-        args += ["-crop", crop, "+repage"]
-    if size:
-        args += ["-resize", size]
-    args += ["/tmp/island_stage.png"]
-    subprocess.run(args, check=True)
-    w, h, px = read_rgba("/tmp/island_stage.png")
-    flat = band(w, h, px, outline, cuts, fill, light)
-    return [flat[y * w : (y + 1) * w] for y in range(h)]
-
-
 def drawn(*rows):
-    """An ASCII block into a grid of shades.
-
-    `.` `-` `+` `#` are the four shades; `%` and `&` are the two dithers,
-    resolved against the pixel's own position so a row written all `%` comes
-    out as the beach's weave and joins its neighbours' without a seam.
-    """
+    """An ASCII block into a grid of shades: `.` `-` `+` `#`."""
     width = len(rows[0])
     grid = []
     for y, row in enumerate(rows):
         assert len(row) == width, f"row {y} is {len(row)} wide, not {width}"
-        grid.append(
-            [
-                PATTERNS[c](x, y) if c in PATTERNS else SHADES.index(c)
-                for x, c in enumerate(row)
-            ]
-        )
+        grid.append([SHADES.index(c) for c in row])
     return grid
 
 
@@ -188,7 +124,6 @@ def cut(grid, name):
 SKY = drawn(*["." * 8] * 8)
 
 # A ring, not a disc: on a plain sky the sun is what the light leaves out.
-# Drawn in shade 2 — a ring in shade 1 is a ring in the colour of the sky.
 SUN = drawn(
     ".....++++.......",
     "...++....++.....",
@@ -208,15 +143,14 @@ SUN = drawn(
     ".....++++.......",
 )
 
-# Filled with the weave, not with shade 1: a shade-1 cloud on a shade-0 sky
-# is a cloud painted in the colour of the sky, which is what the first pass
-# shipped and what the panel refused to show.
+# An outline and nothing inside it: on a light sky a cloud is a line the
+# light stops at, which is how Super Mario Land drew them.
 CLOUD = drawn(
-    "......++++..............",
-    "....++%%%%++...++++.....",
-    "..++%%%%%%%%+++%%%%++...",
-    ".+%%%%%%%%%%%%%%%%%%%%+.",
-    "+%%%%%%%%%%%%%%%%%%%%%%+",
+    "......+++++..++++.......",
+    "....++.....++....++.....",
+    "..++...............++...",
+    ".+....................+.",
+    "+......................+",
     ".++++++++++++++++++++++.",
     "........................",
     "........................",
@@ -233,37 +167,31 @@ GULL = drawn(
     "........",
 )
 
-# The island out at sea: a volcano cone, its lee side in shadow, sitting on
-# the horizon line the sea's top tile draws.
+# The island out at sea: a flat dark cone on the horizon, no weave.
 ISLE = drawn(
-    "..........+++...........",
-    "........++%%%++.........",
-    "......++%%%%%%%++.......",
-    "....++%%%%%%%%%%%++.....",
-    "..++%%%%%%%%%%%%%%%++...",
-    ".+%%%%%%%%%%%%%%%%%%%+..",
-    "+%%%%%%%%%%%%%%%%%%%%%+.",
-    "++++++++++++++++++++++++",
+    "..........##............",
+    "........##++##..........",
+    "......##++++++##........",
+    "....##++++++++++##......",
+    "..##++++++++++++++##....",
+    ".#++++++++++++++++++#...",
+    "#++++++++++++++++++++#..",
+    "########################",
 )
 
 # ── The sea ────────────────────────────────────────────────────────────────
 #
-# The texture runs the whole width of the tile, and the variation is between
-# the *rows*, not along them. A mark that stops inside a tile repeats every
-# eight pixels in both directions, and what the eye then reads is the grid,
-# not the water. A line that crosses the whole tile joins its neighbours into
-# one streak thirty-two tiles long, and streaks lying flat, at three different
-# heights, are what water looks like from a beach.
+# A flat mid field under an ink horizon, and the glints are short: two or
+# three pixels of light, staggered so no two tiles put them in the same
+# place. The full-width streak was tried and it is not water, it is a
+# barcode — a line that crosses every tile joins into a 256-pixel stripe.
 
-# The horizon is the tile's own top edge, so the far island can stand on it
-# rather than float three pixels above it. The glints are shade 0 — a shade-1
-# glint on shade-2 water is a glint nobody sees.
 SEA_CREST = drawn(
     "########",
     "++++++++",
     "++++++++",
-    "........",
     "++++++++",
+    "+..+++++",
     "++++++++",
     "++++++++",
     "++++++++",
@@ -271,12 +199,12 @@ SEA_CREST = drawn(
 
 SEA_A = drawn(
     "++++++++",
-    "++++++++",
-    "........",
-    "++++++++",
+    "++...+++",
     "++++++++",
     "++++++++",
-    "........",
+    "++++++++",
+    "+++++..+",
+    "++++++++",
     "++++++++",
 )
 
@@ -284,135 +212,130 @@ SEA_B = drawn(
     "++++++++",
     "++++++++",
     "++++++++",
-    "........",
+    "...+++++",
     "++++++++",
     "++++++++",
-    "++++++++",
+    "++++..++",
     "++++++++",
 )
 
-# Where the water ends: two tiles of foam so the shoreline breaks up rather
-# than ruling a straight line across the whole island.
+# Where the water ends: foam over the ink scallop, and one strip of woven
+# wet sand under it — the single place the dither still lives, doing the
+# job the hardware's games gave it: a transition, not a fill.
 SURF_A = drawn(
     "++++++++",
-    "++++++++",
-    "++.+++.+",
+    "++.++++.",
+    ".+++..++",
+    "##.####.",
+    "+.+.+.+.",
     "........",
-    "%%%%%%%%",
-    "%%%%%%%%",
-    "%%%%%%%%",
-    "%%%%%%%%",
+    "........",
+    "........",
 )
 
 SURF_B = drawn(
     "++++++++",
-    "+++++++.",
-    "+.+++.++",
+    ".++++.++",
+    "++..+++.",
+    ".####.##",
+    ".+.+.+.+",
     "........",
-    "%%%%%%%%",
-    "%%%%%%%%",
-    "%%%%%%%%",
-    "%%%%%%%%",
+    "........",
+    "........",
 )
 
-# The beach going back. Flat shade 1 was the whole disaster: it is the colour
-# of the sky, so the sand and the air above it were one field and the hero
-# stood in the middle of nothing. The weave puts it between them.
-DUNE = drawn(*["%" * 8] * 8)
-
-# ── The floor ──────────────────────────────────────────────────────────────
+# ── The beach ──────────────────────────────────────────────────────────────
 #
-# One tile the whole island walks on, so `touching?` asks one question. The
-# ink line on top and the bright line under it are the whole of the depth:
-# the sand's crest catches the light, the body of it does not.
+# Flat light, the same tile as the sky — the dark sea between them is what
+# keeps them apart — with the artist's own shell-marks scattered through it.
+# The two speck tiles are cut straight out of SGQ's sandy ground biome.
 
+SAND_A = sgq("grounds_and_walls/grounds.png", 72, 214, 8, 8)
+SAND_B = sgq("grounds_and_walls/grounds.png", 94, 212, 8, 8)
+
+# The front face under the hero's feet: an ink crest, the light it catches,
+# and a dark body with its own sparse marks — a block of ground the way
+# Super Mario Land ruled one, not a checkerboard.
 SAND = drawn(
     "########",
     "........",
-    "&&&&&&&&",
-    "&&&&&&&&",
-    "&&&&&&&&",
-    "&&&&&&&&",
-    "&&&&&&&&",
-    "&&&&&&&&",
+    "++++++++",
+    "++++++++",
+    "+++..+++",
+    "++++++++",
+    "++++++++",
+    "++++++++",
 )
 
-SAND_DEEP = drawn(*["&" * 8] * 8)
+SAND_DEEP = drawn(
+    "++++++++",
+    "++##++++",
+    "++++++++",
+    "++++++#+",
+    "+#++++++",
+    "++++++++",
+    "++++#+++",
+    "++++++++",
+)
 
 # A board, landed on from above: its top edge is the tile's top edge, which
-# is where `nrow * 8 - 16` puts the hero's feet.
+# is where `nrow * 8 - 16` puts the hero's feet. The ink lines run the full
+# width, so three tiles in a row join into one continuous board — a slice of
+# the pack's beam was tried first, and its end-grain repeated every eight
+# pixels into a fence. Light body, two grain ticks, nothing else.
 PLANK = drawn(
     "########",
-    ".+.+.+.+",
-    "+.++.+.+",
-    "+.+.+..+",
+    "........",
+    ".++.....",
+    ".....++.",
+    "........",
     "########",
-    "%%%%%%%%",
-    "%%%%%%%%",
-    "%%%%%%%%",
+    "........",
+    "........",
 )
 
 # ── The palm ───────────────────────────────────────────────────────────────
+#
+# Silhouette first: five drooping fronds in chunky ink arcs, the light
+# notched along their tops. Two tiles deep, and it must read from across
+# the room — the shrunken-ellipse trick read as a splat and is gone.
 
-# A canopy, not a diagram of fronds. Eight pixels of height is not enough to
-# draw seven separate leaves — drawn one by one they come out as a scribble of
-# single-pixel lines. Drawn as one mass with the light notched out of its edge,
-# it reads as a palm from across the room.
-def palm_crown():
-    """Five fronds, drawn four times too big and then shrunk onto the tiles.
-
-    Drawn straight at 24x16 a frond is a one-pixel line, and five of them are
-    a scribble. Drawn at 96x64 as five outlined lobes fanning off one point
-    and then reduced, the shrink itself does the shading: what was a black
-    stroke against a pale fill becomes ink, mid and light, and the palm
-    arrives with the roundness nobody can place by hand at this size. The rim
-    pass is off here — at this scale every pixel is near an edge, and forcing
-    the rim would flatten the whole canopy back into one black mass.
-    """
-    fronds = [(-160, 32), (-122, 30), (-90, 28), (-58, 30), (-20, 32)]
-    args = [
-        "magick",
-        "-size",
-        "96x64",
-        "xc:none",
-        "-fill",
-        "#b8b8b8",
-        "-stroke",
-        "#101010",
-        "-strokewidth",
-        "5",
-    ]
-    for angle, reach in fronds:
-        args += [
-            "-draw",
-            f"translate 48,50 rotate {angle} ellipse {reach},0 {reach},10 0,360",
-        ]
-    args += ["/tmp/island_palm.png"]
-    subprocess.run(args, check=True)
-    return asset(
-        "/tmp/island_palm.png", None, "24x16!", outline=False, fill=BEACH, light=0
-    )
-
-
-PALM_CROWN = palm_crown()
+PALM_CROWN = drawn(
+    "........######..........",
+    "......##++++++##........",
+    "....##++##..##++##......",
+    "...#++##..##..##++#.....",
+    "..#++#..##++##..#++#....",
+    ".#++#..#+#++#+#..#++#...",
+    ".#+#..#+##++##+#..#+#...",
+    "#++#..##.#++#.##..#++#..",
+    "#+#......#++#......#+#..",
+    "##.......#++#.......##..",
+    "..........#++#..........",
+    "..........#++#..........",
+    "..........#++#..........",
+    "..........#++#..........",
+    "..........#++#..........",
+    "..........#++#..........",
+)
 
 PALM_TRUNK = drawn(
-    "%%#..#%%",
-    "%%#.##%%",
-    "%%#..#%%",
-    "%%##.#%%",
-    "%%#..#%%",
-    "%%#.##%%",
-    "%%#..#%%",
-    "%%##.#%%",
+    "..#..#..",
+    "..#.##..",
+    "..#..#..",
+    "..##.#..",
+    "..#..#..",
+    "..#.##..",
+    "..#..#..",
+    "..##.#..",
 )
 
 PALM_BASE = drawn(
-    "%%#..#%%",
-    "%%#..#%%",
-    "%#..#.#%",
-    "%#.#..#%",
-    "%#....#%",
+    "..#..#..",
+    "..#..#..",
+    ".#..#.#.",
+    ".#.#..#.",
+    ".#....#.",
     "#..##..#",
     "#......#",
     "########",
@@ -421,32 +344,42 @@ PALM_BASE = drawn(
 # ── The flag ───────────────────────────────────────────────────────────────
 
 FLAG_TOP = drawn(
-    "%##%%%%%",
-    "%##...#%",
-    "%##....#",
-    "%##...#%",
-    "%##..#%%",
-    "%##%%%%%",
-    "%##%%%%%",
-    "%##%%%%%",
+    ".##.....",
+    ".##++...",
+    ".##++++.",
+    ".##+++++",
+    ".##++++.",
+    ".##++...",
+    ".##.....",
+    ".##.....",
 )
 
 FLAG_BASE = drawn(
-    "%##%%%%%",
-    "%##%%%%%",
-    "%##%%%%%",
-    "%##%%%%%",
-    "%##%%%%%",
-    "%##%%%%%",
-    "##..##%%",
+    ".##.....",
+    ".##.....",
+    ".##.....",
+    ".##.....",
+    ".##.....",
+    ".##.....",
+    "##..##..",
     "########",
 )
 
+# ── The props, straight from the pack ──────────────────────────────────────
+
+ROCK = sgq("props/props.png", 0, 64, 16, 16)
+PLANT = sgq("props/props.png", 32, 32, 16, 16)
+SKULL = sgq("props/props.png", 0, 48, 16, 16)
+CHEST = sgq("props/animated_props.png", 64, 0, 16, 16)
+
+# The totem: the pack's gargoyle idol, sixteen by thirty-two, the beach's
+# hazard. Dark wings and an ink outline against light sand — nobody will
+# mistake it for a pineapple again. Its bottom two tiles keep the old
+# `moai_base`/`moai_br` names, which is all the collision ever asks about.
+TOTEM = sgq("props/animated_props.png", 112, 16, 16, 32)
+
 # ── The pineapple and the heart ────────────────────────────────────────────
 
-# A light body with the crosshatch reduced to a few diamonds. Drawn as a full
-# hatch it was half ink, and half ink over the sea is a dark thing on dark
-# water — the fruit vanished exactly where the game floats it highest.
 PINEAPPLE = drawn(
     "...##...",
     "..#-##..",
@@ -477,12 +410,21 @@ HEART = drawn(
     "........",
 )
 
+# ── The slime ──────────────────────────────────────────────────────────────
+#
+# The pack's slime, two frames: round, and squashed against the sand. A
+# sprite's shade 0 is its transparency, so the cream speckles ride at
+# shade 1 on a mid body under the artist's own outline.
+
+SLIME_A = sgq("characters/enemies/slime.png", 0, 0, 16, 16, cmap=SPRITE)
+SLIME_B = sgq("characters/enemies/slime.png", 16, 0, 16, 16, cmap=SPRITE)
+
 # ── The hero ───────────────────────────────────────────────────────────────
 #
 # The template banded, then Moananas painted on: hair over the crown and down
-# the back, a bar of ink where the glasses sit, the goatee, and the shirt.
-# The spans are written in the frame's own coordinates; the walk's odd frames
-# ride a pixel higher, so they take the same spans shifted up by one.
+# the back, a bar of ink where the glasses sit, and the shirt. The spans are
+# written in the frame's own coordinates; the walk's odd frames ride a pixel
+# higher, so they take the same spans shifted up by one.
 
 HAIR = [
     (0, 4, 11),
@@ -517,10 +459,8 @@ def dress(grid, dy=0, head=9):
                 if out[y][x] != 0:
                     out[y][x] = 3
 
-    # Shorts, and nothing else darkened. The body stays the template's light
-    # shade: he stands on a beach woven half out of shade 2, and a shade-2
-    # shirt on it is a hero the ground swallows. Light body, ink outline —
-    # which is what every character on this console was.
+    # Shorts, and nothing else darkened: light body, ink outline, which is
+    # what every character on this console was.
     for y in range(head + dy + 3, min(head + dy + 5, h)):
         for x in range(w):
             if out[y][x] == 1:
@@ -563,7 +503,7 @@ HERO_JUMP = dress(
 
 
 def quads(grid):
-    """A 16x16 hero frame into TL, TR, BL, BR — the order the game names."""
+    """A 16x16 frame into TL, TR, BL, BR — the order the game names."""
     return [
         [grid[j][0:8] for j in range(8)],
         [grid[j][8:16] for j in range(8)],
@@ -573,22 +513,6 @@ def quads(grid):
 
 
 # ── The sheet ──────────────────────────────────────────────────────────────
-
-PACK = {
-    "rock": ("PineTrees/Decorations/Rocks.png", "26x26+3+83", "16x16!"),
-    "bush": ("PineTrees/Decorations/Plants.png", "27x24+3+21", "16x16!"),
-    "wood": ("PineTrees/Decorations/Woods.png", "30x15+65+7", "24x8!"),
-    "moai": ("Moai.png", None, "16x16!"),
-}
-
-
-def pack(name):
-    """A pack object as background decor: what surrounds it is the beach, and
-    its lit face is shade 0 — on the background layer that is the light, and
-    shade 1 is only the sky wearing a different name."""
-    src, crop, size = PACK[name]
-    return asset(src, crop, size, fill=BEACH, light=0)
-
 
 SHEET = [
     ("sky", cut(SKY, "sky")),
@@ -601,17 +525,22 @@ SHEET = [
     ("sea_b", cut(SEA_B, "sea b")),
     ("surf_a", cut(SURF_A, "surf a")),
     ("surf_b", cut(SURF_B, "surf b")),
-    ("dune", cut(DUNE, "dune")),
+    ("sand_a", cut(SAND_A, "sand a")),
+    ("sand_b", cut(SAND_B, "sand b")),
     ("beach_sand", cut(SAND, "sand")),
     ("sand_deep", cut(SAND_DEEP, "sand deep")),
     ("plank", cut(PLANK, "plank")),
     ("palm_a palm_b palm_c palm_d palm_e palm_f", cut(PALM_CROWN, "palm")),
     ("trunk", cut(PALM_TRUNK, "trunk")),
     ("trunk_base", cut(PALM_BASE, "trunk base")),
-    ("rock_tl rock_tr rock_bl rock_br", cut(pack("rock"), "rock")),
-    ("bush_tl bush_tr bush_bl bush_br", cut(pack("bush"), "bush")),
-    ("wood_l wood_m wood_r", cut(pack("wood"), "wood")),
-    ("moai_hl moai_hr moai_base moai_br", cut(pack("moai"), "moai")),
+    ("rock_tl rock_tr rock_bl rock_br", cut(ROCK, "rock")),
+    ("plant_tl plant_tr plant_bl plant_br", cut(PLANT, "plant")),
+    ("skull_tl skull_tr skull_bl skull_br", cut(SKULL, "skull")),
+    ("chest_tl chest_tr chest_bl chest_br", cut(CHEST, "chest")),
+    (
+        "totem_a totem_b totem_c totem_d totem_e totem_f moai_base moai_br",
+        cut(TOTEM, "totem"),
+    ),
     ("flag_top", cut(FLAG_TOP, "flag top")),
     ("flag_base", cut(FLAG_BASE, "flag base")),
     ("heart", cut(HEART, "heart")),
@@ -619,6 +548,8 @@ SHEET = [
     ("m1_tl m1_tr m1_bl m1_br", quads(HERO_IDLE)),
     ("m2_tl m2_tr m2_bl m2_br", quads(HERO_STEP)),
     ("m3_tl m3_tr m3_bl m3_br", quads(HERO_JUMP)),
+    ("sl1_tl sl1_tr sl1_bl sl1_br", quads(SLIME_A)),
+    ("sl2_tl sl2_tr sl2_bl sl2_br", quads(SLIME_B)),
 ]
 
 tiles = []
@@ -633,9 +564,7 @@ GREY = [255, 170, 100, 0]
 
 
 def write_png(path, w, h, rows_of_shades):
-    raw = b"".join(
-        bytes([0]) + bytes(GREY[s] for s in row) for row in rows_of_shades
-    )
+    raw = b"".join(bytes([0]) + bytes(GREY[s] for s in row) for row in rows_of_shades)
 
     def chunk(tag, data):
         return (

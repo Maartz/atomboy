@@ -32,6 +32,17 @@ as it is in the drawing.
 
 The source is levelled onto the panel's range first: the illustration is
 bright green throughout and would otherwise land entirely in the top level.
+
+The third decision is to clean the paper, and it is about the *dedup*, not
+the drawing. `screen` folds the cover into the tile budget by likeness, and
+a three-pixel fleck on white paper is a summed distance of nine — inside
+any useful tolerance. Every paper tile with a different fleck therefore
+merges with the clean ones, one representative gets elected, and whatever
+mark it carried is stamped across the whole page: the dash-grid the first
+build shipped. So every dark cluster of a few pixels is returned to paper,
+and the two bands of micro-text (the credit line, the hand-drawn PRESS
+START) are erased outright — type that small cannot survive 160x144, and
+the kernel's own font redraws the words that matter.
 """
 
 import struct, subprocess, zlib
@@ -125,9 +136,66 @@ def write_png(path, w, h, shades):
     open(path, "wb").write(png)
 
 
+# The bands of type too small to survive the import, x0..x1 by y0..y1.
+# The kernel's font redraws PRESS START at (5, 13); the credit line goes.
+ERASED = [(64, 80, 152, 95), (72, 97, 144, 112)]
+
+
+def despeckled(shades, w, h, limit=4):
+    """Dark clusters of `limit` pixels or fewer, returned to paper.
+
+    Each one is a legitimate fleck of the illustration, and each one is
+    also within dedup tolerance of clean paper — which is how one elected
+    tile stamped its fleck across the whole page.
+    """
+    out = shades[:]
+    seen = [False] * (w * h)
+    for start in range(w * h):
+        if seen[start] or out[start] == 0:
+            continue
+        stack, blob = [start], []
+        seen[start] = True
+        while stack:
+            i = stack.pop()
+            blob.append(i)
+            x, y = i % w, i // w
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                j = ny * w + nx
+                if 0 <= nx < w and 0 <= ny < h and not seen[j] and out[j] != 0:
+                    seen[j] = True
+                    stack.append(j)
+        if len(blob) <= limit:
+            for i in blob:
+                out[i] = 0
+    return out
+
+
 w, h, px = read_rgb(SOURCE, f"{WIDTH}x{HEIGHT}!")
 targets = levelled([luma(*p) for p in px])
 shades = [quantized(t) for t in targets]
+
+for x0, y0, x1, y1 in ERASED:
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            shades[y * w + x] = 0
+
+shades = despeckled(shades, w, h)
+
+# The last pass works at the dedup's own granularity, because the dashes it
+# stamped across the page were never flecks — they were *tiles*. The
+# illustration's dotted border quantizes to tiles whose whole deviation from
+# blank paper is sixteen or twenty, inside the cartridge's tolerance of 22,
+# and `screen` elects the first such tile in reading order as the
+# representative for every clean paper tile behind it. So any tile that is
+# almost paper becomes paper exactly, and a true blank wins the election.
+SNAP = 24  # a shade past the cartridge's tolerance
+
+for ty in range(HEIGHT // 8):
+    for tx in range(WIDTH // 8):
+        cells = [(ty * 8 + j) * w + tx * 8 + i for j in range(8) for i in range(8)]
+        if 0 < sum(shades[i] for i in cells) <= SNAP:
+            for i in cells:
+                shades[i] = 0
 
 write_png(DEST, w, h, shades)
 
