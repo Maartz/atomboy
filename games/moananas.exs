@@ -1,4 +1,4 @@
-# Moananas Island — run the beach, jump the moai, gather the pineapples.
+# Moananas Island — walk the island, dodge the totems, gather the pineapples.
 #
 #     mix run games/moananas.exs
 #
@@ -6,65 +6,51 @@
 # hot via `ELIXIR_ERL_OPTIONS="-noinput" mix atomboy.live games/moananas.exs`.
 #
 # The title is the concept art — the whole of it, deduplicated into the tile
-# budget by `screen` — and Start fades to black before the beach fades up.
-# The beach is a sideways-scrolling run: 256 pixels of island, the camera
-# chasing, totem idols planted in the sand that cost a heart to touch, a
-# slime patrolling the stretch between them, pineapples floating over the
-# path and the planks, and the chest and flag at the far end of the island.
-# Three hearts; the flag is the game.
+# budget by `screen` — and Start fades to black before the island fades up.
+# The game is seen from above, the way its tileset was drawn: a sand island
+# in a ring of water, the camera chasing on both axes, totem idols that cost
+# a heart to bump, a slime patrolling the south sand, pineapples scattered
+# over the island, and a dock running off the south shore with the flag at
+# its end. Three hearts; the flag is the game.
 #
-# Every tile it draws with is built by `art/island_art.py`. The sand, the
-# plank, the boulder, the totems, the chest, the skull and the slime are
-# SGQ_Dungeon's pixels mapped colour-for-shade — the pack is native Game Boy
-# art and arrives untouched — while the sky, the sea and the palm are drawn
-# there in flat fields, and `art/title_art.py` imports the cover. The hero
-# is the Eris Esra template with Moananas's hair and glasses painted on.
+# It was a side-scroller twice, and it looked pasted together twice, because
+# SGQ_Dungeon is a *top-down* tileset: the idol stands in a vasque, the
+# chest is drawn at three-quarters, the ground is a floor. The perspective
+# of the assets is the perspective of the game now, and everything stands in
+# the world it was drawn for.
 #
-# Both scripts are written against one fact about the panel: its shade 0 and
-# shade 1 are the same green. See the header of `art/island_art.py`.
+# Every tile is built by `art/island_art.py` — the pack's pixels mapped
+# colour-for-shade, the water and shoreline drawn flat — and
+# `art/title_art.py` imports the cover. The hero is the Eris Esra template,
+# which walks in five directions; three are taken and Moananas's hair and
+# glasses are painted onto each facing.
 defmodule Moananas do
   use Potion
 
   tiles from: "art/moananas_sheet.png",
         names: [
           :sky,
-          :sun_tl,
-          :sun_tr,
-          :sun_bl,
-          :sun_br,
-          :cloud_l,
-          :cloud_m,
-          :cloud_r,
-          :gull,
-          :isle_l,
-          :isle_m,
-          :isle_r,
-          :sea_crest,
           :sea_a,
           :sea_b,
-          :surf_a,
-          :surf_b,
+          :shore_n,
+          :shore_s,
+          :shore_w,
+          :shore_e,
+          :shore_nw,
+          :shore_ne,
+          :shore_sw,
+          :shore_se,
           :sand_a,
           :sand_b,
-          :beach_sand,
-          :sand_deep,
           :plank,
-          :palm_a,
-          :palm_b,
-          :palm_c,
-          :palm_d,
-          :palm_e,
-          :palm_f,
-          :trunk,
-          :trunk_base,
           :rock_tl,
           :rock_tr,
           :rock_bl,
           :rock_br,
-          :plant_tl,
-          :plant_tr,
-          :plant_bl,
-          :plant_br,
+          :palm_tl,
+          :palm_tr,
+          :palm_bl,
+          :palm_br,
           :skull_tl,
           :skull_tr,
           :skull_bl,
@@ -86,18 +72,30 @@ defmodule Moananas do
           :heart,
           :pineapple_top,
           :pineapple_body,
-          :m1_tl,
-          :m1_tr,
-          :m1_bl,
-          :m1_br,
-          :m2_tl,
-          :m2_tr,
-          :m2_bl,
-          :m2_br,
-          :m3_tl,
-          :m3_tr,
-          :m3_bl,
-          :m3_br,
+          :md1_tl,
+          :md1_tr,
+          :md1_bl,
+          :md1_br,
+          :md2_tl,
+          :md2_tr,
+          :md2_bl,
+          :md2_br,
+          :ms1_tl,
+          :ms1_tr,
+          :ms1_bl,
+          :ms1_br,
+          :ms2_tl,
+          :ms2_tr,
+          :ms2_bl,
+          :ms2_br,
+          :mu1_tl,
+          :mu1_tr,
+          :mu1_bl,
+          :mu1_br,
+          :mu2_tl,
+          :mu2_tr,
+          :mu2_bl,
+          :mu2_br,
           :sl1_tl,
           :sl1_tr,
           :sl1_bl,
@@ -110,8 +108,8 @@ defmodule Moananas do
 
   # The whole drawing, one screen: 360 cells folded into the tile budget by
   # likeness — the paper repeats, the portrait does not. Twenty-two is as
-  # sharp as the cartridge affords: 132 tiles for the cover and 79 for the
-  # beach is 211 of the 212 there are. The folding only works because
+  # sharp as the cartridge affords: 127 tiles for the cover and 75 for the
+  # island is 202 of the 212 there are. The folding only works because
   # `art/title_art.py` hands over *clean* paper — a three-pixel fleck is
   # within tolerance of blank, so before the despeckle every elected tile
   # stamped its fleck across the page.
@@ -119,38 +117,19 @@ defmodule Moananas do
 
   # ── The island ──────────────────────────────────────────────────────────────
   #
-  # One room, 32 by 18: 256 pixels of beach under a horizontal camera.
+  # One room, 32 by 32: a 256-pixel world under a camera that chases on both
+  # axes. Water everywhere, then the shore ring — ink waterline, one strip
+  # of wet-sand dither — and inside it the sand, flat light with the pack's
+  # shell-marks scattered through. The island is a rectangle from column 4
+  # to 27 and row 4 to 27, which is what lets the walls be *numbers*: the
+  # hero is fenced by comparisons, and no `touching?` is ever spent on the
+  # water. The dock is the one gap — a two-tile boardwalk off the south
+  # shore, walkable because the fence widens along its columns.
   #
-  # The composition, top to bottom: flat light sky with a sun and clouds, a
-  # volcano on the horizon, flat mid sea with staggered glints, the surf
-  # line, then the beach — the same flat light as the sky, the dark sea
-  # between them keeping them apart, with the artist's shell-marks scattered
-  # through it — and the floor's dark face under an ink crest. Flat fields,
-  # sparse specks, ink silhouettes; the one dither left is the strip of wet
-  # sand inside the surf tiles.
-  #
-  # Only two tiles are ever asked a question: `:beach_sand`, which is the
-  # floor, and `:plank`. Everything else is scenery the hero runs in front of
-  # — which is what lets the beach be crowded without costing a single
-  # `touching?` in the frame.
+  # Only the totems' feet and the flag are ever asked a question. Everything
+  # else is scenery the hero walks in front of.
 
-  sky = fn -> List.duplicate(?\s, 32) end
-
-  banded = fn a, b -> for c <- 0..31, do: if(rem(c, 2) == 0, do: a, else: b) end
-
-  ground =
-    for row <- 0..17 do
-      case row do
-        7 -> List.duplicate(?[, 32)
-        8 -> banded.(?{, ?})
-        9 -> banded.(?}, ?{)
-        10 -> banded.(?~, ?`)
-        r when r in 11..15 -> List.duplicate(?., 32)
-        16 -> List.duplicate(?S, 32)
-        17 -> List.duplicate(?D, 32)
-        _ -> sky.()
-      end
-    end
+  water = for row <- 0..31, do: for(c <- 0..31, do: if(rem(c + row, 2) == 0, do: ?{, else: ?}))
 
   paint = fn rows, marks ->
     Enum.reduce(marks, rows, fn {col, row, text}, rows ->
@@ -163,78 +142,66 @@ defmodule Moananas do
     end)
   end
 
-  # The planks sit 24 pixels over the sand — inside the jump's 25 — and every
-  # standing thing keeps out of their columns. The shell-marks go down first,
-  # so anything standing on one simply covers it.
-  @beach paint.(ground, [
-           # the shell-marks in the sand
-           {2, 11, ";"},
-           {9, 11, ","},
-           {17, 11, ","},
-           {24, 11, ";"},
-           {29, 11, ","},
-           {7, 12, ";"},
-           {16, 12, ","},
-           {23, 12, ";"},
-           {31, 12, ";"},
-           {2, 13, ";"},
-           {11, 13, ","},
-           {20, 13, ";"},
-           {26, 13, ";"},
-           {1, 14, ";"},
-           {15, 14, ","},
-           {23, 14, ","},
-           {29, 14, ";"},
-           {3, 15, ";"},
-           {14, 15, ","},
-           {24, 15, ";"},
-           {31, 15, ","},
-           # the sky
-           {25, 0, "01"},
-           {25, 1, "23"},
-           {2, 2, "cde"},
-           {18, 3, "cde"},
-           {12, 4, "v"},
-           {8, 5, "v"},
-           {27, 4, "v"},
-           # the far island, standing on the horizon the crest draws
-           {4, 6, "ijk"},
-           {20, 6, "ijk"},
-           # the palms: a canopy two tiles deep, then the trunk down to the sand
-           {3, 12, "PQR"},
-           {3, 13, "pqr"},
-           {4, 14, "T"},
-           {4, 15, "U"},
-           {27, 12, "PQR"},
-           {27, 13, "pqr"},
-           {28, 14, "T"},
-           {28, 15, "U"},
-           # what the hero lands on
-           {8, 13, "==="},
-           {15, 13, "==="},
-           {22, 13, "==="},
-           # what stands in the sand: the boulder, the skull under the
-           # boardwalk, the two totems, the plant, the chest, the flag
-           {6, 14, "ab"},
-           {6, 15, "AB"},
-           {9, 14, "wx"},
-           {9, 15, "WX"},
-           {12, 12, "gh"},
-           {12, 13, "IJ"},
-           {12, 14, "mM"},
-           {12, 15, "zZ"},
-           {18, 12, "gh"},
-           {18, 13, "IJ"},
-           {18, 14, "mM"},
-           {18, 15, "zZ"},
-           {21, 14, "no"},
-           {21, 15, "NO"},
-           {25, 14, "<>"},
-           {25, 15, "()"},
-           {30, 14, "F"},
-           {30, 15, "G"}
-         ])
-         |> Enum.map_join("\n", &List.to_string/1)
+  # The island: shore ring, sand interior, then everything standing on it.
+  # The shell-marks go down before the objects, so anything standing on one
+  # simply covers it.
+  @island paint.(
+            water,
+            [
+              {4, 4, "1" <> String.duplicate("u", 22) <> "2"}
+            ] ++
+              for(r <- 5..26, do: {4, r, "l" <> String.duplicate(".", 22) <> "e"}) ++
+              [
+                {4, 27, "3" <> String.duplicate("d", 22) <> "4"},
+                # the shell-marks in the sand
+                {8, 9, ";"},
+                {14, 6, ","},
+                {24, 11, ";"},
+                {6, 13, ","},
+                {13, 17, ";"},
+                {25, 15, ","},
+                {8, 17, ";"},
+                {18, 22, ","},
+                {23, 24, ";"},
+                {12, 20, ","},
+                {19, 12, ";"},
+                {16, 25, ","},
+                {6, 22, ";"},
+                {26, 7, ","},
+                {11, 8, ";"},
+                {22, 14, ","},
+                # the dock south, and the flag flying at its end
+                {15, 27, "=="},
+                {15, 28, "=="},
+                {15, 29, "F="},
+                {15, 30, "G="},
+                # the totems, feet on their bottom rows
+                {10, 12, "gh"},
+                {10, 13, "IJ"},
+                {10, 14, "mM"},
+                {10, 15, "zZ"},
+                {20, 16, "gh"},
+                {20, 17, "IJ"},
+                {20, 18, "mM"},
+                {20, 19, "zZ"},
+                # the boulder, the skull, the chest, the palms
+                {7, 20, "ab"},
+                {7, 21, "AB"},
+                {22, 8, "wx"},
+                {22, 9, "WX"},
+                {15, 8, "<>"},
+                {15, 9, "()"},
+                {6, 6, "no"},
+                {6, 7, "NO"},
+                {17, 5, "no"},
+                {17, 6, "NO"},
+                {24, 20, "no"},
+                {24, 21, "NO"},
+                {9, 24, "no"},
+                {9, 25, "NO"}
+              ]
+          )
+          |> Enum.map_join("\n", &List.to_string/1)
 
   # `.` is the open sand and it maps to `:sky` on purpose: both are the same
   # flat light tile, and naming one tile twice would spend a budget slot on
@@ -242,47 +209,35 @@ defmodule Moananas do
   @tiles %{
     ?\s => :sky,
     ?. => :sky,
-    ?0 => :sun_tl,
-    ?1 => :sun_tr,
-    ?2 => :sun_bl,
-    ?3 => :sun_br,
-    ?c => :cloud_l,
-    ?d => :cloud_m,
-    ?e => :cloud_r,
-    ?v => :gull,
-    ?i => :isle_l,
-    ?j => :isle_m,
-    ?k => :isle_r,
-    ?[ => :sea_crest,
     ?{ => :sea_a,
     ?} => :sea_b,
-    ?~ => :surf_a,
-    ?` => :surf_b,
+    ?u => :shore_n,
+    ?d => :shore_s,
+    ?l => :shore_w,
+    ?e => :shore_e,
+    ?1 => :shore_nw,
+    ?2 => :shore_ne,
+    ?3 => :shore_sw,
+    ?4 => :shore_se,
     ?, => :sand_a,
     ?; => :sand_b,
-    ?S => :beach_sand,
-    ?D => :sand_deep,
     ?= => :plank,
-    ?P => :palm_a,
-    ?Q => :palm_b,
-    ?R => :palm_c,
-    ?p => :palm_d,
-    ?q => :palm_e,
-    ?r => :palm_f,
-    ?T => :trunk,
-    ?U => :trunk_base,
     ?a => :rock_tl,
     ?b => :rock_tr,
     ?A => :rock_bl,
     ?B => :rock_br,
-    ?n => :plant_tl,
-    ?o => :plant_tr,
-    ?N => :plant_bl,
-    ?O => :plant_br,
+    ?n => :palm_tl,
+    ?o => :palm_tr,
+    ?N => :palm_bl,
+    ?O => :palm_br,
     ?w => :skull_tl,
     ?x => :skull_tr,
     ?W => :skull_bl,
     ?X => :skull_br,
+    ?< => :chest_tl,
+    ?> => :chest_tr,
+    ?( => :chest_bl,
+    ?) => :chest_br,
     ?g => :totem_a,
     ?h => :totem_b,
     ?I => :totem_c,
@@ -291,39 +246,47 @@ defmodule Moananas do
     ?M => :totem_f,
     ?z => :moai_base,
     ?Z => :moai_br,
-    ?< => :chest_tl,
-    ?> => :chest_tr,
-    ?( => :chest_bl,
-    ?) => :chest_br,
     ?F => :flag_top,
     ?G => :flag_base
   }
 
-  room :beach, @beach, tiles: @tiles
+  room :beach, @island, tiles: @tiles
 
   # ── The music ───────────────────────────────────────────────────────────────
+  #
+  # Four bars of C major with a calypso lilt, built to the craft's grammar:
+  # the lead sings in two-bar call and answer with a breath at the end of
+  # each phrase, its one peak — the c6 — visited once, and the seam is a
+  # cadence: the loop ends on d5 over the dominant, which wants bar one.
+  # Pulse 2 is the classic echo, the same line two steps late on a thin
+  # duty with a plucked envelope, so the ear hears a hall rather than two
+  # instruments. The bass pumps root and fifth, one chord a bar — C, C, F,
+  # G — and walks into each change on the last eighths.
 
   music :island,
         [
           lead:
-            "e5 . g5 . e5 c5 d5 . | e5 . g5 . a5 g5 e5 . | d5 . f5 . d5 b4 c5 . | e5 c5 d5 b4 c5 . . -",
+            "c5 e5 g5 . g5 a5 g5 . | e5 . d5 c5 d5 . . . | e5 g5 c6 . a5 g5 a5 . | g5 . e5 c5 d5 . . .",
           harmony:
-            "- - e5 . g5 . e5 c5 | d5 . e5 . g5 . a5 g5 | e5 . d5 . f5 . d5 b4 | c5 . e5 c5 d5 b4 c5 .",
+            "- - c5 e5 g5 . g5 a5 | g5 . e5 . d5 c5 d5 . | . . e5 g5 c6 . a5 g5 | a5 . g5 . e5 c5 d5 .",
           bass:
-            "c2 . . g2 . . c2 . | c2 . . g2 . . e2 . | g1 . . d2 . . g2 . | c2 . g1 . c2 . . ."
+            "c2 . g2 . c2 . g2 . | c2 . g2 . c2 . d2 e2 | f2 . c3 . f2 . a2 . | g2 . d3 . g2 . b2 ."
         ],
-        beat: 7,
+        beat: 8,
         duty: [lead: :quarter, harmony: :eighth],
         envelope: [lead: :organ, harmony: :pluck],
+        vibrato: :gentle,
         gap: 2
 
+  # The fanfare climbs the tonic arpeggio, breathes, and plants the summit
+  # c6 once at the end of a IV–V walk home.
   music :fanfare,
         [
-          lead: "c5 e5 g5 . c6 . . . b5 c6 . . . . . .",
-          harmony: "- . e4 g4 e5 . g4 . f5 e5 . . . . . .",
-          bass: "c2 . . . c2 . g1 . c2 . . . . . . ."
+          lead: "c5 e5 g5 . c6 . g5 . a5 b5 c6 . . . . .",
+          harmony: "- - c5 e5 g5 . c6 . g5 . a5 b5 c6 . . .",
+          bass: "c2 . g2 . e2 . g2 . f2 . g2 . c2 . . ."
         ],
-        beat: 9,
+        beat: 8,
         duty: [lead: :quarter, harmony: :eighth],
         envelope: [lead: :organ, harmony: :pluck],
         gap: 2
@@ -335,13 +298,11 @@ defmodule Moananas do
               leaving: 0,
               primed: 0,
               anim: 0,
-              x: 16,
-              y: 112,
+              x: 120,
+              y: 150,
               ox: 0,
               oy: 0,
-              vy: 0,
-              tick: 0,
-              grounded: 0,
+              bad: 0,
               facing: 0,
               moving: 0,
               blink: 0,
@@ -353,17 +314,14 @@ defmodule Moananas do
               units_tile: 2,
               playing: 0,
               cx: 0,
+              cy: 0,
               sx: 0,
               sy: 0,
               sx8: 0,
               sy8: 0,
               x15: 0,
               y15: 0,
-              y16: 0,
               ymid: 0,
-              frow: 0,
-              nrow: 0,
-              armed: 1,
               hxm8: 0,
               hxp16: 0,
               ym16: 0,
@@ -379,6 +337,7 @@ defmodule Moananas do
         playing = 0
         scroll(0, 0)
         cx = 0
+        cy = 0
         show(:cover)
         # The cover's own small type melts under the dedup tolerance; the
         # kernel's font is sharper than a mushed tile — overlay it.
@@ -425,17 +384,16 @@ defmodule Moananas do
       on_enter do
         show(:beach)
         veil = 30
-        x = 16
-        y = 112
-        vy = 0
-        cx = 0
+        x = 120
+        y = 150
+        cx = 40
+        cy = 60
         facing = 0
         blink = 0
         hearts = 3
         score = 0
         playing = 1
         primed = 0
-        armed = 1
       end
 
       every_frame do
@@ -446,86 +404,71 @@ defmodule Moananas do
           if veil == 0, do: fade(0)
         end
 
-        # ── Running. The island's ends are numbers, not walls: nothing else
-        # on the beach blocks sideways, so no wall is asked about. ──
+        # ── Walking. The island is a rectangle, so its walls are numbers:
+        # the sand runs from 30 to 210 across and 28 to 196 down, and the
+        # fence widens along the dock's columns so the boardwalk can be
+        # walked to its end. Each axis moves and is caught separately —
+        # sliding along a wall must not stop the other axis. ──
         moving = 0
+
+        ox = x
 
         if pressed?(:right) do
           x = x + 1
-          facing = 0
+          facing = 2
           moving = 1
         end
 
         if pressed?(:left) do
           x = x - 1
+          facing = 3
+          moving = 1
+        end
+
+        bad = 0
+        if x < 30, do: bad = 1
+        if x > 210, do: bad = 1
+
+        if y > 196 do
+          if x < 114, do: bad = 1
+          if x > 126, do: bad = 1
+        end
+
+        if bad == 1, do: x = ox
+
+        oy = y
+
+        if pressed?(:down) do
+          y = y + 1
+          facing = 0
+          moving = 1
+        end
+
+        if pressed?(:up) do
+          y = y - 1
           facing = 1
           moving = 1
         end
 
-        if x < 8, do: x = 8
-        if x > 232, do: x = 232
+        bad = 0
+        if y < 28, do: bad = 1
+        if y > 236, do: bad = 1
 
-        # ── The jump, whole from the Tower: armed is the debounce, and the
-        # release cuts the rise — a tap hops, a held press leaps. ──
-        if pressed?(:a) do
-          if armed == 1 and grounded == 1 do
-            vy = -5
-            tick = 0
-            grounded = 0
-            armed = 0
-            beep(:a4)
-          end
-        else
-          armed = 1
-          if negative?(vy) and vy < 254, do: vy = 254
+        if y > 196 do
+          if x < 114, do: bad = 1
+          if x > 126, do: bad = 1
         end
 
-        tick = tick + 1
-
-        if tick == 2 do
-          tick = 0
-
-          if negative?(vy) do
-            vy = vy + 1
-          else
-            if vy < 4, do: vy = vy + 1
-          end
-        end
-
-        # ── The vertical move: the sand is solid, the planks are landed on
-        # when the feet cross downward into their row. ──
-        oy = y
-        frow = y + 15
-        frow = div(frow, 8)
-        y = y + vy
-        y15 = y + 15
-        nrow = div(y15, 8)
-
-        if touching?(:beach_sand, x, y15) or touching?(:beach_sand, x15, y15) do
-          y = oy
-          y15 = y + 15
-          if grounded == 0, do: noise(:tick)
-          vy = 0
-        else
-          if nrow > frow and (touching?(:plank, x, y15) or touching?(:plank, x15, y15)) do
-            y = nrow * 8
-            y = y - 16
-            y15 = y + 15
-            if grounded == 0, do: noise(:tick)
-            vy = 0
-          end
-        end
+        if bad == 1, do: y = oy
 
         x15 = x + 15
+        y15 = y + 15
         ymid = y + 8
-        y16 = y15 + 1
-        grounded = 0
 
-        if touching?(:beach_sand, x, y16) or touching?(:beach_sand, x15, y16) or
-             touching?(:plank, x, y16) or touching?(:plank, x15, y16),
-           do: grounded = 1
-
-        # ── The totems: passable, and they cost. The blink is the mercy. ──
+        # ── The totems: passable, and they cost. The blink is the mercy.
+        # The question is asked only of their feet — the vasque's two
+        # tiles, at both of the hero's edges, at the height his own feet
+        # are at. Four questions a frame. ──
         hidden = 0
 
         if blink > 0 do
@@ -534,11 +477,6 @@ defmodule Moananas do
           if flick < 4, do: hidden = 1
         end
 
-        # The totem is four tiles tall, but the question is asked only of its
-        # feet — the two bottom tiles, at both of the hero's edges, at the
-        # height his own feet are at. Four questions, the same four the frame
-        # could always afford — and a jump that grazes the wings is let
-        # through, which is the forgiving way round.
         if blink == 0 do
           if touching?(:moai_base, x, y15) or touching?(:moai_base, x15, y15) or
                touching?(:moai_br, x, y15) or touching?(:moai_br, x15, y15) do
@@ -548,32 +486,35 @@ defmodule Moananas do
           end
         end
 
-        # ── The flag: the end of the island. ──
+        # ── The flag at the end of the dock. ──
         if touching?(:flag_top, x, ymid) or touching?(:flag_top, x15, ymid) or
              touching?(:flag_base, x, y15) or touching?(:flag_base, x15, y15),
            do: become(:crowned)
 
         if hearts == 0, do: become(:sunk)
 
-        # ── The window the pineapples read. ──
+        # ── The window the pineapples and the slime read. ──
         hxm8 = x - 8
         hxp16 = x + 16
         ym16 = y - 16
         yp16 = y + 16
 
-        # ── The camera, chasing sideways. ──
+        # ── The camera, chasing on both axes: the hero owns the middle of
+        # the screen, the camera owns the edges, and it stops at the
+        # world's rim. ──
         sx = x - cx
-        if sx > 80 and cx < 96, do: cx = cx + 1
-        if sx < 64 and cx > 0, do: cx = cx - 1
-        scroll(cx, 0)
+        if sx > 84 and cx < 96, do: cx = cx + 1
+        if sx < 68 and cx > 0, do: cx = cx - 1
+        sy = y - cy
+        if sy > 76 and cy < 112, do: cy = cy + 1
+        if sy < 60 and cy > 0, do: cy = cy - 1
+        scroll(cx, cy)
         sx = x - cx
-        sy = y
+        sy = y - cy
         sx8 = sx + 8
         sy8 = sy + 8
 
-        # ── The HUD rides in sprites, so the world scrolls under it: two
-        # digits of score, three hearts. The digit tiles are the kernel's
-        # font, reached by arithmetic — tile 2 is the zero. ──
+        # ── The HUD rides in sprites, so the world scrolls under it. ──
         tens_tile = div(score, 10)
         tens_tile = tens_tile + 2
         units_tile = rem(score, 10)
@@ -593,55 +534,72 @@ defmodule Moananas do
           do: sprite(8, x: 152, y: 8, tile: :heart),
           else: sprite(8, x: 0, y: 200, tile: :heart)
 
-        # ── Moananas, four quarters and three poses: standing, mid-stride,
-        # airborne. The mirror is the flip and a swap of the columns, so the
-        # left-facing run costs no tiles at all. ──
+        # ── Moananas, four quarters and three facings: down, up, and the
+        # side — which walks left as a flip and a swap of the columns, so
+        # the fourth facing costs no tiles at all. Two frames each,
+        # stand and stride, swapped every eighth step. ──
         anim = anim + 1
         if anim == 16, do: anim = 0
 
         if hidden == 1 do
-          sprite(0, x: 0, y: 200, tile: :m1_tl)
-          sprite(1, x: 0, y: 200, tile: :m1_tr)
-          sprite(2, x: 0, y: 200, tile: :m1_bl)
-          sprite(3, x: 0, y: 200, tile: :m1_br)
+          sprite(0, x: 0, y: 200, tile: :md1_tl)
+          sprite(1, x: 0, y: 200, tile: :md1_tr)
+          sprite(2, x: 0, y: 200, tile: :md1_bl)
+          sprite(3, x: 0, y: 200, tile: :md1_br)
         else
-          if grounded == 0 do
-            if facing == 0 do
-              sprite(0, x: sx, y: sy, tile: :m3_tl)
-              sprite(1, x: sx8, y: sy, tile: :m3_tr)
-              sprite(2, x: sx, y: sy8, tile: :m3_bl)
-              sprite(3, x: sx8, y: sy8, tile: :m3_br)
-            else
-              sprite(0, x: sx, y: sy, tile: :m3_tr, flip: :x)
-              sprite(1, x: sx8, y: sy, tile: :m3_tl, flip: :x)
-              sprite(2, x: sx, y: sy8, tile: :m3_br, flip: :x)
-              sprite(3, x: sx8, y: sy8, tile: :m3_bl, flip: :x)
-            end
-          else
+          if facing == 0 do
             if moving == 0 or anim < 8 do
-              if facing == 0 do
-                sprite(0, x: sx, y: sy, tile: :m1_tl)
-                sprite(1, x: sx8, y: sy, tile: :m1_tr)
-                sprite(2, x: sx, y: sy8, tile: :m1_bl)
-                sprite(3, x: sx8, y: sy8, tile: :m1_br)
-              else
-                sprite(0, x: sx, y: sy, tile: :m1_tr, flip: :x)
-                sprite(1, x: sx8, y: sy, tile: :m1_tl, flip: :x)
-                sprite(2, x: sx, y: sy8, tile: :m1_br, flip: :x)
-                sprite(3, x: sx8, y: sy8, tile: :m1_bl, flip: :x)
-              end
+              sprite(0, x: sx, y: sy, tile: :md1_tl)
+              sprite(1, x: sx8, y: sy, tile: :md1_tr)
+              sprite(2, x: sx, y: sy8, tile: :md1_bl)
+              sprite(3, x: sx8, y: sy8, tile: :md1_br)
             else
-              if facing == 0 do
-                sprite(0, x: sx, y: sy, tile: :m2_tl)
-                sprite(1, x: sx8, y: sy, tile: :m2_tr)
-                sprite(2, x: sx, y: sy8, tile: :m2_bl)
-                sprite(3, x: sx8, y: sy8, tile: :m2_br)
-              else
-                sprite(0, x: sx, y: sy, tile: :m2_tr, flip: :x)
-                sprite(1, x: sx8, y: sy, tile: :m2_tl, flip: :x)
-                sprite(2, x: sx, y: sy8, tile: :m2_br, flip: :x)
-                sprite(3, x: sx8, y: sy8, tile: :m2_bl, flip: :x)
-              end
+              sprite(0, x: sx, y: sy, tile: :md2_tl)
+              sprite(1, x: sx8, y: sy, tile: :md2_tr)
+              sprite(2, x: sx, y: sy8, tile: :md2_bl)
+              sprite(3, x: sx8, y: sy8, tile: :md2_br)
+            end
+          end
+
+          if facing == 1 do
+            if moving == 0 or anim < 8 do
+              sprite(0, x: sx, y: sy, tile: :mu1_tl)
+              sprite(1, x: sx8, y: sy, tile: :mu1_tr)
+              sprite(2, x: sx, y: sy8, tile: :mu1_bl)
+              sprite(3, x: sx8, y: sy8, tile: :mu1_br)
+            else
+              sprite(0, x: sx, y: sy, tile: :mu2_tl)
+              sprite(1, x: sx8, y: sy, tile: :mu2_tr)
+              sprite(2, x: sx, y: sy8, tile: :mu2_bl)
+              sprite(3, x: sx8, y: sy8, tile: :mu2_br)
+            end
+          end
+
+          if facing == 2 do
+            if moving == 0 or anim < 8 do
+              sprite(0, x: sx, y: sy, tile: :ms1_tl)
+              sprite(1, x: sx8, y: sy, tile: :ms1_tr)
+              sprite(2, x: sx, y: sy8, tile: :ms1_bl)
+              sprite(3, x: sx8, y: sy8, tile: :ms1_br)
+            else
+              sprite(0, x: sx, y: sy, tile: :ms2_tl)
+              sprite(1, x: sx8, y: sy, tile: :ms2_tr)
+              sprite(2, x: sx, y: sy8, tile: :ms2_bl)
+              sprite(3, x: sx8, y: sy8, tile: :ms2_br)
+            end
+          end
+
+          if facing == 3 do
+            if moving == 0 or anim < 8 do
+              sprite(0, x: sx, y: sy, tile: :ms1_tr, flip: :x)
+              sprite(1, x: sx8, y: sy, tile: :ms1_tl, flip: :x)
+              sprite(2, x: sx, y: sy8, tile: :ms1_br, flip: :x)
+              sprite(3, x: sx8, y: sy8, tile: :ms1_bl, flip: :x)
+            else
+              sprite(0, x: sx, y: sy, tile: :ms2_tr, flip: :x)
+              sprite(1, x: sx8, y: sy, tile: :ms2_tl, flip: :x)
+              sprite(2, x: sx, y: sy8, tile: :ms2_br, flip: :x)
+              sprite(3, x: sx8, y: sy8, tile: :ms2_bl, flip: :x)
             end
           end
         end
@@ -684,27 +642,28 @@ defmodule Moananas do
     end
   end
 
-  # ── The pineapples ──────────────────────────────────────────────────────────
-  #
-  # Six of them, planted along the island: the even ones low over the sand,
-  # the odd ones over the planks — a low jump and a climb. Each is a world
-  # position and a `taken` flag; the sprite is the position minus the camera,
-  # parked once it leaves the glass or the ground. `slot` is the hero's
-  # scratch cell: a pooled name cannot number a sprite.
   # ── The slime ───────────────────────────────────────────────────────────────
   #
-  # SGQ's slime, patrolling the open stretch of sand between the two totems
-  # at half the hero's walking pace, squashing against the ground every
-  # half-second. It shares the hero's `blink` mercy, so a totem graze and a
-  # slime touch draw from the same ninety frames of grace, and it asks no
-  # `touching?` at all — its world is the same box test the pineapples use.
+  # SGQ's slime, patrolling the south sand at half the hero's walking pace,
+  # squashing against the ground every half-second. It shares the hero's
+  # `blink` mercy, so a totem bump and a slime touch draw from the same
+  # ninety frames of grace, and it asks no `touching?` at all — its world
+  # is the same box test the pineapples use.
   defactor :slime do
-    variables swx: 0, sdir: 0, sgo: 0, sstep: 0, sbounce: 0, spx: 0, spy: 0, spx8: 0, spy8: 0
+    variables swx: 0,
+              sdir: 0,
+              sgo: 0,
+              sstep: 0,
+              sbounce: 0,
+              spx: 0,
+              spy: 0,
+              spx8: 0,
+              spy8: 0
 
     every_frame do
       if sgo == 0 do
         sgo = 1
-        swx = 112
+        swx = 96
       end
 
       if playing == 0 do
@@ -720,10 +679,10 @@ defmodule Moananas do
 
           if sdir == 0 do
             swx = swx + 1
-            if swx > 127, do: sdir = 1
+            if swx > 136, do: sdir = 1
           else
             swx = swx - 1
-            if swx < 113, do: sdir = 0
+            if swx < 97, do: sdir = 0
           end
         end
 
@@ -731,7 +690,7 @@ defmodule Moananas do
         if sbounce == 32, do: sbounce = 0
 
         if blink == 0 do
-          if swx > hxm8 and swx < hxp16 and yp16 > 115 do
+          if swx > hxm8 and swx < hxp16 and yp16 > 176 and ym16 < 176 do
             hearts = hearts - 1
             blink = 90
             noise(:boom)
@@ -739,11 +698,11 @@ defmodule Moananas do
         end
 
         spx = swx - cx
-        spy = 112
+        spy = 176 - cy
         spx8 = spx + 8
         spy8 = spy + 8
 
-        if spx < 153 do
+        if spx < 153 and spy < 137 do
           if sbounce < 16 do
             sprite(21, x: spx, y: spy, tile: :sl1_tl)
             sprite(22, x: spx8, y: spy, tile: :sl1_tr)
@@ -765,16 +724,26 @@ defmodule Moananas do
     end
   end
 
+  # ── The pineapples ──────────────────────────────────────────────────────────
+  #
+  # Six of them, spread over the island in two rows of three, the middle
+  # ones nudged a half-tile so the spread reads scattered rather than
+  # gridded. Each is a world position and a `taken` flag; the sprite is the
+  # position minus the camera, parked once it leaves the glass. `slot` is
+  # the hero's scratch cell: a pooled name cannot number a sprite.
   defactor :pineapple, count: 6 do
-    variables wx: 0, wy: 0, taken: 0, seeded: 0, px: 0, py8: 0
+    variables wx: 0, wy: 0, taken: 0, seeded: 0, px: 0, py: 0, py8: 0
 
     every_frame do
       if seeded == 0 do
         seeded = 1
-        wx = me * 32
-        wx = wx + 44
-        wy = 90
-        if rem(me, 2) == 1, do: wy = 56
+        wx = rem(me, 3)
+        wx = wx * 64
+        wx = wx + 48
+        wy = div(me, 3)
+        wy = wy * 96
+        wy = wy + 64
+        if rem(me, 2) == 1, do: wy = wy + 16
       end
 
       slot = me * 2
@@ -793,10 +762,11 @@ defmodule Moananas do
         end
 
         px = wx - cx
+        py = wy - cy
 
-        if taken == 0 and px < 153 do
-          py8 = wy + 8
-          sprite(slot, x: px, y: wy, tile: :pineapple_top)
+        if taken == 0 and px < 153 and py < 137 do
+          py8 = py + 8
+          sprite(slot, x: px, y: py, tile: :pineapple_top)
           slot = slot + 1
           sprite(slot, x: px, y: py8, tile: :pineapple_body)
         else
