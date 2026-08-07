@@ -673,6 +673,84 @@ final class Engine: ObservableObject {
     func setProfile(_ name: String) { libraryOp("F", name) }
     func exportSav() { libraryOp("E") }
 
+    // ── Screenshots: the frame the engine last drew ──────────────────────────
+
+    private(set) var lastFrame: Data?
+
+    // The raw 160×144 pixels as a bitmap — the panel's colours are already
+    // in them, the engine applied its tables before the pipe.
+    private func bitmap() -> NSBitmapImageRep? {
+        guard let frame = lastFrame,
+              let rep = NSBitmapImageRep(
+                  bitmapDataPlanes: nil, pixelsWide: WIDTH, pixelsHigh: HEIGHT,
+                  bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+                  colorSpaceName: .deviceRGB, bytesPerRow: WIDTH * 3, bitsPerPixel: 24),
+              let bytes = rep.bitmapData
+        else { return nil }
+
+        frame.copyBytes(to: bytes, count: min(frame.count, FRAME_BYTES))
+        return rep
+    }
+
+    // ⌘C: the screen onto the pasteboard at 3×, nearest neighbour —
+    // paste-ready without squinting.
+    func copyScreen() {
+        guard let rep = bitmap() else { return }
+
+        let size = NSSize(width: WIDTH * 3, height: HEIGHT * 3)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .none
+        rep.draw(in: NSRect(origin: .zero, size: size))
+        image.unlockFocus()
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([image])
+    }
+
+    // ⌥⌘S: 1× native PNG into ~/Pictures/Atomboy — pure pixels, archival.
+    func saveScreenshot() {
+        guard let rep = bitmap(), let png = rep.representation(using: .png, properties: [:])
+        else { return }
+
+        let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)
+        guard let folder = pictures.first?.appendingPathComponent("Atomboy") else { return }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        let name = "\(game ?? "atomboy") — \(stamp.string(from: Date())).png"
+        try? png.write(to: folder.appendingPathComponent(name))
+    }
+
+    // ── Reset and the background ─────────────────────────────────────────────
+
+    // The hardware button: a power cycle on the current battery. The
+    // engine flushes the save first — nothing worth a confirmation dialog.
+    func reset() {
+        setProfile(library?.profile ?? "game")
+    }
+
+    // The background pause is the shell's own toggle-pair: nothing can
+    // touch pause while the app has no keyboard focus, so P out and P back
+    // stay symmetric. Off by preference; the flag keeps re-entry honest.
+    private var backgroundPaused = false
+
+    func enteredBackground() {
+        let wants =
+            UserDefaults.standard.object(forKey: "reglages.pauseFond") == nil
+            || UserDefaults.standard.bool(forKey: "reglages.pauseFond")
+        guard wants, !isIdle, !backgroundPaused else { return }
+        press("P")
+        backgroundPaused = true
+    }
+
+    func enteredForeground() {
+        guard backgroundPaused else { return }
+        press("P")
+        backgroundPaused = false
+    }
+
     func launch(rom: URL) {
         stop()
 
@@ -819,6 +897,8 @@ final class Engine: ObservableObject {
     }
 
     private func draw(_ rgb: Data) {
+        lastFrame = rgb
+
         if let metal {
             metal.submit(rgb)
             return
@@ -971,6 +1051,7 @@ struct HUDButton: View {
         }
         .buttonStyle(.plain)
         .help(tooltip)
+        .accessibilityLabel(tooltip)
     }
 }
 
@@ -997,10 +1078,17 @@ struct GeneralSettings: View {
     // Legacy French UserDefaults key — kept for data compatibility.
     @AppStorage("reglages.reprise") private var resume = true
 
+    @AppStorage("reglages.pauseFond") private var pauseInBackground = true
+
     var body: some View {
         Form {
             Toggle("Resume the last game on launch", isOn: $resume)
             Text("Otherwise, the app asks you to pick a ROM.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Pause when in the background", isOn: $pauseInBackground)
+            Text("The game holds its breath while another app has the stage.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1186,6 +1274,7 @@ struct StateCard: View {
                     Image(systemName: "trash")
                 }
                 .controlSize(.small)
+                .accessibilityLabel("Delete \(state.name)")
             }
         }
         .padding(8)
@@ -1437,6 +1526,19 @@ struct MainScene: View {
         .sheet(isPresented: $engine.savesRequested) {
             SavesSheet(engine: engine)
         }
+        // A ROM dropped on the screen slots in like a cartridge.
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard let provider = providers.first, provider.canLoadObject(ofClass: URL.self)
+            else { return false }
+
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url, ["gb", "gbc"].contains(url.pathExtension.lowercased())
+                else { return }
+                DispatchQueue.main.async { engine.launch(rom: url) }
+            }
+
+            return true
+        }
         .onHover { inside in
             hovering = inside
             trafficLights(visible: inside)
@@ -1485,6 +1587,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         engine.stop()
+    }
+
+    // The background pause: the polite Mac neighbour neither burns a core
+    // nor keeps chiptunes going from behind another window.
+    func applicationDidResignActive(_ notification: Notification) {
+        engine.enteredBackground()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        engine.enteredForeground()
+    }
+
+    // The scale presets: content sized to the exact multiple, which the
+    // shader's integer scale then fills edge to edge — no letterbox.
+    func setScale(_ n: Int) {
+        let game = NSApp.windows.first(where: {
+            $0.contentAspectRatio == NSSize(width: WIDTH, height: HEIGHT)
+        })
+
+        game?.setContentSize(NSSize(width: WIDTH * n, height: HEIGHT * n))
     }
 
     func chooseROM() {
@@ -1558,6 +1680,22 @@ struct AtomboyApp: App {
         .commands {
             FileCommands(delegate: delegate)
 
+            // ⌘C: nothing else in an emulator is copyable, so the standard
+            // key does the natural thing — the screen, at 3×.
+            CommandGroup(replacing: .pasteboard) {
+                Button("Copy Screen") { delegate.engine.copyScreen() }
+                    .keyboardShortcut("c")
+            }
+
+            // The View menu: the window at an exact multiple of the panel.
+            CommandGroup(after: .toolbar) {
+                ForEach(1...5, id: \.self) { n in
+                    Button("Scale \(n)×") { delegate.setScale(n) }
+                        .keyboardShortcut(
+                            KeyEquivalent(Character("\(n)")), modifiers: [.command, .option])
+                }
+            }
+
             // The native idiom: the game's actions live in the menu bar too
             // — the in-game menu (Esc) stays around for the style.
             CommandMenu("Game") {
@@ -1577,6 +1715,13 @@ struct AtomboyApp: App {
 
                 Button("Turbo") { delegate.engine.press("T") }
                     .keyboardShortcut("t")
+                Button("Save Screenshot") { delegate.engine.saveScreenshot() }
+                    .keyboardShortcut("s", modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Reset") { delegate.engine.reset() }
+                    .keyboardShortcut("r", modifiers: [.command, .option])
                 Button("Retro Menu (in game)") { delegate.engine.press("M") }
             }
         }
