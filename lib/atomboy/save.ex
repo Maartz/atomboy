@@ -102,11 +102,21 @@ defmodule Atomboy.Save do
   def read_state(path) do
     with {:ok, data} <- File.read(path),
          {:atomboy_state, 1, state, ram, apu} <- :erlang.binary_to_term(data) do
-      {:ok, {state, ram, apu}}
+      {:ok, {rehydrate(state), ram, rehydrate(apu)}}
     else
       _ -> :error
     end
   rescue
     ArgumentError -> :error
   end
+
+  # A state file freezes yesterday's structs: `binary_to_term` hands back a
+  # map wearing a `__struct__` tag, with exactly the fields the code had on
+  # the day it was written. Passed through `struct/2`, the frozen fields
+  # land on TODAY's definition — a field added since gets its default
+  # instead of a KeyError seconds after loading, a field removed since is
+  # quietly dropped. The library made states worth keeping; this keeps them
+  # loadable across releases.
+  defp rehydrate(%{__struct__: module} = frozen),
+    do: struct(module, Map.delete(frozen, :__struct__))
 end

@@ -67,6 +67,34 @@ defmodule Atomboy.SaveTest do
     assert {:ok, {^state, ^ram, ^apu}} = Save.read_state(path)
   end
 
+  test "a snapshot from an older release loads onto today's structs", %{tmp_dir: dir} do
+    # Yesterday's code had fewer fields: simulate its file by freezing the
+    # structs with one field missing and one that no longer exists.
+    old_state =
+      %State{pc: 0x1234}
+      |> Map.from_struct()
+      |> Map.delete(:sp)
+      |> Map.put(:removed_long_ago, :whatever)
+      |> Map.put(:__struct__, State)
+
+    old_apu =
+      %Atomboy.APU{}
+      |> Map.from_struct()
+      |> Map.delete(:seq_step)
+      |> Map.put(:__struct__, Atomboy.APU)
+
+    path = Path.join(dir, "vintage.state")
+    File.write!(path, :erlang.term_to_binary({:atomboy_state, 1, old_state, %{}, old_apu}))
+
+    # The missing fields get today's defaults, the dead one is dropped —
+    # a KeyError here would cost every state the library keeps.
+    assert {:ok, {%State{} = state, %{}, %Atomboy.APU{} = apu}} = Save.read_state(path)
+    assert state.pc == 0x1234
+    assert state.sp == %State{}.sp
+    refute Map.has_key?(state, :removed_long_ago)
+    assert apu.seq_step == %Atomboy.APU{}.seq_step
+  end
+
   test "a snapshot that is missing or corrupt returns :error", %{tmp_dir: dir} do
     assert Save.read_state(Path.join(dir, "missing.state")) == :error
 
