@@ -423,12 +423,106 @@ struct GSCode: Codable, Identifiable, Equatable {
     var enabled: Bool
 }
 
+// ── The library, decoded ─────────────────────────────────────────────────────
+
+// One named state as the engine reports it: name, ISO 8601 timestamp, and
+// the screenshot's path on disk — the shell reads the thumbnail itself.
+struct SavedState: Codable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    let at: String
+    let png: String?
+
+    var date: Date? {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = iso.date(from: at) { return date }
+        iso.formatOptions = [.withInternetDateTime]
+        return iso.date(from: at)
+    }
+}
+
+struct LibraryInfo: Codable, Equatable {
+    let game: String
+    let profile: String
+    let profiles: [String]
+    let states: [SavedState]
+}
+
+// ── The keyboard, rebindable ─────────────────────────────────────────────────
+
+// One row per action: the id is the UserDefaults key (French, like every
+// persisted name), the letter the protocol byte, the default the key the
+// shell has always used. Escape is not here — it stays reserved.
+struct Keybind: Identifiable {
+    let id: String
+    let label: String
+    let letter: Character
+    let defaultCode: UInt16
+    let defaultKey: String
+
+    static let all: [Keybind] = [
+        Keybind(id: "haut", label: "Up", letter: "U", defaultCode: 126, defaultKey: "↑"),
+        Keybind(id: "bas", label: "Down", letter: "D", defaultCode: 125, defaultKey: "↓"),
+        Keybind(id: "gauche", label: "Left", letter: "L", defaultCode: 123, defaultKey: "←"),
+        Keybind(id: "droite", label: "Right", letter: "R", defaultCode: 124, defaultKey: "→"),
+        Keybind(id: "a", label: "A", letter: "A", defaultCode: 7, defaultKey: "X"),
+        Keybind(id: "b", label: "B", letter: "B", defaultCode: 8, defaultKey: "C"),
+        Keybind(id: "start", label: "Start", letter: "S", defaultCode: 36, defaultKey: "Return"),
+        Keybind(id: "select", label: "Select", letter: "E", defaultCode: 49, defaultKey: "Space"),
+        Keybind(id: "turbo", label: "Turbo", letter: "T", defaultCode: 48, defaultKey: "Tab"),
+        Keybind(id: "rembobiner", label: "Rewind", letter: "W", defaultCode: 51, defaultKey: "Delete"),
+        Keybind(id: "pause", label: "Pause", letter: "P", defaultCode: 35, defaultKey: "P"),
+        Keybind(id: "menu", label: "Settings", letter: "M", defaultCode: 46, defaultKey: "M"),
+    ]
+
+    // A stolen key leaves its old action on this sentinel — bound to
+    // nothing, shown as an em dash until the player rebinds it.
+    static let unbound: UInt16 = 0xFFFF
+
+    static var stored: [String: [String: Any]] {
+        get {
+            UserDefaults.standard.dictionary(forKey: "reglages.touches")
+                as? [String: [String: Any]] ?? [:]
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "reglages.touches") }
+    }
+
+    static func code(of bind: Keybind) -> UInt16 {
+        guard let raw = stored[bind.id]?["code"] as? Int, raw >= 0, raw <= 0xFFFF else {
+            return bind.defaultCode
+        }
+        return UInt16(raw)
+    }
+
+    static func keyLabel(of bind: Keybind) -> String {
+        stored[bind.id]?["label"] as? String ?? bind.defaultKey
+    }
+
+    static func rebind(_ bind: Keybind, to code: UInt16, label: String) {
+        var map = stored
+        for other in all where other.id != bind.id && Keybind.code(of: other) == code {
+            map[other.id] = ["code": Int(unbound), "label": ""]
+        }
+        map[bind.id] = ["code": Int(code), "label": label]
+        stored = map
+    }
+
+    static func reset() { UserDefaults.standard.removeObject(forKey: "reglages.touches") }
+
+    static func letter(for keyCode: UInt16) -> Character? {
+        all.first(where: { code(of: $0) == keyCode })?.letter
+    }
+}
+
 final class Engine: ObservableObject {
     // The Metal path when the device wakes, the CALayer otherwise — one
     // `layer` either way, and the view never knows which it got.
     let metal = MetalScreen()
     let layer: CALayer
     @Published var settingsRequested = false
+    @Published var savesRequested = false
+    @Published var library: LibraryInfo?
     @Published var game: String?
     @Published var recentROMs: [URL] = Engine.loadRecents()
     var runningProcess: Process? { process }
@@ -563,6 +657,22 @@ final class Engine: ObservableObject {
         try? input?.write(contentsOf: Data([UInt8(ascii: "N"), UInt8(max(0, min(4, index)))]))
     }
 
+    // ── The save library: six ops out, one JSON record back ─────────────────
+
+    private func libraryOp(_ letter: Character, _ name: String = "") {
+        let bytes = Array(name.utf8.prefix(255))
+        var data = Data([UInt8(letter.asciiValue ?? 0), UInt8(bytes.count)])
+        data.append(contentsOf: bytes)
+        try? input?.write(contentsOf: data)
+    }
+
+    func requestLibrary() { libraryOp("L") }
+    func saveNamed(_ name: String) { libraryOp("K", name) }
+    func loadNamed(_ name: String) { libraryOp("O", name) }
+    func deleteNamed(_ name: String) { libraryOp("D", name) }
+    func setProfile(_ name: String) { libraryOp("F", name) }
+    func exportSav() { libraryOp("E") }
+
     func launch(rom: URL) {
         stop()
 
@@ -608,6 +718,7 @@ final class Engine: ObservableObject {
             voices((0..<4).map { mask & (1 << $0) != 0 })
             setPanel(defaults.object(forKey: "reglages.panneau") as? Int ?? 0)
             sendActiveCodes()
+            requestLibrary()
         }
     }
 
@@ -685,6 +796,17 @@ final class Engine: ObservableObject {
                 guard buffer.count >= 3 + n else { return }
                 play(buffer.subdata(in: 3..<(3 + n)))
                 buffer.removeSubrange(0..<(3 + n))
+            } else if tag == UInt8(ascii: "J") {
+                guard buffer.count >= 5 else { return }
+                let n =
+                    Int(buffer[1]) << 24 | Int(buffer[2]) << 16 | Int(buffer[3]) << 8
+                    | Int(buffer[4])
+                guard buffer.count >= 5 + n else { return }
+                let payload = buffer.subdata(in: 5..<(5 + n))
+                if let info = try? JSONDecoder().decode(LibraryInfo.self, from: payload) {
+                    library = info
+                }
+                buffer.removeSubrange(0..<(5 + n))
             } else if tag == UInt8(ascii: "P") {
                 guard buffer.count >= 2 else { return }
                 metal?.panel(Int(buffer[1]))
@@ -754,27 +876,10 @@ final class Engine: ObservableObject {
         return true
     }
 
+    // The bindings live in Keybind — the Controls tab rewrites them, this
+    // simply asks. Esc is handled by the view before it ever gets here.
     private static func key(_ event: NSEvent) -> UInt8? {
-        switch event.keyCode {
-        case 123: return UInt8(ascii: "L")
-        case 124: return UInt8(ascii: "R")
-        case 125: return UInt8(ascii: "D")
-        case 126: return UInt8(ascii: "U")
-        case 36: return UInt8(ascii: "S")  // Return = Start
-        case 49: return UInt8(ascii: "E")  // Space = Select
-        case 53: return UInt8(ascii: "M")  // Esc = menu
-        case 51: return UInt8(ascii: "W")  // Delete = rewind
-        case 48: return UInt8(ascii: "T")  // Tab = turbo
-        default: break
-        }
-
-        switch event.charactersIgnoringModifiers?.lowercased() {
-        case "x": return UInt8(ascii: "A")
-        case "c": return UInt8(ascii: "B")
-        case "m": return UInt8(ascii: "M")
-        case "p": return UInt8(ascii: "P")
-        default: return nil
-        }
+        Keybind.letter(for: event.keyCode).flatMap(\.asciiValue)
     }
 }
 
@@ -823,7 +928,7 @@ final class ScreenView: NSView {
 
         // Esc (or m): the NATIVE panel, not the engine's pixel menu — in a
         // macOS app, settings speak SwiftUI.
-        if event.keyCode == 53 || event.charactersIgnoringModifiers?.lowercased() == "m" {
+        if event.keyCode == 53 || Keybind.letter(for: event.keyCode) == "M" {
             engine?.settingsRequested.toggle()
             return
         }
@@ -877,6 +982,7 @@ struct HUD: View {
             HUDButton(symbol: "forward.fill", tooltip: "Turbo (Tab)") { engine.press("T") }
             HUDButton(symbol: "square.and.arrow.down", tooltip: "Save State (⌘S)") { engine.press("s") }
             HUDButton(symbol: "arrow.counterclockwise", tooltip: "Load State (⌘R)") { engine.press("r") }
+            HUDButton(symbol: "square.stack", tooltip: "Saves (⌘⇧S)") { engine.savesRequested = true }
             HUDButton(symbol: "slider.horizontal.3", tooltip: "Settings (Esc)") { engine.settingsRequested.toggle() }
         }
         .padding(.horizontal, 10)
@@ -930,6 +1036,243 @@ struct ScreenSettings: View {
                 .foregroundStyle(.secondary)
         }
         .padding(20)
+    }
+}
+
+// ── The save browser: the library, drawn ────────────────────────────────────
+
+struct SavesSheet: View {
+    @ObservedObject var engine: Engine
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var newProfile = false
+    @State private var profileName = ""
+    @State private var pendingProfile: String?
+
+    init(engine: Engine) { self.engine = engine }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Saves").font(.title2.bold())
+                Spacer()
+
+                if let library = engine.library {
+                    // Switching hands the console over — confirmed below,
+                    // because the game restarts on the other battery.
+                    Picker(
+                        "Cartridge",
+                        selection: Binding(
+                            get: { library.profile },
+                            set: { chosen in
+                                if chosen != library.profile { pendingProfile = chosen }
+                            })
+                    ) {
+                        ForEach(library.profiles, id: \.self) { Text($0).tag($0) }
+                    }
+                    .frame(width: 220)
+
+                    Button("New Profile…") { newProfile = true }
+                }
+            }
+
+            HStack {
+                TextField("Name this moment…", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { save() }
+                Button("Save Current") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(engine.library == nil)
+            }
+
+            if let states = engine.library?.states, !states.isEmpty {
+                ScrollView {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12
+                    ) {
+                        ForEach(states) { state in
+                            StateCard(engine: engine, state: state)
+                        }
+                    }
+                }
+                .frame(minHeight: 280)
+            } else {
+                Spacer()
+                Text("Nothing saved yet — name a moment above.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            }
+
+            HStack {
+                Button("Export .sav next to ROM") { engine.exportSav() }
+                    .help("Copies the battery beside the ROM, for other emulators.")
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 660, height: 500)
+        .onAppear { engine.requestLibrary() }
+        .alert("New Profile", isPresented: $newProfile) {
+            TextField("nolan", text: $profileName)
+            Button("Switch") {
+                if !profileName.isEmpty { engine.setProfile(profileName) }
+                profileName = ""
+            }
+            Button("Cancel", role: .cancel) { profileName = "" }
+        } message: {
+            Text(
+                "A profile is another player's cartridge. Switching restarts the game on their battery."
+            )
+        }
+        .confirmationDialog(
+            "Hand the console to \(pendingProfile ?? "")?",
+            isPresented: Binding(
+                get: { pendingProfile != nil },
+                set: { if !$0 { pendingProfile = nil } })
+        ) {
+            Button("Switch — the game restarts") {
+                if let profile = pendingProfile { engine.setProfile(profile) }
+                pendingProfile = nil
+            }
+            Button("Cancel", role: .cancel) { pendingProfile = nil }
+        }
+    }
+
+    private func save() {
+        engine.saveNamed(name.isEmpty ? "state" : name)
+        name = ""
+    }
+}
+
+struct StateCard: View {
+    let engine: Engine
+    let state: SavedState
+    @State private var confirmDelete = false
+
+    init(engine: Engine, state: SavedState) {
+        self.engine = engine
+        self.state = state
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Group {
+                if let png = state.png, let image = NSImage(contentsOfFile: png) {
+                    Image(nsImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .aspectRatio(160.0 / 144.0, contentMode: .fit)
+                } else {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(.quaternary)
+                        .aspectRatio(160.0 / 144.0, contentMode: .fit)
+                        .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            Text(state.name).font(.callout.weight(.medium)).lineLimit(1)
+
+            HStack {
+                Text(relative).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Load") { engine.loadNamed(state.name) }
+                    .controlSize(.small)
+                Button {
+                    confirmDelete = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.4)))
+        .confirmationDialog("Delete \(state.name)?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) { engine.deleteNamed(state.name) }
+        }
+    }
+
+    private var relative: String {
+        guard let date = state.date else { return "" }
+        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+    }
+}
+
+struct ControlsSettings: View {
+    @State private var recording: String?
+    @State private var monitor: Any?
+    // Bumped after every rebinding so the rows re-read UserDefaults.
+    @State private var version = 0
+
+    var body: some View {
+        Form {
+            ForEach(Keybind.all) { bind in
+                HStack {
+                    Text(bind.label)
+                    Spacer()
+                    Button(recording == bind.id ? "Press a key…" : display(bind)) {
+                        record(bind)
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minWidth: 90)
+                }
+            }
+            .id(version)
+
+            HStack {
+                Button("Reset to Defaults") {
+                    Keybind.reset()
+                    version += 1
+                }
+                Spacer()
+                Text("Escape stays reserved for settings; it also cancels a capture.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .onDisappear { stop() }
+    }
+
+    private func display(_ bind: Keybind) -> String {
+        let label = Keybind.keyLabel(of: bind)
+        return label.isEmpty ? "—" : label
+    }
+
+    private func record(_ bind: Keybind) {
+        stop()
+        recording = bind.id
+
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            defer { DispatchQueue.main.async { stop(); version += 1 } }
+            if event.keyCode != 53 {
+                Keybind.rebind(bind, to: event.keyCode, label: keyName(event))
+            }
+            return nil
+        }
+    }
+
+    private func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        recording = nil
+    }
+
+    private func keyName(_ event: NSEvent) -> String {
+        switch event.keyCode {
+        case 123: return "←"
+        case 124: return "→"
+        case 125: return "↓"
+        case 126: return "↑"
+        case 36: return "Return"
+        case 48: return "Tab"
+        case 49: return "Space"
+        case 51: return "Delete"
+        default: return event.charactersIgnoringModifiers?.uppercased() ?? "?"
+        }
     }
 }
 
@@ -1091,6 +1434,9 @@ struct MainScene: View {
                 engine.settingsRequested = false
             }
         }
+        .sheet(isPresented: $engine.savesRequested) {
+            SavesSheet(engine: engine)
+        }
         .onHover { inside in
             hovering = inside
             trafficLights(visible: inside)
@@ -1173,6 +1519,10 @@ struct FileCommands: Commands {
             Button("Open ROM…") { delegate.chooseROM() }
                 .keyboardShortcut("o")
 
+            Button("Saves…") { engine.savesRequested = true }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(engine.isIdle)
+
             Menu("Recent ROMs") {
                 ForEach(engine.recentROMs, id: \.path) { rom in
                     Button(rom.deletingPathExtension().lastPathComponent) {
@@ -1239,6 +1589,8 @@ struct AtomboyApp: App {
                     .tabItem { Label("General", systemImage: "gearshape") }
                 ScreenSettings(engine: delegate.engine)
                     .tabItem { Label("Screen", systemImage: "display") }
+                ControlsSettings()
+                    .tabItem { Label("Controls", systemImage: "keyboard") }
                 AudioSettings(engine: delegate.engine)
                     .tabItem { Label("Audio", systemImage: "speaker.wave.2") }
                 CodesSettings(engine: delegate.engine)

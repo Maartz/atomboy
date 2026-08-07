@@ -59,6 +59,7 @@ defmodule Atomboy.Play do
   alias Atomboy.Codes
   alias Atomboy.Joypad
   alias Atomboy.LCD
+  alias Atomboy.Library
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
@@ -80,7 +81,7 @@ defmodule Atomboy.Play do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :save))
+    lib = Library.open(rom, rom_path, opts)
     tty = pty_path()
 
     with :ok <- ensure_sole_reader(tty),
@@ -88,7 +89,7 @@ defmodule Atomboy.Play do
       saved = terminal_setup(tty)
 
       try do
-        play(rom, sav, tty, link, opts)
+        play(rom, lib, tty, link, opts)
       after
         Link.close(link)
         terminal_restore(tty, saved)
@@ -129,7 +130,9 @@ defmodule Atomboy.Play do
     end
   end
 
-  defp play(rom, sav, tty, link, opts) do
+  defp play(rom, lib, tty, link, opts) do
+    sav = Library.sav_path(lib)
+
     (fn ->
        parent = self()
        input = tty || "/dev/fd/0"
@@ -166,7 +169,7 @@ defmodule Atomboy.Play do
            hold_frames: Keyword.get(opts, :hold, @default_hold),
            dump: Keyword.get(opts, :dump),
            dump_every: Keyword.get(opts, :dump_every),
-           state_base: Path.rootname(sav),
+           lib: lib,
            state_slot: 1,
            palette: palette,
            lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
@@ -537,12 +540,18 @@ defmodule Atomboy.Play do
   # The actions — on the rising edge only: press or keystroke, never the
   # repeat (holding p must not make the pause flicker).
   defp apply_event({tag, :save_state}, ctx) when tag in [:key, :press] do
-    Save.write_state(state_path(ctx), {ctx.state, ctx.ram, ctx.apu})
+    Library.save_state(
+      ctx.lib,
+      slot_name(ctx),
+      {ctx.state, ctx.ram, ctx.apu},
+      Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
+    )
+
     %{ctx | note: {"state saved (slot #{ctx.state_slot})", 120}}
   end
 
   defp apply_event({tag, :load_state}, ctx) when tag in [:key, :press] do
-    case Save.read_state(state_path(ctx)) do
+    case Library.load_state(ctx.lib, slot_name(ctx)) do
       {:ok, {state, ram, apu}} ->
         # The current cable survives the trip through time.
         ram =
@@ -679,15 +688,9 @@ defmodule Atomboy.Play do
         ghost: nil
     }
 
-  # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
-  # on-disk convention `Atomboy.Save` also spells out.
-  defp state_path(ctx) do
-    if ctx.state_slot == 1 do
-      ctx.state_base <> ".state"
-    else
-      ctx.state_base <> ".case#{ctx.state_slot}.state"
-    end
-  end
+  # The slot as the library knows it — a reserved state name. In sidecar
+  # fallback the library itself keeps the historical file names.
+  defp slot_name(ctx), do: "slot-#{ctx.state_slot}"
 
   # The explicit \r before each \n: harmless when opost already translates,
   # a lifesaver if some environment turned it off — the display then depends

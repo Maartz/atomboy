@@ -38,6 +38,19 @@ defmodule Atomboy.Server do
   — the shell's native settings use these. The end of input (shell closed)
   stops the game cleanly — save written.
 
+  ## The library
+
+  The save browser speaks six more operations. `<<?L, _>>` asks for the
+  inventory and is answered on stdout with the stream's one structured
+  record — `<<?J, len::32-big, json>>`: game id, current profile, the
+  profiles, and the named states with their timestamps and screenshot
+  paths. `<<?K, len, name>>` saves the machine under a name (portrait
+  included), `<<?O, len, name>>` loads it back, `<<?D, len, name>>`
+  deletes it — `K` and `D` answer with a fresh `?J`, as does `?L`.
+  `<<?F, len, name>>` switches profile, and a profile switch is a power
+  cycle: battery flushed, machine reset on the other player's cartridge.
+  `<<?E, _>>` exports the battery back beside the ROM.
+
   Everything else is the usual machinery: menu inside the frame, states,
   mixer, link cable (`--listen`/`--link` work in server mode too).
   """
@@ -48,6 +61,7 @@ defmodule Atomboy.Server do
   alias Atomboy.APU
   alias Atomboy.Joypad
   alias Atomboy.LCD
+  alias Atomboy.Library
   alias Atomboy.Link
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
@@ -83,7 +97,8 @@ defmodule Atomboy.Server do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :save))
+    lib = Library.open(rom, rom_path, opts)
+    sav = Library.sav_path(lib)
 
     with {:ok, link} <- link_up(opts) do
       # stdout is a binary stream: in Unicode (the BEAM's default), every
@@ -110,7 +125,7 @@ defmodule Atomboy.Server do
             rom: rom,
             ram: ram,
             sav: sav,
-            state_base: Path.rootname(sav),
+            lib: lib,
             state_slot: 1,
             palette: palette,
             lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
@@ -123,6 +138,11 @@ defmodule Atomboy.Server do
             history: [],
             last_frame: nil,
             turbo: false,
+            # What a power cycle must remember: the machine flags of boot.
+            reset: %{
+              dmg: Keyword.get(opts, :dmg, false),
+              codes: Keyword.get(opts, :codes, "")
+            },
             deadline: System.monotonic_time(:microsecond) + @frame_us
           })
         )
@@ -312,6 +332,34 @@ defmodule Atomboy.Server do
       {:codes, string} ->
         drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(string))})
 
+      # The save browser: list, save, load, delete, profile, export.
+      {:library, :list} ->
+        drain(emit_library(ctx))
+
+      {:library, :save, name} ->
+        Library.save_state(
+          ctx.lib,
+          name,
+          {ctx.state, ctx.ram, ctx.apu},
+          Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
+        )
+
+        drain(emit_library(ctx))
+
+      {:library, :load, name} ->
+        drain(load_named(ctx, name))
+
+      {:library, :delete, name} ->
+        Library.delete_state(ctx.lib, name)
+        drain(emit_library(ctx))
+
+      {:library, :profile, name} ->
+        drain(ctx |> power_cycle(name) |> emit_library())
+
+      {:library, :export} ->
+        Library.export(ctx.lib)
+        drain(ctx)
+
       {:key, op, key} ->
         case press(ctx, op, Map.get(@keys, key)) do
           :quit -> :quit
@@ -387,25 +435,17 @@ defmodule Atomboy.Server do
   defp menu_action(_action, :quit), do: :quit
 
   defp menu_action(:save_state, ctx) do
-    Save.write_state(state_path(ctx), {ctx.state, ctx.ram, ctx.apu})
+    Library.save_state(
+      ctx.lib,
+      slot_name(ctx),
+      {ctx.state, ctx.ram, ctx.apu},
+      Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
+    )
+
     ctx
   end
 
-  defp menu_action(:load_state, ctx) do
-    case Save.read_state(state_path(ctx)) do
-      {:ok, {state, ram, apu}} ->
-        ram =
-          case Map.get(ctx.ram, :link) do
-            nil -> Map.delete(ram, :link)
-            link -> Map.put(ram, :link, link)
-          end
-
-        %{ctx | state: state, ram: ram, apu: apu}
-
-      :error ->
-        ctx
-    end
-  end
+  defp menu_action(:load_state, ctx), do: load_named(ctx, slot_name(ctx))
 
   defp menu_action({:slot, n}, ctx), do: %{ctx | state_slot: n}
   defp menu_action({:palette, p}, ctx), do: recompile(%{ctx | palette: p})
@@ -423,15 +463,68 @@ defmodule Atomboy.Server do
         | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))
       })
 
-  # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
-  # on-disk convention `Atomboy.Save` also spells out.
-  defp state_path(ctx) do
-    if ctx.state_slot == 1 do
-      ctx.state_base <> ".state"
-    else
-      ctx.state_base <> ".case#{ctx.state_slot}.state"
+  # A state by name — the current cable survives the trip through time.
+  defp load_named(ctx, name) do
+    case Library.load_state(ctx.lib, name) do
+      {:ok, {state, ram, apu}} ->
+        ram =
+          case Map.get(ctx.ram, :link) do
+            nil -> Map.delete(ram, :link)
+            link -> Map.put(ram, :link, link)
+          end
+
+        %{ctx | state: state, ram: ram, apu: apu}
+
+      :error ->
+        ctx
     end
   end
+
+  # Switching profile is handing the console to the other player: the
+  # battery flushed, the machine reset from boot on the other cartridge —
+  # cable and mixer surviving, they belong to the table, not the game.
+  defp power_cycle(ctx, profile) do
+    Save.flush(ctx.ram, ctx.sav)
+    lib = Library.set_profile(ctx.lib, profile)
+    sav = Library.sav_path(lib)
+
+    ram =
+      Screen.boot_ram(ctx.rom, ctx.reset.dmg)
+      |> then(&if(link = Map.get(ctx.ram, :link), do: Map.put(&1, :link, link), else: &1))
+      |> then(&if(mixer = Map.get(ctx.ram, :mixer), do: Map.put(&1, :mixer, mixer), else: &1))
+      |> Save.load(sav)
+      |> Codes.installe(Codes.analyse(ctx.reset.codes))
+
+    %{
+      ctx
+      | lib: lib,
+        sav: sav,
+        ram: ram,
+        state: Screen.boot_state(ctx.rom, ctx.reset.dmg),
+        apu: %APU{},
+        history: [],
+        last_frame: nil,
+        menu: nil
+    }
+  end
+
+  # The inventory onto the wire: the one structured record of the stream.
+  defp emit_library(ctx) do
+    payload =
+      JSON.encode!(%{
+        game: Library.game_id(ctx.rom),
+        profile: ctx.lib.profile,
+        profiles: Library.profiles(ctx.lib),
+        states: Library.list(ctx.lib)
+      })
+
+    IO.binwrite(:stdio, [<<?J, byte_size(payload)::32-big>>, payload])
+    ctx
+  end
+
+  # The slot as the library knows it — a reserved state name. In sidecar
+  # fallback the library itself keeps the historical file names.
+  defp slot_name(ctx), do: "slot-#{ctx.state_slot}"
 
   defp mixer_put(ram, key, value) do
     mixer = Map.get(ram, :mixer, Menu.mixer_default())
@@ -461,6 +554,26 @@ defmodule Atomboy.Server do
           end
 
         send(parent, {:codes, string})
+        read_loop(parent, f)
+
+      # The library ops: L and E stand alone, K/O/D/F carry a name.
+      {:ok, <<?L, _>>} ->
+        send(parent, {:library, :list})
+        read_loop(parent, f)
+
+      {:ok, <<?E, _>>} ->
+        send(parent, {:library, :export})
+        read_loop(parent, f)
+
+      {:ok, <<op, len>>} when op in ~c"KODF" ->
+        name =
+          case :file.read(f, len) do
+            {:ok, data} when len > 0 -> data
+            _ -> ""
+          end
+
+        verb = %{?K => :save, ?O => :load, ?D => :delete, ?F => :profile}
+        send(parent, {:library, Map.fetch!(verb, op), name})
         read_loop(parent, f)
 
       {:ok, <<op, key>>} ->

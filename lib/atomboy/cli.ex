@@ -120,6 +120,7 @@ defmodule Atomboy.CLI do
           listen: :integer,
           link: :string,
           save: :string,
+          library: :string,
           codes: :string
         ]
       )
@@ -190,7 +191,7 @@ defmodule Atomboy.CLI do
   defp rom(_argv) do
     {:error,
      "usage: atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
-       "[--link host:port] [--save name] [--hold N] [--frames N] " <>
+       "[--link host:port] [--save name] [--library dir] [--hold N] [--frames N] " <>
        "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb|crt] " <>
        "[--codes 01VVLLHH,…]"}
   end

@@ -26,6 +26,7 @@ defmodule Atomboy.Window do
   alias Atomboy.Codes
   alias Atomboy.Joypad
   alias Atomboy.LCD
+  alias Atomboy.Library
   alias Atomboy.Link
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
@@ -67,7 +68,8 @@ defmodule Atomboy.Window do
   @spec run(Path.t(), keyword()) :: :ok | {:error, String.t()}
   def run(rom_path, opts \\ []) do
     rom = Screen.load(rom_path)
-    sav = Save.path(rom_path, Keyword.get(opts, :save))
+    lib = Library.open(rom, rom_path, opts)
+    sav = Library.sav_path(lib)
 
     link =
       cond do
@@ -122,7 +124,7 @@ defmodule Atomboy.Window do
       rom: rom,
       ram: ram,
       sav: sav,
-      state_base: Path.rootname(sav),
+      lib: lib,
       state_slot: 1,
       palette: palette,
       # The panel's tables — compiled once, here, because the color table
@@ -352,12 +354,18 @@ defmodule Atomboy.Window do
   end
 
   defp act(ctx, :save_state) do
-    Save.write_state(state_path(ctx), {ctx.state, ctx.ram, ctx.apu})
+    Library.save_state(
+      ctx.lib,
+      slot_name(ctx),
+      {ctx.state, ctx.ram, ctx.apu},
+      Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
+    )
+
     %{ctx | note: {"state saved (slot #{ctx.state_slot})", 120}}
   end
 
   defp act(ctx, :load_state) do
-    case Save.read_state(state_path(ctx)) do
+    case Library.load_state(ctx.lib, slot_name(ctx)) do
       {:ok, {state, ram, apu}} ->
         ram =
           case Map.get(ctx.ram, :link) do
@@ -439,15 +447,9 @@ defmodule Atomboy.Window do
     %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
   end
 
-  # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
-  # on-disk convention `Atomboy.Save` also spells out.
-  defp state_path(ctx) do
-    if ctx.state_slot == 1 do
-      ctx.state_base <> ".state"
-    else
-      ctx.state_base <> ".case#{ctx.state_slot}.state"
-    end
-  end
+  # The slot as the library knows it — a reserved state name. In sidecar
+  # fallback the library itself keeps the historical file names.
+  defp slot_name(ctx), do: "slot-#{ctx.state_slot}"
 
   # ── Rendering ───────────────────────────────────────────────────────────────
 
