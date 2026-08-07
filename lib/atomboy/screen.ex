@@ -134,19 +134,82 @@ defmodule Atomboy.Screen do
     lcd_on? = band(Map.get(ram, 0xFF40, 0x91), 0x80) != 0
     ram = ppu_line(ram, ly, lcd_on?)
 
-    # At double speed (KEY1, GBC) the CPU swallows twice as many cycles per
-    # scanline — the PPU keeps its own rhythm.
-    budget = @line_cycles * Map.get(ram, :speed, 1)
-    {state, ram, cycles} = CartLoop.run(state, rom, ram, budget)
-
-    # A GDMA posted during the line is consumed as soon as the line is done
-    # — at worst 456 cycles behind the hardware, which copies on the spot.
-    ram = gdma(rom, ram)
-    ram = hdma(rom, ram, ly, lcd_on?)
+    {state, ram, cycles} = phases(state, rom, ram, ly, lcd_on?)
 
     # The link cable resolves at the scanline — real hardware latency.
     ram = if :erlang.is_map_key(:link, ram), do: Atomboy.Link.line(ram), else: ram
     {state, Atomboy.Timer.advance(ram, cycles)}
+  end
+
+  # The scanline as the PPU divides it: 80 dots scanning OAM (mode 2), 172
+  # drawing (mode 3), 204 in HBlank (mode 0) — and mode 1 for the ten lines
+  # of vblank.
+  #
+  # The division is not cosmetic. The CPU runs one slice at a time, so a
+  # program that polls STAT sees the mode *move*; run the whole line in one
+  # block and the two low bits are frozen at whatever the game last wrote.
+  # The Gen-2 Pokémon wait on exactly that — `LDH A,(FF41); AND 3` until the
+  # mode leaves zero — before firing their VRAM DMA, and spin forever on a
+  # frozen STAT with a black screen to show for it.
+  @phases [{2, 80}, {3, 172}, {0, 204}]
+
+  defp phases(state, rom, ram, _ly, false),
+    do: one(state, rom, ram, nil)
+
+  defp phases(state, rom, ram, ly, true) when ly >= @visible,
+    do: one(state, rom, ram, {1, ly == @visible})
+
+  # `CartLoop.run` stops on the first instruction to cross its budget, so it
+  # overruns by up to one instruction. One slice per line overran once; three
+  # would overrun three times, and the scanline would quietly grow by some
+  # ten percent — DIV races ahead, and every timing derived from it with it.
+  # The overrun is therefore a debt, subtracted from the next slice: the line
+  # still ends one instruction past 456 dots, exactly as it always did.
+  defp phases(state, rom, ram, _ly, true) do
+    {state, ram, total, _debt} =
+      Enum.reduce(@phases, {state, ram, 0, 0}, fn {mode, dots}, {state, ram, total, debt} ->
+        {state, ram, cycles, debt} = slice(state, rom, ram, {mode, true}, dots, mode == 0, debt)
+        {state, ram, total + cycles, debt}
+      end)
+
+    {state, ram, total}
+  end
+
+  # A line that is one slice: no debt to carry, nothing to hand on.
+  defp one(state, rom, ram, mode) do
+    {state, ram, cycles, _debt} = slice(state, rom, ram, mode, @line_cycles, false)
+    {state, ram, cycles}
+  end
+
+  # One slice: the mode is posted, HBlank hands its block to the HDMA, the
+  # CPU runs — and a GDMA posted along the way is consumed at the end of the
+  # slice rather than at the end of the line, so two in a row survive.
+  #
+  # At double speed (KEY1, GBC) the CPU swallows twice as many cycles per
+  # dot — the PPU keeps its own rhythm.
+  defp slice(state, rom, ram, mode, dots, hblank?, debt \\ 0) do
+    ram = if mode, do: stat_mode(ram, mode), else: ram
+    ram = if hblank?, do: hdma(rom, ram), else: ram
+
+    budget = max(dots * Map.get(ram, :speed, 1) - debt, 0)
+    {state, ram, cycles} = CartLoop.run(state, rom, ram, budget)
+
+    {state, gdma(rom, ram), cycles, cycles - budget}
+  end
+
+  # Entering a mode: the two low bits of STAT, and the interrupt the game may
+  # have armed for it — bit 3 for HBlank, 4 for vblank, 5 for OAM. Mode 3 has
+  # none. The vblank one fires on entering line 144, not on each of the ten.
+  defp stat_mode(ram, {mode, fire?}) do
+    stat = Map.get(ram, 0xFF41, 0)
+    ram = Map.put(ram, 0xFF41, bor(band(stat, 0xFC), mode))
+    enable = elem({0x08, 0x10, 0x20, 0x00}, mode)
+
+    if fire? and band(stat, enable) != 0 do
+      Map.update(ram, 0xFF0F, 0x02, &bor(&1, 0x02))
+    else
+      ram
+    end
   end
 
   # The general transfer (GDMA): posted by the write to HDMA5, executed here
@@ -162,11 +225,12 @@ defmodule Atomboy.Screen do
     end
   end
 
-  # HDMA: one sixteen-byte block per HBlank of a visible line, screen on.
-  # Once finished, HDMA5 reads back as 0xFF.
-  defp hdma(rom, ram, ly, lcd_on?) do
+  # HDMA: one sixteen-byte block per HBlank of a visible line, screen on —
+  # which is the only place `slice/6` calls it from. Once finished, HDMA5
+  # reads back as 0xFF.
+  defp hdma(rom, ram) do
     case Map.get(ram, :hdma) do
-      {src, dst, blocks} when lcd_on? and ly < @visible ->
+      {src, dst, blocks} ->
         ram = copy(rom, ram, src, dst, 16)
 
         if blocks == 1 do

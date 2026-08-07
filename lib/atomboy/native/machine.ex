@@ -25,7 +25,8 @@ defmodule Atomboy.Native.Machine do
 
   ## What is modelled, and what is not
 
-  Exactly what `Screen.step_line/4` models, and nothing more:
+  Almost what `Screen.step_line/4` models -- see the STAT mode below for the
+  one place the two machines have parted company:
 
     * LY at 0xFF44, and LY frozen at zero with the screen off -- the PPU stops
       generating when LCDC bit 7 is clear, which is why no vblank fires then;
@@ -37,11 +38,23 @@ defmodule Atomboy.Native.Machine do
 
   Pixels are modelled too, on request -- see "The pixels" below.
 
-  Not modelled, and each absence is a choice `Screen` already made or a
-  deliberate limit of this stage: the STAT mode bits (0-1), because no game the
-  project runs reads them and `Screen` does not maintain them either; double
-  speed, since `KEY1` is a Game Boy Color register and this loop is DMG; the GBC
-  video DMAs (GDMA/HDMA) and the link cable, for the same reason.
+  Not modelled: double speed, since `KEY1` is a Game Boy Color register and this
+  loop is DMG; the GBC video DMAs (GDMA/HDMA) and the link cable, for the same
+  reason.
+
+  And one absence that is no longer a shared choice but a **divergence**: the
+  STAT mode bits (0-1). `Screen` used to leave them where the guest last wrote
+  them, and this loop was built to match. It no longer does: `Screen` now cuts
+  the scanline into its phases -- 80 dots of OAM scan, 172 of drawing, 204 of
+  HBlank -- and runs the CPU one phase at a time, so a program that polls STAT
+  sees the mode move. This loop still runs the line as one block.
+
+  The consequence is not academic. A game that waits for the mode to leave zero
+  before firing a VRAM DMA -- which is precisely what the Gen-2 Pokémon do, and
+  the reason Crystal showed nothing but a black screen until `Screen` learned
+  the phases -- runs there and hangs here. `NativeMachineTest` masks those two
+  bits to keep the rest of the differential honest; the mask is a marker, not a
+  verdict. Giving this loop the same phases is the work that removes it.
 
   ## Composing with the interpreter
 
