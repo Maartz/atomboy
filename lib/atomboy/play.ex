@@ -172,7 +172,14 @@ defmodule Atomboy.Play do
            lib: lib,
            state_slot: 1,
            palette: palette,
-           lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
+           lcd:
+             LCD.compile(
+               Keyword.get(opts, :panel, :raw),
+               palette,
+               Map.get(ram, :cgb, false),
+               Keyword.get(opts, :dial)
+             ),
+           dial: Keyword.get(opts, :dial),
            ghost: nil,
            gfx: false,
            gfx_id: 1,
@@ -684,7 +691,7 @@ defmodule Atomboy.Play do
   defp recompile(ctx),
     do: %{
       ctx
-      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false)),
+      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false), ctx.dial),
         ghost: nil
     }
 

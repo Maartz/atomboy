@@ -209,6 +209,42 @@ defmodule Atomboy.LCDTest do
     end
   end
 
+  describe "the dial" do
+    test "turned up, every shade darkens — shade 0 most, shade 3 least" do
+      rest = LCD.compile(:dmg).shades |> Tuple.to_list() |> Enum.map(&luma/1)
+      inked = LCD.compile(:dmg, :dmg, false, 90).shades |> Tuple.to_list() |> Enum.map(&luma/1)
+
+      deltas = Enum.zip_with(rest, inked, &(&1 - &2))
+
+      assert Enum.all?(deltas, &(&1 >= 0)), "a shade brightened: #{inspect(deltas)}"
+
+      # The article's measurement, as a shape: the lightest shade moves
+      # more than twice as far as the darkest, which is already home.
+      assert List.first(deltas) > 2 * List.last(deltas),
+             "no asymmetry: #{inspect(deltas)}"
+    end
+
+    test "turned down, the image sinks into the reflector" do
+      rest = LCD.compile(:dmg).shades
+      pale = LCD.compile(:dmg, :dmg, false, 10).shades
+
+      # The darkest shade pales — pulled toward the bright background.
+      assert luma(elem(pale, 3)) > luma(elem(rest, 3))
+    end
+
+    test "raw has no panel, so no dial" do
+      assert LCD.compile(:raw, :dmg, false, 90).shades == LCD.compile(:raw).shades
+    end
+
+    test "the colour table follows the dial" do
+      rest = LCD.compile(:cgb, :dmg, true)
+      inked = LCD.compile(:cgb, :dmg, true, 90)
+
+      white = 0x7FFF * 3
+      assert luma(binary_part(inked.colors, white, 3)) < luma(binary_part(rest.colors, white, 3))
+    end
+  end
+
   describe "next/2" do
     test "cycles both ways through the presets" do
       presets = LCD.presets()

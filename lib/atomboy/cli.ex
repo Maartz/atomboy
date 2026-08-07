@@ -121,12 +121,14 @@ defmodule Atomboy.CLI do
           link: :string,
           save: :string,
           library: :string,
+          dial: :integer,
           codes: :string
         ]
       )
 
     with {:ok, opts} <- palette(opts),
          {:ok, opts} <- panel(opts),
+         {:ok, opts} <- dial(opts),
          {:ok, rom} <- rom(argv) do
       {:ok, rom, opts}
     end
@@ -180,6 +182,15 @@ defmodule Atomboy.CLI do
     end
   end
 
+  # The contrast wheel: only meaningful on a panel, but validated always.
+  defp dial(opts) do
+    case Keyword.get(opts, :dial) do
+      nil -> {:ok, opts}
+      v when v in 0..100 -> {:ok, opts}
+      other -> {:error, "the dial goes from 0 to 100, not #{other}"}
+    end
+  end
+
   defp rom([rom]) do
     if File.exists?(rom) do
       {:ok, rom}
@@ -193,6 +204,7 @@ defmodule Atomboy.CLI do
      "usage: atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
        "[--link host:port] [--save name] [--library dir] [--hold N] [--frames N] " <>
        "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb|crt] " <>
+       "[--dial 0-100] " <>
        "[--codes 01VVLLHH,…]"}
   end
 end

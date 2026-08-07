@@ -92,15 +92,22 @@ defmodule Atomboy.LCD do
   `color?` says whether the cartridge runs in colour: the 32768-entry table
   costs a moment to build and a hundred kilobytes to hold, and a monochrome
   game will never read a single entry of it.
-  """
-  @spec compile(preset(), :dmg | :gray, boolean()) :: t()
-  def compile(preset, palette \\ :dmg, color? \\ false)
 
-  def compile(:raw, palette, _color?),
+  `dial` is the contrast wheel under the DMG's thumb: 0-100 across the
+  density axis, `nil` the preset's own resting point. Turned up, every
+  shade slides toward the darkest one — which is already there and does
+  not move; turned down, toward the bare reflector. `raw` has no panel,
+  so no dial.
+  """
+  @spec compile(preset(), :dmg | :gray, boolean(), 0..100 | nil) :: t()
+  def compile(preset, palette \\ :dmg, color? \\ false, dial \\ nil)
+
+  def compile(:raw, palette, _color?, _dial),
     do: %__MODULE__{preset: :raw, shades: raw_shades(palette), colors: nil}
 
-  def compile(preset, _palette, color?) when preset in @presets do
+  def compile(preset, _palette, color?, dial) when preset in @presets do
     profile = profile(preset)
+    profile = if dial, do: %{profile | density: dial / 100}, else: profile
     shades = compile_shades(profile)
 
     %__MODULE__{

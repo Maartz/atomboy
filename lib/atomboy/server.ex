@@ -34,7 +34,9 @@ defmodule Atomboy.Server do
   the direct actions for the native menu bar: `?s`/`?r` save/load state,
   `?1`-`?9` the slot. Three operations carry a value rather than a key:
   `<<?V, v>>` sets the mixer volume (0-100), `<<?X, mask>>` the four voices
-  (bits 0-3), `<<?N, i>>` the panel preset (the same index `?P` announces)
+  (bits 0-3), `<<?N, i>>` the panel preset (the same index `?P` announces),
+  `<<?G, v>>` the contrast dial (0-100; above 100 returns to the preset's
+  resting point)
   — the shell's native settings use these. The end of input (shell closed)
   stops the game cleanly — save written.
 
@@ -128,7 +130,14 @@ defmodule Atomboy.Server do
             lib: lib,
             state_slot: 1,
             palette: palette,
-            lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
+            lcd:
+              LCD.compile(
+                Keyword.get(opts, :panel, :raw),
+                palette,
+                Map.get(ram, :cgb, false),
+                Keyword.get(opts, :dial)
+              ),
+            dial: Keyword.get(opts, :dial),
             down: MapSet.new(),
             menu: nil,
             apu: %APU{},
@@ -332,6 +341,11 @@ defmodule Atomboy.Server do
       {:codes, string} ->
         drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(string))})
 
+      # The contrast dial: ?G carries 0-100; anything above returns the
+      # panel to its resting point. The tables recompile mid-frame.
+      {:key, ?G, v} ->
+        drain(recompile(%{ctx | dial: if(v <= 100, do: v, else: nil)}))
+
       # The save browser: list, save, load, delete, profile, export.
       {:library, :list} ->
         drain(emit_library(ctx))
@@ -460,7 +474,7 @@ defmodule Atomboy.Server do
     do:
       emit_panel(%{
         ctx
-        | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))
+        | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false), ctx.dial)
       })
 
   # A state by name — the current cable survives the trip through time.

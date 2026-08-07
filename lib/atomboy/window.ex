@@ -129,7 +129,14 @@ defmodule Atomboy.Window do
       palette: palette,
       # The panel's tables — compiled once, here, because the color table
       # is a hundred kilobytes a monochrome game would never read.
-      lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
+      lcd:
+        LCD.compile(
+          Keyword.get(opts, :panel, :raw),
+          palette,
+          Map.get(ram, :cgb, false),
+          Keyword.get(opts, :dial)
+        ),
+      dial: Keyword.get(opts, :dial),
       # The response curve's per-pixel state — nil until the first ghosted
       # frame, dropped back to nil whenever the panel changes.
       ghost: nil,
@@ -429,7 +436,7 @@ defmodule Atomboy.Window do
   defp recompile(ctx),
     do: %{
       ctx
-      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false)),
+      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false), ctx.dial),
         ghost: nil
     }
 

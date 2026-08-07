@@ -48,6 +48,7 @@ let FRAME_BYTES = WIDTH * HEIGHT * 3
 struct PanelUniforms {
     var a: SIMD4<Float>
     var b: SIMD4<Float>
+    var c: SIMD4<Float>  // stn, crosstalk, subpixel, age
     var reflector: SIMD4<Float>
     var geometry: SIMD4<Float>
     var scale: SIMD4<Float>
@@ -65,20 +66,26 @@ struct PanelPreset {
     let vignette: Float
     let reflector: SIMD4<Float>
     var crt: Bool = false
+    var stn: Float = 0
+    var crosstalk: Float = 0
+    var subpixel: Float = 0
 
     static let all: [PanelPreset] = [
         // 0 raw
         PanelPreset(alphaFall: 1.0, alphaRise: 1.0, gap: 0, shadow: 0, grain: 0,
                     vignette: 0, reflector: SIMD4(0, 0, 0, 0)),
-        // 1 dmg — τ 21/61 ms, the STN smear
+        // 1 dmg — τ 21/61 ms, the STN smear; the crosstalk of a passive matrix
         PanelPreset(alphaFall: 0.549, alphaRise: 0.240, gap: 0.14, shadow: 0.25, grain: 0.03,
-                    vignette: 0.06, reflector: SIMD4(0xD2 / 255.0, 0xDC / 255.0, 0xB0 / 255.0, 0)),
-        // 2 pocket — τ 16/44 ms, FSTN answers faster
+                    vignette: 0.06, reflector: SIMD4(0xD2 / 255.0, 0xDC / 255.0, 0xB0 / 255.0, 0),
+                    stn: 0.12, crosstalk: 0.07),
+        // 2 pocket — τ 16/44 ms, FSTN answers faster and bleeds less
         PanelPreset(alphaFall: 0.649, alphaRise: 0.317, gap: 0.12, shadow: 0.20, grain: 0.025,
-                    vignette: 0.05, reflector: SIMD4(0xED / 255.0, 0xE9 / 255.0, 0xDC / 255.0, 0)),
-        // 3 cgb — τ 13/31 ms
+                    vignette: 0.05, reflector: SIMD4(0xED / 255.0, 0xE9 / 255.0, 0xDC / 255.0, 0),
+                    stn: 0.08, crosstalk: 0.05),
+        // 3 cgb — τ 13/31 ms; the one panel whose dots split into strips
         PanelPreset(alphaFall: 0.724, alphaRise: 0.417, gap: 0.12, shadow: 0.15, grain: 0.02,
-                    vignette: 0.05, reflector: SIMD4(0xF4 / 255.0, 0xF4 / 255.0, 0xEC / 255.0, 0)),
+                    vignette: 0.05, reflector: SIMD4(0xF4 / 255.0, 0xF4 / 255.0, 0xEC / 255.0, 0),
+                    stn: 0.06, crosstalk: 0.04, subpixel: 0.30),
         // 4 crt — the Super Game Boy's television: phosphor answers in
         // ~2 ms, so the response pass is effectively instant; the look is
         // all scanlines, grille and vignette.
@@ -96,6 +103,7 @@ using namespace metal;
 struct Params {
     float4 a;          // alphaFall, alphaRise, seed, gapFraction
     float4 b;          // shadow, grain, vignette, crt flag
+    float4 c;          // stn, crosstalk, subpixel, age
     float4 reflector;
     float4 geometry;   // offset.x, offset.y, drawable w, drawable h
     float4 scale;      // integer scale in x
@@ -131,6 +139,19 @@ fragment float4 respond(VOut in [[stage_in]],
     return float4(p.a.z > 0.5 ? t : next, 1.0);
 }
 
+// The column pass, at 160×1: each fragment averages its column of the
+// response state — the aggregate the crosstalk needs, 144 samples of
+// work the GPU does not feel.
+fragment float4 columns(VOut in [[stage_in]],
+                        texture2d<float> state [[texture(0)]]) {
+    float sum = 0.0;
+    for (int y = 0; y < 144; y++) {
+        float3 px = state.sample(nn, float2(in.uv.x, (float(y) + 0.5) / 144.0)).rgb;
+        sum += dot(px, float3(0.299, 0.587, 0.114));
+    }
+    return float4(sum / 144.0, 0.0, 0.0, 1.0);
+}
+
 // Static hash noise in [-1, 1] — time-varying grain would flicker.
 float grain_hash(float2 v) {
     return fract(sin(dot(v, float2(12.9898, 78.233))) * 43758.5453) * 2.0 - 1.0;
@@ -146,6 +167,7 @@ float grain_hash(float2 v) {
 // breath of vignette close the pass.
 fragment float4 dots(VOut in [[stage_in]],
                      texture2d<float> state [[texture(0)]],
+                     texture2d<float> columnLuma [[texture(1)]],
                      constant Params& p [[buffer(0)]]) {
     float scale = p.scale.x;
     float2 px = in.pos.xy - p.geometry.xy;
@@ -155,7 +177,40 @@ fragment float4 dots(VOut in [[stage_in]],
         return float4(0.02, 0.02, 0.02, 1.0);
 
     float3 ink = state.sample(nn, (game + 0.5) / float2(160.0, 144.0)).rgb;
+
+    // STN row drive: each dot borrows a little from the one above it —
+    // the vertical softness of the multiplexed scheme. Row 0 has nobody
+    // above and keeps to itself.
+    if (p.c.x > 0.0) {
+        float2 up = float2(game.x + 0.5, max(game.y - 0.5, 0.5)) / float2(160.0, 144.0);
+        ink = mix(ink, state.sample(nn, up).rgb, p.c.x);
+    }
+
+    // Passive-matrix crosstalk: a column is dimmed by its own dark
+    // content — the streak a dark sprite drags down the screen — plus a
+    // fixed per-column gain the factory never trimmed. Static, both.
+    if (p.c.y > 0.0) {
+        float column = columnLuma.sample(nn, float2((game.x + 0.5) / 160.0, 0.5)).r;
+        ink *= 1.0 - p.c.y * (1.0 - column) + 0.01 * grain_hash(float2(game.x, 7.0));
+    }
+
     float3 color = ink;
+
+    // The CGB's dots really are three strips. Full amplitude while a
+    // strip spans four device pixels or fewer, gone by eight — the moiré
+    // guard, which also keeps 8× from turning into coloured bars.
+    if (p.c.z > 0.0 && scale >= 3.0) {
+        float stripW = scale / 3.0;
+        float amp = p.c.z * clamp((8.0 - stripW) / 4.0, 0.0, 1.0);
+
+        if (amp > 0.0) {
+            int strip = clamp(int((px.x - game.x * scale) / stripW), 0, 2);
+            float3 mask = strip == 0 ? float3(1.0 + amp, 1.0 - amp * 0.4, 1.0 - amp * 0.4)
+                        : strip == 1 ? float3(1.0 - amp * 0.4, 1.0 + amp, 1.0 - amp * 0.4)
+                                     : float3(1.0 - amp * 0.4, 1.0 - amp * 0.4, 1.0 + amp);
+            color *= mask;
+        }
+    }
 
     if (p.b.w > 0.5) {
         // The tube: the beam paints each game row as a bright core falling
@@ -192,6 +247,24 @@ fragment float4 dots(VOut in [[stage_in]],
         }
     }
 
+    // Aging: hashed columns die first at the edges — reflector-tinted,
+    // partial length, softly banded, and static: the panel's biography,
+    // not its mood. The 2.2 curve makes the slider's first tenth one
+    // dead line and its end most of the glass.
+    if (p.c.w > 0.002) {
+        float density = pow(p.c.w, 2.2);
+        float edge = 1.0 + 1.5 * pow(fabs(game.x - 79.5) / 79.5, 3.0);
+        float h = grain_hash(float2(game.x, 3.0)) * 0.5 + 0.5;
+
+        if (h < density * edge) {
+            float reach = (0.4 + 0.6 * fract(h * 37.7)) * 144.0;
+            float fade = smoothstep(reach + 8.0, reach - 8.0, game.y);
+            float band = 0.85 + 0.15 * sin(game.y * 1.26);
+            float3 dead = max(p.reflector.rgb, float3(0.72));
+            color = mix(color, dead * band, (1.0 - fade) * 0.9);
+        }
+    }
+
     color *= 1.0 + p.b.y * grain_hash(floor(in.pos.xy));
 
     float2 c = in.pos.xy / p.geometry.zw - 0.5;
@@ -210,7 +283,9 @@ final class MetalScreen {
     private let queue: MTLCommandQueue
     private let respond: MTLRenderPipelineState
     private let dots: MTLRenderPipelineState
+    private let columns: MTLRenderPipelineState
     private let frameTex: MTLTexture
+    private let columnsTex: MTLTexture
     private var states: [MTLTexture]
     private var ping = 0
     private var rgba = [UInt8](repeating: 255, count: WIDTH * HEIGHT * 4)
@@ -253,9 +328,19 @@ final class MetalScreen {
             return device.makeTexture(descriptor: d)
         }
 
+        // The crosstalk aggregate: one row of texels, one per column.
+        func columnTexture() -> MTLTexture? {
+            let d = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba16Float, width: WIDTH, height: 1, mipmapped: false)
+            d.usage = [.renderTarget, .shaderRead]
+            return device.makeTexture(descriptor: d)
+        }
+
         guard let respond = pipeline("respond", format: .rgba16Float),
               let dots = pipeline("dots", format: .bgra8Unorm),
+              let columns = pipeline("columns", format: .rgba16Float),
               let frameTex = texture(.rgba8Unorm, renderable: false),
+              let columnsTex = columnTexture(),
               let stateA = texture(.rgba16Float, renderable: true),
               let stateB = texture(.rgba16Float, renderable: true)
         else { return nil }
@@ -263,7 +348,9 @@ final class MetalScreen {
         self.queue = queue
         self.respond = respond
         self.dots = dots
+        self.columns = columns
         self.frameTex = frameTex
+        self.columnsTex = columnsTex
         self.states = [stateA, stateB]
 
         layer.device = device
@@ -355,9 +442,14 @@ final class MetalScreen {
         let ox = (Float(dw) - Float(WIDTH * scale)) / 2
         let oy = (Float(dh) - Float(HEIGHT * scale)) / 2
 
+        // Aging is a preference the uniform reads directly — dead columns
+        // are an LCD's biography, so raw and the CRT stay untouched.
+        let age = preset.gap > 0 ? Float(UserDefaults.standard.double(forKey: "reglages.usure")) : 0
+
         var uniforms = PanelUniforms(
             a: SIMD4(preset.alphaFall, preset.alphaRise, seeding ? 1 : 0, preset.gap),
             b: SIMD4(preset.shadow, preset.grain, preset.vignette, preset.crt ? 1 : 0),
+            c: SIMD4(preset.stn, preset.crosstalk, preset.subpixel, age),
             reflector: preset.reflector,
             geometry: SIMD4(ox, oy, Float(dw), Float(dh)),
             scale: SIMD4(Float(scale), 0, 0, 0))
@@ -393,6 +485,19 @@ final class MetalScreen {
             encoder.endEncoding()
         }
 
+        // Pass 1½: the column aggregate the crosstalk reads.
+        let columnsPass = MTLRenderPassDescriptor()
+        columnsPass.colorAttachments[0].texture = columnsTex
+        columnsPass.colorAttachments[0].loadAction = .dontCare
+        columnsPass.colorAttachments[0].storeAction = .store
+
+        if let encoder = commands.makeRenderCommandEncoder(descriptor: columnsPass) {
+            encoder.setRenderPipelineState(columns)
+            encoder.setFragmentTexture(target, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
+        }
+
         // Pass 2: the dot structure, into the drawable.
         let presentPass = MTLRenderPassDescriptor()
         presentPass.colorAttachments[0].texture = drawable.texture
@@ -402,6 +507,7 @@ final class MetalScreen {
         if let encoder = commands.makeRenderCommandEncoder(descriptor: presentPass) {
             encoder.setRenderPipelineState(dots)
             encoder.setFragmentTexture(target, index: 0)
+            encoder.setFragmentTexture(columnsTex, index: 1)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
@@ -673,6 +779,13 @@ final class Engine: ObservableObject {
     func setProfile(_ name: String) { libraryOp("F", name) }
     func exportSav() { libraryOp("E") }
 
+    // The contrast dial: 0-100 down the pipe, anything else asks the
+    // engine for the preset's own resting point.
+    func setDial(_ value: Int) {
+        let byte = UInt8(value >= 0 && value <= 100 ? value : 255)
+        try? input?.write(contentsOf: Data([UInt8(ascii: "G"), byte]))
+    }
+
     // ── Screenshots: the frame the engine last drew ──────────────────────────
 
     private(set) var lastFrame: Data?
@@ -796,6 +909,10 @@ final class Engine: ObservableObject {
             voices((0..<4).map { mask & (1 << $0) != 0 })
             setPanel(defaults.object(forKey: "reglages.panneau") as? Int ?? 0)
             sendActiveCodes()
+
+            let dial = defaults.object(forKey: "reglages.contraste") as? Int ?? -1
+            if dial >= 0 { setDial(dial) }
+
             requestLibrary()
         }
     }
@@ -1098,8 +1215,10 @@ struct GeneralSettings: View {
 
 struct ScreenSettings: View {
     let engine: Engine
-    // French key, like every persisted "reglages.*" name.
+    // French keys, like every persisted "reglages.*" name.
     @AppStorage("reglages.panneau") private var panel = 0
+    @AppStorage("reglages.contraste") private var contrast = -1
+    @AppStorage("reglages.usure") private var age = 0.0
 
     private static let names = [
         "Raw — the pixels, straight",
@@ -1122,6 +1241,33 @@ struct ScreenSettings: View {
             Text("The screen the game is seen through: colour, response curve and dot structure, live — no restart.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Section("Contrast") {
+                HStack {
+                    Slider(
+                        value: Binding(
+                            get: { Double(contrast < 0 ? 50 : contrast) },
+                            set: {
+                                contrast = Int($0)
+                                engine.setDial(contrast)
+                            }), in: 0...100, step: 5)
+                    Button("Reset") {
+                        contrast = -1
+                        engine.setDial(-1)
+                    }
+                    .disabled(contrast < 0)
+                }
+                Text("The wheel under the DMG's thumb: up toward ink, down toward the bare reflector.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Age") {
+                Slider(value: $age, in: 0...1)
+                Text("A panel that lived a life: dead columns creep in from the edges. Zero is factory-fresh.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(20)
     }
