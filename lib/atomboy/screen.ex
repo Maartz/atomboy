@@ -18,6 +18,7 @@ defmodule Atomboy.Screen do
 
   alias Atomboy.CPU.CartLoop
   alias Atomboy.CPU.State
+  alias Atomboy.LCD
   alias Atomboy.PPU
 
   @line_cycles 456
@@ -256,12 +257,12 @@ defmodule Atomboy.Screen do
   which dominate a game frame, cost one byte per cell. That is what lets a
   terminal keep up with 60 frames per second.
   """
-  @spec to_text(PPU.frame(), :gray | :dmg) :: String.t()
-  def to_text(frame, palette \\ :gray)
+  @spec to_text(PPU.frame(), :gray | :dmg, LCD.t() | nil) :: String.t()
+  def to_text(frame, palette \\ :gray, lcd \\ nil)
 
   # The color frame: half blocks in truecolor, via the RGB of the game's palettes.
-  def to_text(frame, palette) when byte_size(frame) == 2 * 160 * 144 do
-    rgb = to_rgb(frame, palette)
+  def to_text(frame, palette, lcd) when byte_size(frame) == 2 * 160 * 144 do
+    rgb = to_rgb(frame, palette, lcd)
     {width, height} = PPU.dimensions()
 
     rows =
@@ -288,9 +289,9 @@ defmodule Atomboy.Screen do
     IO.iodata_to_binary(rows)
   end
 
-  def to_text(frame, palette) do
+  def to_text(frame, palette, lcd) do
     {width, height} = PPU.dimensions()
-    colors = colors(palette)
+    colors = colors(palette, lcd)
 
     rows =
       for row <- 0..(div(height, 2) - 1) do
@@ -317,7 +318,17 @@ defmodule Atomboy.Screen do
   end
 
   # The shades precompiled as SGR parameters: 256 colors for the grays,
-  # truecolor for the green of the original DMG panel.
+  # truecolor for the green of the original DMG panel. A panel overrides
+  # both — its four colors, spelled out in truecolor.
+  defp colors(palette, nil), do: colors(palette)
+
+  defp colors(_palette, lcd) do
+    lcd.shades
+    |> Tuple.to_list()
+    |> Enum.map(fn <<r, g, b>> -> "2;#{r};#{g};#{b}" end)
+    |> List.to_tuple()
+  end
+
   defp colors(:gray), do: {"5;255", "5;250", "5;243", "5;236"}
 
   defp colors(:dmg) do
@@ -334,9 +345,10 @@ defmodule Atomboy.Screen do
   alternate as a double buffer: the new image lands on top of the old one,
   which is only erased afterwards — no gap, no flicker.
   """
-  @spec to_kitty(PPU.frame(), :gray | :dmg, pos_integer(), pos_integer()) :: iodata()
-  def to_kitty(frame, palette, id, rows) do
-    payload = frame |> to_rgb(palette) |> :zlib.compress() |> Base.encode64()
+  @spec to_kitty(PPU.frame(), :gray | :dmg, pos_integer(), pos_integer(), LCD.t() | nil) ::
+          iodata()
+  def to_kitty(frame, palette, id, rows, lcd \\ nil) do
+    payload = frame |> to_rgb(palette, lcd) |> :zlib.compress() |> Base.encode64()
 
     {width, height} = PPU.dimensions()
     head = "a=T,i=#{id},f=24,s=#{width},v=#{height},o=z,q=2,C=1,r=#{rows}"
@@ -360,14 +372,24 @@ defmodule Atomboy.Screen do
   The frame in 24-bit RGB — three bytes per pixel. A DMG frame (one byte per
   pixel) goes through the chosen palette; a color frame (RGB555, two bytes
   per pixel) expands to RGB888, the game's own palette being authoritative.
+
+  An `Atomboy.LCD` passed as third argument replaces both by the panel's own
+  tables — same cost, the correction having been paid for at boot. Without
+  one, nothing changes: this is the rendering as it has always been.
   """
-  @spec to_rgb(PPU.frame(), :gray | :dmg) :: binary()
-  def to_rgb(frame, palette) when byte_size(frame) == 160 * 144 do
-    rgb = rgb_palette(palette)
+  @spec to_rgb(PPU.frame(), :gray | :dmg, LCD.t() | nil) :: binary()
+  def to_rgb(frame, palette, lcd \\ nil)
+
+  def to_rgb(frame, palette, lcd) when byte_size(frame) == 160 * 144 do
+    rgb = if lcd, do: lcd.shades, else: rgb_palette(palette)
     for <<shade <- frame>>, into: <<>>, do: elem(rgb, shade)
   end
 
-  def to_rgb(frame, _palette) do
+  def to_rgb(frame, _palette, %LCD{colors: table}) when is_binary(table) do
+    for <<c::16-little <- frame>>, into: <<>>, do: binary_part(table, (c &&& 0x7FFF) * 3, 3)
+  end
+
+  def to_rgb(frame, _palette, _lcd) do
     for <<c::16-little <- frame>>, into: <<>> do
       <<x8(c &&& 0x1F), x8(bsr(c, 5) &&& 0x1F), x8(bsr(c, 10) &&& 0x1F)>>
     end

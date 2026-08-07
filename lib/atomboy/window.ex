@@ -25,6 +25,7 @@ defmodule Atomboy.Window do
   alias Atomboy.APU
   alias Atomboy.Codes
   alias Atomboy.Joypad
+  alias Atomboy.LCD
   alias Atomboy.Link
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
@@ -108,18 +109,25 @@ defmodule Atomboy.Window do
 
     audio = if Keyword.get(opts, :sound, true), do: Audio.open()
 
+    ram =
+      Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
+      |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
+      |> Save.load(sav)
+      |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, "")))
+
+    palette = Keyword.get(opts, :palette, :dmg)
+
     ctx = %{
       state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
       rom: rom,
-      ram:
-        Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
-        |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
-        |> Save.load(sav)
-        |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, ""))),
+      ram: ram,
       sav: sav,
       state_base: Path.rootname(sav),
       state_slot: 1,
-      palette: Keyword.get(opts, :palette, :dmg),
+      palette: palette,
+      # The panel's tables — compiled once, here, because the color table
+      # is a hundred kilobytes a monochrome game would never read.
+      lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
       down: MapSet.new(),
       audio: audio,
       sound?: audio != nil,
@@ -172,7 +180,7 @@ defmodule Atomboy.Window do
   defp menu_idle(ctx) do
     if ctx.last_frame do
       composed = Menu.render(ctx.menu, ctx.last_frame)
-      :ets.insert(ctx.table, {:frame, Screen.to_rgb(composed, ctx.palette)})
+      :ets.insert(ctx.table, {:frame, Screen.to_rgb(composed, ctx.palette, ctx.lcd)})
       :wxWindow.refresh(ctx.panel, eraseBackground: false)
     end
 
@@ -193,7 +201,7 @@ defmodule Atomboy.Window do
       end
 
     pixels = PPU.render_frame(ctx.ram)
-    :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette)})
+    :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette, ctx.lcd)})
     :wxWindow.refresh(ctx.panel, eraseBackground: false)
     :wxFrame.setTitle(ctx.window, ~c"atomboy — ⏪ rewind")
 
@@ -238,7 +246,7 @@ defmodule Atomboy.Window do
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
     if render? do
-      :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette)})
+      :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette, ctx.lcd)})
       :wxWindow.refresh(ctx.panel, eraseBackground: false)
       title(ctx, ram)
     end
@@ -365,7 +373,8 @@ defmodule Atomboy.Window do
             ctx.state_slot,
             ctx.palette,
             Map.get(ctx.ram, :cgb, false),
-            Map.get(ctx.ram, :mixer)
+            Map.get(ctx.ram, :mixer),
+            ctx.lcd.preset
           ),
         down: MapSet.new()
     }
@@ -386,9 +395,19 @@ defmodule Atomboy.Window do
   defp menu_action(:save_state, ctx), do: act(ctx, :save_state)
   defp menu_action(:load_state, ctx), do: act(ctx, :load_state)
   defp menu_action({:slot, n}, ctx), do: act(ctx, {:slot, n})
-  defp menu_action({:palette, p}, ctx), do: %{ctx | palette: p}
+  defp menu_action({:palette, p}, ctx), do: recompile(%{ctx | palette: p})
+  defp menu_action({:panel, p}, ctx), do: recompile(%{ctx | lcd: %{ctx.lcd | preset: p}})
   defp menu_action({:mixer, m}, ctx), do: %{ctx | ram: Map.put(ctx.ram, :mixer, m)}
   defp menu_action(:quit, _ctx), do: :quit
+
+  # Palette and panel both feed the same tables: whichever moved, they are
+  # rebuilt. The game is paused behind the menu, so the moment it costs on a
+  # color cartridge goes unnoticed.
+  defp recompile(ctx),
+    do: %{
+      ctx
+      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))
+    }
 
   defp turbo_toggle(ctx) do
     turbo = not ctx.turbo

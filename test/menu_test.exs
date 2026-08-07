@@ -12,7 +12,7 @@ defmodule Atomboy.MenuTest do
 
     {menu, []} = Menu.press(menu, :up)
     {menu, []} = Menu.press(menu, :up)
-    assert menu.cursor == 6
+    assert menu.cursor == 7
 
     {menu, []} = Menu.press(menu, :down)
     assert menu.cursor == 0
@@ -52,8 +52,16 @@ defmodule Atomboy.MenuTest do
     {_menu, [{:palette, :dmg}]} = Menu.press(menu, :right)
   end
 
+  test "the panel cycles through the presets" do
+    menu = %{Menu.open(1, :dmg) | cursor: 5}
+
+    {menu, [{:panel, :dmg}]} = Menu.press(menu, :right)
+    {menu, [{:panel, :pocket}]} = Menu.press(menu, :right)
+    {_menu, [{:panel, :dmg}]} = Menu.press(menu, :left)
+  end
+
   test "QUIT returns the quit action" do
-    menu = %{Menu.open(1, :dmg) | cursor: 6}
+    menu = %{Menu.open(1, :dmg) | cursor: 7}
     assert {nil, [:quit]} = Menu.press(menu, :a)
   end
 
@@ -61,13 +69,13 @@ defmodule Atomboy.MenuTest do
     menu = Menu.open(1, :dmg, true)
 
     {menu, []} = Menu.press(menu, :up)
-    assert menu.cursor == 5
+    assert menu.cursor == 6
 
     assert {nil, [:quit]} = Menu.press(menu, :a)
   end
 
   test "the MIXER page: volume in steps of ten, clamped, voices switchable" do
-    menu = %{Menu.open(1, :dmg) | cursor: 5}
+    menu = %{Menu.open(1, :dmg) | cursor: 6}
     {menu, []} = Menu.press(menu, :a)
     assert menu.page == :mixer
 
@@ -87,8 +95,8 @@ defmodule Atomboy.MenuTest do
     assert menu.page == :main
   end
 
-  # The geometry of the box: 7 rows of 11 px + 2×8 of margin = 93 high,
-  # centred — top-left corner at (24, 25). The "paper" point sits to the
+  # The geometry of the box: 8 rows of 11 px + 2×8 of margin = 104 high,
+  # centred — top-left corner at (24, 20). The "paper" point sits to the
   # right of the first row's text, far from the cursor.
   test "DMG rendering: inked border, light paper, outside untouched" do
     frame = :binary.copy(<<1>>, 160 * 144)
@@ -99,8 +107,8 @@ defmodule Atomboy.MenuTest do
     assert :binary.at(composed, 0) == 1
     assert :binary.at(composed, 143 * 160 + 159) == 1
     # The border is inked, the inside is paper.
-    assert :binary.at(composed, 25 * 160 + 24) == 3
-    assert :binary.at(composed, 34 * 160 + 105) == 0
+    assert :binary.at(composed, 20 * 160 + 24) == 3
+    assert :binary.at(composed, 29 * 160 + 105) == 0
   end
 
   test "CGB rendering: same points in RGB555" do
@@ -109,21 +117,21 @@ defmodule Atomboy.MenuTest do
 
     assert byte_size(composed) == 2 * 160 * 144
     assert binary_part(composed, 0, 2) == <<0x33, 0x33>>
-    assert binary_part(composed, (25 * 160 + 24) * 2, 2) == <<0x00, 0x00>>
-    assert binary_part(composed, (34 * 160 + 105) * 2, 2) == <<0xFF, 0x7F>>
+    assert binary_part(composed, (20 * 160 + 24) * 2, 2) == <<0x00, 0x00>>
+    assert binary_part(composed, (29 * 160 + 105) * 2, 2) == <<0xFF, 0x7F>>
   end
 
   test "the cursor shows in front of the selected row" do
     frame = :binary.copy(<<0>>, 160 * 144)
     top = Menu.render(Menu.open(1, :dmg), frame)
-    bottom = Menu.render(%{Menu.open(1, :dmg) | cursor: 5}, frame)
+    bottom = Menu.render(%{Menu.open(1, :dmg) | cursor: 6}, frame)
 
     # The cursor triangle inks the column of the first character of the
     # first row when that row is selected — and no longer once it moves on.
-    row1 = for x <- 30..35, y <- 39..45, do: :binary.at(top, y * 160 + x)
+    row1 = for x <- 30..35, y <- 34..40, do: :binary.at(top, y * 160 + x)
     assert 3 in row1
 
-    row1_moved = for x <- 30..35, y <- 39..45, do: :binary.at(bottom, y * 160 + x)
+    row1_moved = for x <- 30..35, y <- 34..40, do: :binary.at(bottom, y * 160 + x)
     refute 3 in row1_moved
   end
 end

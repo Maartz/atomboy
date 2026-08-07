@@ -36,6 +36,7 @@ defmodule Atomboy.Server do
   alias Atomboy.Codes
   alias Atomboy.APU
   alias Atomboy.Joypad
+  alias Atomboy.LCD
   alias Atomboy.Link
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
@@ -81,19 +82,24 @@ defmodule Atomboy.Server do
       parent = self()
       reader = spawn_link(fn -> read_stdin(parent) end)
 
+      ram =
+        Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
+        |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
+        |> Save.load(sav)
+        |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, "")))
+
+      palette = Keyword.get(opts, :palette, :dmg)
+
       try do
         loop(%{
           state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
           rom: rom,
-          ram:
-            Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
-            |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
-            |> Save.load(sav)
-            |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, ""))),
+          ram: ram,
           sav: sav,
           state_base: Path.rootname(sav),
           state_slot: 1,
-          palette: Keyword.get(opts, :palette, :dmg),
+          palette: palette,
+          lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
           down: MapSet.new(),
           menu: nil,
           apu: %APU{},
@@ -174,7 +180,7 @@ defmodule Atomboy.Server do
         sound(ram, ctx.apu, ctx.audio)
       end
 
-    if render?, do: emit_frame(pixels, ctx.palette)
+    if render?, do: emit_frame(pixels, ctx.palette, ctx.lcd)
 
     deadline =
       if ctx.turbo do
@@ -214,13 +220,13 @@ defmodule Atomboy.Server do
     {ram, apu, %{audio | sent: audio.sent + needed}}
   end
 
-  defp emit_frame(pixels, palette) do
-    IO.binwrite(:stdio, [<<?F>>, Screen.to_rgb(pixels, palette)])
+  defp emit_frame(pixels, palette, lcd) do
+    IO.binwrite(:stdio, [<<?F>>, Screen.to_rgb(pixels, palette, lcd)])
   end
 
   defp menu_idle(ctx) do
     if ctx.last_frame do
-      emit_frame(Menu.render(ctx.menu, ctx.last_frame), ctx.palette)
+      emit_frame(Menu.render(ctx.menu, ctx.last_frame), ctx.palette, ctx.lcd)
     end
 
     Process.sleep(50)
@@ -235,7 +241,7 @@ defmodule Atomboy.Server do
       end
 
     pixels = PPU.render_frame(ctx.ram)
-    emit_frame(pixels, ctx.palette)
+    emit_frame(pixels, ctx.palette, ctx.lcd)
 
     now = System.monotonic_time(:microsecond)
     deadline = max(ctx.deadline, now - 100_000)
@@ -305,7 +311,8 @@ defmodule Atomboy.Server do
             ctx.state_slot,
             ctx.palette,
             Map.get(ctx.ram, :cgb, false),
-            Map.get(ctx.ram, :mixer)
+            Map.get(ctx.ram, :mixer),
+            ctx.lcd.preset
           ),
         down: MapSet.new()
     }
@@ -364,9 +371,16 @@ defmodule Atomboy.Server do
   end
 
   defp menu_action({:slot, n}, ctx), do: %{ctx | state_slot: n}
-  defp menu_action({:palette, p}, ctx), do: %{ctx | palette: p}
+  defp menu_action({:palette, p}, ctx), do: recompile(%{ctx | palette: p})
+  defp menu_action({:panel, p}, ctx), do: recompile(%{ctx | lcd: %{ctx.lcd | preset: p}})
   defp menu_action({:mixer, m}, ctx), do: %{ctx | ram: Map.put(ctx.ram, :mixer, m)}
   defp menu_action(:quit, _ctx), do: :quit
+
+  # Palette and panel both feed the same tables: whichever moved, they are
+  # rebuilt. The game sleeps behind the menu, so the moment it costs on a
+  # color cartridge goes unnoticed.
+  defp recompile(ctx),
+    do: %{ctx | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))}
 
   # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
   # on-disk convention `Atomboy.Save` also spells out.

@@ -19,6 +19,7 @@ defmodule Atomboy.Menu do
             page: :main,
             slot: 1,
             palette: :dmg,
+            panel: :raw,
             color: false,
             mixer: %{volume: 100, voices: {true, true, true, true}}
 
@@ -30,6 +31,7 @@ defmodule Atomboy.Menu do
           | :load_state
           | {:slot, 1..9}
           | {:palette, :dmg | :gray}
+          | {:panel, Atomboy.LCD.preset()}
           | {:mixer, mixer()}
           | :quit
 
@@ -43,19 +45,22 @@ defmodule Atomboy.Menu do
   Opens the menu on the host loop's current state. `color` hides the
   palette choice — it only tints DMG frames.
   """
-  @spec open(1..9, :dmg | :gray, boolean(), mixer()) :: t()
-  def open(slot, palette, color \\ false, mixer \\ nil),
+  @spec open(1..9, :dmg | :gray, boolean(), mixer(), Atomboy.LCD.preset()) :: t()
+  def open(slot, palette, color \\ false, mixer \\ nil, panel \\ :raw),
     do: %__MODULE__{
       cursor: 0,
       slot: slot,
       palette: palette,
+      panel: panel,
       color: color,
       mixer: mixer || mixer_default()
     }
 
   defp items(%{page: :mixer}), do: [:volume, :voices1, :voices2, :voices3, :voices4, :back]
-  defp items(%{color: true}), do: [:resume, :save, :load, :slot, :mixer, :quit]
-  defp items(_menu), do: [:resume, :save, :load, :slot, :palette, :mixer, :quit]
+  defp items(%{color: true}), do: [:resume, :save, :load, :slot, :panel, :mixer, :quit]
+
+  defp items(_menu),
+    do: [:resume, :save, :load, :slot, :palette, :panel, :mixer, :quit]
 
   @doc """
   One key in the menu. Returns `{menu, actions}` — `menu` is `nil` when it
@@ -80,6 +85,7 @@ defmodule Atomboy.Menu do
       :load -> {nil, [:load_state]}
       :slot -> adjust(menu, 1)
       :palette -> adjust(menu, 1)
+      :panel -> adjust(menu, 1)
       :mixer -> {%{menu | page: :mixer, cursor: 0}, []}
       :back -> {%{menu | page: :main, cursor: 0}, []}
       :quit -> {nil, [:quit]}
@@ -111,6 +117,10 @@ defmodule Atomboy.Menu do
       :palette ->
         palette = if menu.palette == :dmg, do: :gray, else: :dmg
         {%{menu | palette: palette}, [{:palette, palette}]}
+
+      :panel ->
+        panel = Atomboy.LCD.next(menu.panel, direction)
+        {%{menu | panel: panel}, [{:panel, panel}]}
 
       :volume ->
         volume = min(100, max(0, menu.mixer.volume + direction * 10))
@@ -159,6 +169,7 @@ defmodule Atomboy.Menu do
       :load -> "LOAD STATE"
       :slot -> "STATE SLOT <#{menu.slot}>"
       :palette -> "PALETTE <#{if menu.palette == :dmg, do: "GREEN", else: "GRAY"}>"
+      :panel -> "PANEL <#{menu.panel |> Atom.to_string() |> String.upcase()}>"
       :mixer -> "MIXER"
       :volume -> "VOLUME <#{menu.mixer.volume}>"
       :voices1 -> "PULSE 1 <#{on_off(menu, 0)}>"

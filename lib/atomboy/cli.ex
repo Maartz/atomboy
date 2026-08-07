@@ -10,6 +10,7 @@ defmodule Atomboy.CLI do
 
       atomboy zelda.gb
       atomboy pokemon.gbc --palette gray --no-sound
+      atomboy zelda.gb --window --panel dmg
 
   Arguments arrive through `:init.get_plain_arguments/0` — the path that
   does not depend on the Burrito module at runtime. Only starts in prod:
@@ -112,6 +113,7 @@ defmodule Atomboy.CLI do
           dump_every: :integer,
           sound: :boolean,
           palette: :string,
+          panel: :string,
           window: :boolean,
           server: :boolean,
           dmg: :boolean,
@@ -123,6 +125,7 @@ defmodule Atomboy.CLI do
       )
 
     with {:ok, opts} <- palette(opts),
+         {:ok, opts} <- panel(opts),
          {:ok, rom} <- rom(argv) do
       {:ok, rom, opts}
     end
@@ -158,6 +161,24 @@ defmodule Atomboy.CLI do
     end
   end
 
+  # The panel the frame is seen through — `raw` is the absence of one, and
+  # stays the default: nothing changes for anyone who does not ask.
+  defp panel(opts) do
+    case Keyword.get(opts, :panel) do
+      nil ->
+        {:ok, opts}
+
+      name ->
+        presets = Enum.map(Atomboy.LCD.presets(), &Atom.to_string/1)
+
+        if name in presets do
+          {:ok, Keyword.put(opts, :panel, String.to_existing_atom(name))}
+        else
+          {:error, "unknown panel: #{name} (#{Enum.join(presets, ", ")})"}
+        end
+    end
+  end
+
   defp rom([rom]) do
     if File.exists?(rom) do
       {:ok, rom}
@@ -170,6 +191,7 @@ defmodule Atomboy.CLI do
     {:error,
      "usage: atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
        "[--link host:port] [--save name] [--hold N] [--frames N] " <>
-       "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--codes 01VVLLHH,…]"}
+       "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb] " <>
+       "[--codes 01VVLLHH,…]"}
   end
 end
