@@ -170,6 +170,7 @@ defmodule Atomboy.Play do
            state_slot: 1,
            palette: palette,
            lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
+           ghost: nil,
            gfx: false,
            gfx_id: 1,
            dims: terminal_dims(tty),
@@ -455,17 +456,24 @@ defmodule Atomboy.Play do
     old = 3 - id
     rows = with {r, _c} <- ctx.dims, do: r, else: (_ -> 24)
 
+    {rgb, ghost} = Screen.to_rgb(pixels, ctx.palette, ctx.lcd, ctx.ghost)
+
     IO.write([
       "\e[H",
-      Screen.to_kitty(pixels, ctx.palette, id, rows - 1, ctx.lcd),
+      Screen.kitty_rgb(rgb, id, rows - 1),
       "\e_Ga=d,d=I,i=#{old},q=2\e\\",
       "\e[#{rows};1H",
       status(ctx, ram, held)
     ])
 
-    %{ctx | gfx_id: old}
+    %{ctx | gfx_id: old, ghost: ghost}
   end
 
+  # Half blocks stay ghost-free by design: the response curve turns the four
+  # shades into hundreds of in-between colours, every cell then carries its
+  # own SGR sequence, and the run-length trick that lets a terminal keep up
+  # with 60 fps dies with it. The kitty path above pays nothing — it ships
+  # RGB anyway.
   defp draw(ctx, pixels, ram, held) do
     IO.write(["\e[H", crlf(Screen.to_text(pixels, ctx.palette, ctx.lcd)), status(ctx, ram, held)])
     ctx
@@ -665,7 +673,11 @@ defmodule Atomboy.Play do
   # rebuilt. The game sleeps behind the menu, so the moment it costs on a
   # color cartridge goes unnoticed.
   defp recompile(ctx),
-    do: %{ctx | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))}
+    do: %{
+      ctx
+      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false)),
+        ghost: nil
+    }
 
   # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
   # on-disk convention `Atomboy.Save` also spells out.

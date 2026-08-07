@@ -128,6 +128,9 @@ defmodule Atomboy.Window do
       # The panel's tables — compiled once, here, because the color table
       # is a hundred kilobytes a monochrome game would never read.
       lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
+      # The response curve's per-pixel state — nil until the first ghosted
+      # frame, dropped back to nil whenever the panel changes.
+      ghost: nil,
       down: MapSet.new(),
       audio: audio,
       sound?: audio != nil,
@@ -178,11 +181,16 @@ defmodule Atomboy.Window do
   # Menu open: the machine sleeps, and the last frame carries the menu as an
   # overlay — same rendering as the game, the painter knows nothing of it.
   defp menu_idle(ctx) do
-    if ctx.last_frame do
-      composed = Menu.render(ctx.menu, ctx.last_frame)
-      :ets.insert(ctx.table, {:frame, Screen.to_rgb(composed, ctx.palette, ctx.lcd)})
-      :wxWindow.refresh(ctx.panel, eraseBackground: false)
-    end
+    ctx =
+      if ctx.last_frame do
+        composed = Menu.render(ctx.menu, ctx.last_frame)
+        {rgb, ghost} = Screen.to_rgb(composed, ctx.palette, ctx.lcd, ctx.ghost)
+        :ets.insert(ctx.table, {:frame, rgb})
+        :wxWindow.refresh(ctx.panel, eraseBackground: false)
+        %{ctx | ghost: ghost}
+      else
+        ctx
+      end
 
     Process.sleep(50)
     loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
@@ -201,7 +209,9 @@ defmodule Atomboy.Window do
       end
 
     pixels = PPU.render_frame(ctx.ram)
-    :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette, ctx.lcd)})
+    {rgb, ghost} = Screen.to_rgb(pixels, ctx.palette, ctx.lcd, ctx.ghost)
+    ctx = %{ctx | ghost: ghost}
+    :ets.insert(ctx.table, {:frame, rgb})
     :wxWindow.refresh(ctx.panel, eraseBackground: false)
     :wxFrame.setTitle(ctx.window, ~c"atomboy — ⏪ rewind")
 
@@ -245,11 +255,16 @@ defmodule Atomboy.Window do
 
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
-    if render? do
-      :ets.insert(ctx.table, {:frame, Screen.to_rgb(pixels, ctx.palette, ctx.lcd)})
-      :wxWindow.refresh(ctx.panel, eraseBackground: false)
-      title(ctx, ram)
-    end
+    ctx =
+      if render? do
+        {rgb, ghost} = Screen.to_rgb(pixels, ctx.palette, ctx.lcd, ctx.ghost)
+        :ets.insert(ctx.table, {:frame, rgb})
+        :wxWindow.refresh(ctx.panel, eraseBackground: false)
+        title(ctx, ram)
+        %{ctx | ghost: ghost}
+      else
+        ctx
+      end
 
     deadline =
       if ctx.turbo do
@@ -406,7 +421,8 @@ defmodule Atomboy.Window do
   defp recompile(ctx),
     do: %{
       ctx
-      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))
+      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false)),
+        ghost: nil
     }
 
   defp turbo_toggle(ctx) do

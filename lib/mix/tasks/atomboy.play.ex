@@ -39,7 +39,11 @@ defmodule Mix.Tasks.Atomboy.Play do
       neutral grays.
     * `--panel raw|dmg|pocket|cgb` — the screen the frame is seen through:
       `raw` is no screen at all (default, the palette straight), the others
-      model a real panel's colour. Also on the PANEL row of the menu.
+      model a real panel's colour and its response curve — the ghosting of
+      moving images, in the window and the kitty terminal (half blocks stay
+      sharp: hundreds of in-between colours would defeat the run-length
+      encoding that keeps the terminal at 60 fps). Also on the PANEL row of
+      the menu.
     * `--dump f.pgm` — write the last frame as an image on exit.
     * `--save name` — a save profile: `.sav` and `.state` become
       `rom.name.sav`/`rom.name.state`. Essential for linking two instances of

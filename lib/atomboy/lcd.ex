@@ -16,17 +16,30 @@ defmodule Atomboy.LCD do
   once at boot, the panel costs nothing per frame, and the terminal, the
   window and the `--server` shell all get it for free.
 
+  ## The response curve
+
+  One of the panel's effects is temporal, not chromatic, and lives here
+  too: the pixel does not jump to its target, it *approaches* it
+  exponentially — quickly when darkening (τ ≈ 21 ms, the cell is driven),
+  slowly when brightening (τ ≈ 61 ms, it merely relaxes). The asymmetry is
+  the point: most emulators that model ghosting at all have it backwards,
+  and the reversed version reads as input lag where the real thing reads
+  as softness.
+
+  `ghost/3` carries that state between frames: a float per pixel — bytes
+  would stall, a step smaller than half a shade rounding to nothing and
+  the pixel never arriving — advanced by precomputed per-frame
+  coefficients and rendered through a 256-entry ramp interpolated between
+  the four compiled shades. Monochrome frames only: a colour frame would
+  want three channels of state, and that pass is the GPU's.
+
   ## What is not here
 
-  Three of the effects the panel really has are *not* functions of the
-  pixel alone, and none of them belong in a lookup table:
+  Two of the effects the panel really has are *not* functions of the
+  pixel alone or its history, and neither belongs in this module:
 
     * the STN mixing with neighbouring pixels, and the column crosstalk of
       a passive matrix — spatial, they need the frame around the pixel;
-    * the response curve — the pixel approaches its target exponentially,
-      quickly when darkening (τ ≈ 21 ms), slowly when brightening
-      (τ ≈ 61 ms), which is the asymmetry that makes real hardware feel the
-      way it does. Temporal: it needs a state buffer between frames;
     * the dot structure — the grid, the reflector showing through the gaps,
       the shadow each dot casts. That one lives at *display* resolution,
       not at 160×144, and belongs on a GPU.
@@ -41,14 +54,20 @@ defmodule Atomboy.LCD do
 
   import Bitwise
 
-  defstruct preset: :raw, shades: nil, colors: nil
+  defstruct preset: :raw, shades: nil, colors: nil, ramp: nil, alphas: nil
 
   @type preset :: :raw | :dmg | :pocket | :cgb
   @type t :: %__MODULE__{
           preset: preset(),
           shades: {binary(), binary(), binary(), binary()},
-          colors: binary() | nil
+          colors: binary() | nil,
+          ramp: tuple() | nil,
+          alphas: {float(), float()} | nil
         }
+
+  # The frame period the response coefficients are computed for — the same
+  # 16.742 ms every host paces itself to.
+  @frame_ms 16.742
 
   @presets [:raw, :dmg, :pocket, :cgb]
 
@@ -82,11 +101,14 @@ defmodule Atomboy.LCD do
 
   def compile(preset, _palette, color?) when preset in @presets do
     profile = profile(preset)
+    shades = compile_shades(profile)
 
     %__MODULE__{
       preset: preset,
-      shades: compile_shades(profile),
-      colors: if(color?, do: compile_colors(profile))
+      shades: shades,
+      colors: if(color?, do: compile_colors(profile)),
+      ramp: compile_ramp(shades),
+      alphas: compile_alphas(profile)
     }
   end
 
@@ -115,6 +137,9 @@ defmodule Atomboy.LCD do
       contrast: 1.08,
       brightness: 0.98,
       lift: 0.02,
+      # Falling (darkening) is driven, rising is left to relax — the numbers
+      # brickboy settled on, and the asymmetry most implementations invert.
+      response: {21.0, 61.0},
       matrix: nil
     }
   end
@@ -132,6 +157,8 @@ defmodule Atomboy.LCD do
       contrast: 1.12,
       brightness: 1.00,
       lift: 0.01,
+      # FSTN answers faster than the DMG's STN — less smear, same asymmetry.
+      response: {16.0, 44.0},
       matrix: nil
     }
   end
@@ -149,12 +176,86 @@ defmodule Atomboy.LCD do
       contrast: 1.02,
       brightness: 1.00,
       lift: 0.02,
+      response: {13.0, 31.0},
       # The correction ares applies to CGB output (ares/gb/ppu/color.cpp,
       # verified against the source): a channel mix clamped at 960 on a
       # 10-bit scale — which is why a CGB white tops out around 94%, never
       # at full brightness.
       matrix: {{26, 4, 2}, {0, 24, 8}, {6, 4, 22}}
     }
+  end
+
+  # ── The response curve ──────────────────────────────────────────────────────
+
+  # The four shades as drive levels: 0 bright, 255 dark, 85 apart. The float
+  # state lives on this axis, and the ramp maps it back to colour.
+  @levels {0.0, 85.0, 170.0, 255.0}
+
+  @doc """
+  One frame of the panel's response: every pixel moves part of the way from
+  where it was towards the shade the PPU asks for, fast when darkening,
+  slow when brightening. Returns `{rgb, state}` — the frame already in
+   24-bit RGB (through the panel's ramp), and the state to hand back next
+  frame. `nil` state seeds from the frame itself: the first image arrives
+  ghost-free, exactly as a panel left on this picture would sit.
+
+  The caller owns the state and drops it to `nil` whenever the panel
+  changes — the axis the floats live on belongs to the ramp they are read
+  through.
+  """
+  @spec ghost(binary(), binary() | nil, t()) :: {binary(), binary() | nil}
+  def ghost(frame, nil, lcd), do: ghost(frame, seed(frame), lcd)
+
+  def ghost(frame, state, %__MODULE__{alphas: {fall, rise}, ramp: ramp}),
+    do: walk(frame, state, <<>>, <<>>, fall, rise, ramp)
+
+  defp walk(<<>>, <<>>, rgb, state, _fall, _rise, _ramp), do: {rgb, state}
+
+  defp walk(
+         <<shade, frame::binary>>,
+         <<s::float-32-native, states::binary>>,
+         rgb,
+         state,
+         fall,
+         rise,
+         ramp
+       ) do
+    target = elem(@levels, shade)
+    # Darkening — the level rising — is the driven, fast direction.
+    s = s + (target - s) * if(target > s, do: fall, else: rise)
+
+    walk(
+      frame,
+      states,
+      <<rgb::binary, elem(ramp, round(s))::binary-size(3)>>,
+      <<state::binary, s::float-32-native>>,
+      fall,
+      rise,
+      ramp
+    )
+  end
+
+  # The state a panel showing exactly this frame would hold.
+  defp seed(frame),
+    do: for(<<shade <- frame>>, into: <<>>, do: <<elem(@levels, shade)::float-32-native>>)
+
+  # The per-frame step of an exponential approach: 1 - e^(-dt/τ), one
+  # coefficient per direction, both fixed once the τs are.
+  defp compile_alphas(%{response: {fall_ms, rise_ms}}),
+    do: {1.0 - :math.exp(-@frame_ms / fall_ms), 1.0 - :math.exp(-@frame_ms / rise_ms)}
+
+  # The 256 colours between the four shades, interpolated in RGB: entry 0 is
+  # shade 0, entry 85 shade 1, 170 shade 2, 255 shade 3 — a pixel mid-travel
+  # reads the colour between the shades it is travelling between.
+  defp compile_ramp(shades) do
+    for level <- 0..255 do
+      i = min(div(level, 85), 2)
+      t = (level - i * 85) / 85
+      <<r1, g1, b1>> = elem(shades, i)
+      <<r2, g2, b2>> = elem(shades, i + 1)
+      <<round(r1 + (r2 - r1) * t), round(g1 + (g2 - g1) * t), round(b1 + (b2 - b1) * t)>>
+    end
+    |> List.to_tuple()
   end
 
   # ── The tables ──────────────────────────────────────────────────────────────

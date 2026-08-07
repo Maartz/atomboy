@@ -126,6 +126,89 @@ defmodule Atomboy.LCDTest do
     end
   end
 
+  describe "the response curve" do
+    # A frame of one shade, corner to corner.
+    defp flat(shade), do: :binary.copy(<<shade>>, 160 * 144)
+
+    test "raw and colour frames pass through untouched, state unchanged" do
+      frame = flat(2)
+      raw = LCD.compile(:raw, :dmg)
+
+      assert Screen.to_rgb(frame, :dmg, raw, nil) == {Screen.to_rgb(frame, :dmg, raw), nil}
+      assert Screen.to_rgb(frame, :dmg, nil, nil) == {Screen.to_rgb(frame, :dmg), nil}
+
+      color = LCD.compile(:cgb, :dmg, true)
+
+      assert Screen.to_rgb(white_frame(), :dmg, color, nil) ==
+               {Screen.to_rgb(white_frame(), :dmg, color), nil}
+    end
+
+    test "the first frame arrives ghost-free" do
+      # A nil state seeds from the frame itself: a panel left on this
+      # picture, already settled — pixel for pixel the tableless rendering.
+      lcd = LCD.compile(:dmg)
+      frame = for shade <- 0..3, _ <- 1..(160 * 36), into: <<>>, do: <<shade>>
+
+      {rgb, state} = Screen.to_rgb(frame, :dmg, lcd, nil)
+      assert rgb == Screen.to_rgb(frame, :dmg, lcd)
+      assert byte_size(state) == 160 * 144 * 4
+    end
+
+    test "the ramp passes through the four shades exactly" do
+      lcd = LCD.compile(:pocket)
+
+      for {shade, level} <- [{0, 0}, {1, 85}, {2, 170}, {3, 255}] do
+        assert elem(lcd.ramp, level) == elem(lcd.shades, shade)
+      end
+    end
+
+    test "darkening runs ahead of brightening — the asymmetry" do
+      # One pixel going light→dark, one going dark→light, one step each:
+      # the darkening pixel must have covered more of its journey. This is
+      # the inversion most emulators get wrong, frozen into a test.
+      lcd = LCD.compile(:dmg)
+
+      {_, settled_light} = Screen.to_rgb(flat(0), :dmg, lcd, nil)
+      {_, settled_dark} = Screen.to_rgb(flat(3), :dmg, lcd, nil)
+
+      {_, darkening} = Screen.to_rgb(flat(3), :dmg, lcd, settled_light)
+      {_, brightening} = Screen.to_rgb(flat(0), :dmg, lcd, settled_dark)
+
+      <<down::float-32-native, _::binary>> = darkening
+      <<up::float-32-native, _::binary>> = brightening
+
+      # Both left 0 or 255 heading for the other end; the fraction covered:
+      assert down / 255 > (255 - up) / 255
+      assert down / 255 > 0.4
+      assert (255 - up) / 255 < 0.4
+    end
+
+    test "a held frame converges to the settled colour" do
+      lcd = LCD.compile(:dmg)
+      {_, state} = Screen.to_rgb(flat(0), :dmg, lcd, nil)
+      target = flat(3)
+
+      {rgb, _state} =
+        Enum.reduce(1..90, {nil, state}, fn _, {_, state} ->
+          Screen.to_rgb(target, :dmg, lcd, state)
+        end)
+
+      # A second and a half of the same picture: the float state has carried
+      # the pixel all the way home — no byte-quantization stall.
+      assert binary_part(rgb, 0, 3) == elem(lcd.shades, 3)
+    end
+
+    test "the state has one float per pixel and stays in range" do
+      lcd = LCD.compile(:cgb)
+      {_, state} = Screen.to_rgb(flat(1), :dmg, lcd, nil)
+      {_, state} = Screen.to_rgb(flat(2), :dmg, lcd, state)
+
+      for <<s::float-32-native <- state>> do
+        assert s >= 0.0 and s <= 255.0
+      end
+    end
+  end
+
   describe "next/2" do
     test "cycles both ways through the presets" do
       presets = LCD.presets()

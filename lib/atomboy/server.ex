@@ -100,6 +100,7 @@ defmodule Atomboy.Server do
           state_slot: 1,
           palette: palette,
           lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
+          ghost: nil,
           down: MapSet.new(),
           menu: nil,
           apu: %APU{},
@@ -180,7 +181,7 @@ defmodule Atomboy.Server do
         sound(ram, ctx.apu, ctx.audio)
       end
 
-    if render?, do: emit_frame(pixels, ctx.palette, ctx.lcd)
+    ctx = if render?, do: emit_frame(ctx, pixels), else: ctx
 
     deadline =
       if ctx.turbo do
@@ -220,14 +221,21 @@ defmodule Atomboy.Server do
     {ram, apu, %{audio | sent: audio.sent + needed}}
   end
 
-  defp emit_frame(pixels, palette, lcd) do
-    IO.binwrite(:stdio, [<<?F>>, Screen.to_rgb(pixels, palette, lcd)])
+  # A frame onto the wire, through the panel — and through its response
+  # curve, whose state rides in the returned context.
+  defp emit_frame(ctx, pixels) do
+    {rgb, ghost} = Screen.to_rgb(pixels, ctx.palette, ctx.lcd, ctx.ghost)
+    IO.binwrite(:stdio, [<<?F>>, rgb])
+    %{ctx | ghost: ghost}
   end
 
   defp menu_idle(ctx) do
-    if ctx.last_frame do
-      emit_frame(Menu.render(ctx.menu, ctx.last_frame), ctx.palette, ctx.lcd)
-    end
+    ctx =
+      if ctx.last_frame do
+        emit_frame(ctx, Menu.render(ctx.menu, ctx.last_frame))
+      else
+        ctx
+      end
 
     Process.sleep(50)
     loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
@@ -241,7 +249,7 @@ defmodule Atomboy.Server do
       end
 
     pixels = PPU.render_frame(ctx.ram)
-    emit_frame(pixels, ctx.palette, ctx.lcd)
+    ctx = emit_frame(ctx, pixels)
 
     now = System.monotonic_time(:microsecond)
     deadline = max(ctx.deadline, now - 100_000)
@@ -380,7 +388,11 @@ defmodule Atomboy.Server do
   # rebuilt. The game sleeps behind the menu, so the moment it costs on a
   # color cartridge goes unnoticed.
   defp recompile(ctx),
-    do: %{ctx | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))}
+    do: %{
+      ctx
+      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false)),
+        ghost: nil
+    }
 
   # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
   # on-disk convention `Atomboy.Save` also spells out.

@@ -411,8 +411,16 @@ defmodule Atomboy.Screen do
   """
   @spec to_kitty(PPU.frame(), :gray | :dmg, pos_integer(), pos_integer(), LCD.t() | nil) ::
           iodata()
-  def to_kitty(frame, palette, id, rows, lcd \\ nil) do
-    payload = frame |> to_rgb(palette, lcd) |> :zlib.compress() |> Base.encode64()
+  def to_kitty(frame, palette, id, rows, lcd \\ nil),
+    do: frame |> to_rgb(palette, lcd) |> kitty_rgb(id, rows)
+
+  @doc """
+  The kitty encoding alone, from a frame already in 24-bit RGB — the path
+  a host takes when it converted the frame itself, ghosting included.
+  """
+  @spec kitty_rgb(binary(), pos_integer(), pos_integer()) :: iodata()
+  def kitty_rgb(rgb, id, rows) do
+    payload = rgb |> :zlib.compress() |> Base.encode64()
 
     {width, height} = PPU.dimensions()
     head = "a=T,i=#{id},f=24,s=#{width},v=#{height},o=z,q=2,C=1,r=#{rows}"
@@ -429,6 +437,25 @@ defmodule Atomboy.Screen do
           Enum.map(middle, &["\e_Gm=1;", &1, "\e\\"]),
           ["\e_Gm=0;", last, "\e\\"]
         ]
+    end
+  end
+
+  @doc """
+  The frame in RGB *through time*: same conversion as `to_rgb/3`, plus the
+  panel's response curve when the panel has one. Returns `{rgb, ghost}` —
+  the caller keeps `ghost` between frames (starting from `nil`) and drops
+  it back to `nil` whenever the panel changes.
+
+  Only a monochrome frame through a modelled panel ghosts; every other
+  combination — `:raw`, no panel, a colour frame — passes through `to_rgb/3`
+  untouched, the state riding along unmodified.
+  """
+  @spec to_rgb(PPU.frame(), :gray | :dmg, LCD.t() | nil, binary() | nil) ::
+          {binary(), binary() | nil}
+  def to_rgb(frame, palette, lcd, ghost) do
+    case lcd do
+      %LCD{alphas: {_, _}} when byte_size(frame) == 160 * 144 -> LCD.ghost(frame, ghost, lcd)
+      _ -> {to_rgb(frame, palette, lcd), ghost}
     end
   end
 
