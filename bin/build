@@ -95,7 +95,14 @@ if $release; then
   profile="${ATOMBOY_NOTARY_PROFILE:-atomboy}"
   echo "  signing as: $identity"
 
-  bundle=burrito_out/Atomboy.app
+  # Like the assembly above, the signing happens OUT of the synced folder:
+  # the file provider restamps xattrs on anything under Documents, and
+  # codesign calls that detritus and refuses.
+  bundle=/tmp/Atomboy-release.app
+  rm -rf "$bundle"
+  cp -R burrito_out/Atomboy.app "$bundle"
+  xattr -cr "$bundle"
+
   ent=rel/macos/Entitlements.plist
   # Inner binary first, then the bundle — --deep is the deprecated shortcut
   # that signs in the wrong order.
@@ -105,17 +112,19 @@ if $release; then
   codesign --verify --strict "$bundle"
 
   echo "  notarizing (this talks to Apple; a few minutes)…"
-  rm -f burrito_out/Atomboy.zip
-  ditto -c -k --keepParent "$bundle" burrito_out/Atomboy.zip
-  if ! xcrun notarytool submit burrito_out/Atomboy.zip \
+  rm -f /tmp/Atomboy-release.zip
+  ditto -c -k --keepParent "$bundle" /tmp/Atomboy-release.zip
+  if ! xcrun notarytool submit /tmp/Atomboy-release.zip \
       --keychain-profile "$profile" --wait; then
     echo "notarization failed — if the profile '$profile' does not exist yet:" >&2
     echo "    xcrun notarytool store-credentials $profile --apple-id … --team-id …" >&2
     exit 1
   fi
   xcrun stapler staple "$bundle"
-  rm -f burrito_out/Atomboy.zip
+  rm -f /tmp/Atomboy-release.zip burrito_out/Atomboy.zip
   ditto -c -k --keepParent "$bundle" burrito_out/Atomboy.zip
+  rm -rf burrito_out/Atomboy.app
+  mv "$bundle" burrito_out/Atomboy.app
   echo "  burrito_out/Atomboy.zip — AirDrop it to any Mac; it double-clicks clean"
 fi
 
