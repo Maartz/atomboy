@@ -9,6 +9,7 @@ defmodule Atomboy.Server do
 
       <<?F, rgb::binary-69120>>          one 160×144 frame in RGB24
       <<?A, n::16-big, pcm::binary-n>>   s16le stereo PCM at 32,768 Hz
+      <<?P, preset>>                     the panel, announced
 
   The RGB comes out of the same `Screen.to_rgb` as the window — palette
   included, overlay menu included: the shell draws, it knows nothing. The
@@ -16,16 +17,26 @@ defmodule Atomboy.Server do
   the shell plays it as it comes. Status messages (the cable…) go to
   stderr — stdout stays a pure binary stream.
 
+  `?P` carries the index into `Atomboy.LCD.presets/0` (0 raw, 1 dmg,
+  2 pocket, 3 cgb), sent before the first frame and again whenever the
+  menu changes it. It exists because the response curve does *not* run
+  here: unlike the window, the server ships its frames un-ghosted. The
+  shell owns the display, so the shell owns time — its shader applies the
+  panel's response per RGB channel (which covers colour games, where the
+  Elixir pass never could) and the dot structure with it. A shell that
+  ignores `?P` simply draws sharp frames through the panel's colours.
+
   ## Input (stdin)
 
   Two-byte records: `<<op, key>>`, where `op` is `?+` (press) or `?-`
   (release). Keys: `?U ?D ?L ?R` the directions, `?A ?B` the buttons, `?S`
   Start, `?E` Select, `?M` the menu, `?W` rewind (held), `?P` pause — plus
   the direct actions for the native menu bar: `?s`/`?r` save/load state,
-  `?1`-`?9` the slot. Two operations carry a value rather than a key:
+  `?1`-`?9` the slot. Three operations carry a value rather than a key:
   `<<?V, v>>` sets the mixer volume (0-100), `<<?X, mask>>` the four voices
-  (bits 0-3) — the shell's native panel uses these. The end of input (shell
-  closed) stops the game cleanly — save written.
+  (bits 0-3), `<<?N, i>>` the panel preset (the same index `?P` announces)
+  — the shell's native settings use these. The end of input (shell closed)
+  stops the game cleanly — save written.
 
   Everything else is the usual machinery: menu inside the frame, states,
   mixer, link cable (`--listen`/`--link` work in server mode too).
@@ -91,27 +102,30 @@ defmodule Atomboy.Server do
       palette = Keyword.get(opts, :palette, :dmg)
 
       try do
-        loop(%{
-          state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
-          rom: rom,
-          ram: ram,
-          sav: sav,
-          state_base: Path.rootname(sav),
-          state_slot: 1,
-          palette: palette,
-          lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
-          ghost: nil,
-          down: MapSet.new(),
-          menu: nil,
-          apu: %APU{},
-          audio: %{t0: System.monotonic_time(:microsecond), sent: 0},
-          frame: 0,
-          max_frames: Keyword.get(opts, :frames, :infinity),
-          history: [],
-          last_frame: nil,
-          turbo: false,
-          deadline: System.monotonic_time(:microsecond) + @frame_us
-        })
+        # The panel goes out before the first frame: the shell must know
+        # what it is looking through before it draws anything.
+        loop(
+          emit_panel(%{
+            state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
+            rom: rom,
+            ram: ram,
+            sav: sav,
+            state_base: Path.rootname(sav),
+            state_slot: 1,
+            palette: palette,
+            lcd: LCD.compile(Keyword.get(opts, :panel, :raw), palette, Map.get(ram, :cgb, false)),
+            down: MapSet.new(),
+            menu: nil,
+            apu: %APU{},
+            audio: %{t0: System.monotonic_time(:microsecond), sent: 0},
+            frame: 0,
+            max_frames: Keyword.get(opts, :frames, :infinity),
+            history: [],
+            last_frame: nil,
+            turbo: false,
+            deadline: System.monotonic_time(:microsecond) + @frame_us
+          })
+        )
       after
         Process.unlink(reader)
         Process.exit(reader, :kill)
@@ -221,12 +235,19 @@ defmodule Atomboy.Server do
     {ram, apu, %{audio | sent: audio.sent + needed}}
   end
 
-  # A frame onto the wire, through the panel — and through its response
-  # curve, whose state rides in the returned context.
+  # A frame onto the wire, through the panel's colours — never its response
+  # curve: the shell's shader owns time (see the moduledoc). The context
+  # passes through untouched; the shape mirrors the window's for symmetry.
   defp emit_frame(ctx, pixels) do
-    {rgb, ghost} = Screen.to_rgb(pixels, ctx.palette, ctx.lcd, ctx.ghost)
-    IO.binwrite(:stdio, [<<?F>>, rgb])
-    %{ctx | ghost: ghost}
+    IO.binwrite(:stdio, [<<?F>>, Screen.to_rgb(pixels, ctx.palette, ctx.lcd)])
+    ctx
+  end
+
+  # The panel announced to the shell — its index in the preset cycle.
+  defp emit_panel(ctx) do
+    index = Enum.find_index(LCD.presets(), &(&1 == ctx.lcd.preset)) || 0
+    IO.binwrite(:stdio, <<?P, index>>)
+    ctx
   end
 
   defp menu_idle(ctx) do
@@ -279,6 +300,14 @@ defmodule Atomboy.Server do
           {(mask &&& 1) != 0, (mask &&& 2) != 0, (mask &&& 4) != 0, (mask &&& 8) != 0}
 
         drain(%{ctx | ram: mixer_put(ctx.ram, :voices, voices)})
+
+      # The shell's native panel picker: ?N carries the preset index — the
+      # tables recompile and the choice is announced back through ?P, so
+      # the shader and the engine stay in step. An index off the end of
+      # the cycle leaves the panel as it stands.
+      {:key, ?N, index} ->
+        preset = Enum.at(LCD.presets(), index, ctx.lcd.preset)
+        drain(recompile(%{ctx | lcd: %{ctx.lcd | preset: preset}}))
 
       {:codes, string} ->
         drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(string))})
@@ -388,11 +417,11 @@ defmodule Atomboy.Server do
   # rebuilt. The game sleeps behind the menu, so the moment it costs on a
   # color cartridge goes unnoticed.
   defp recompile(ctx),
-    do: %{
-      ctx
-      | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false)),
-        ghost: nil
-    }
+    do:
+      emit_panel(%{
+        ctx
+        | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false))
+      })
 
   # Slot 1 keeps the historical file name; the ".caseN" of slots 2-9 is the
   # on-disk convention `Atomboy.Save` also spells out.

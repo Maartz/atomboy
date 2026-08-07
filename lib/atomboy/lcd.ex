@@ -56,7 +56,7 @@ defmodule Atomboy.LCD do
 
   defstruct preset: :raw, shades: nil, colors: nil, ramp: nil, alphas: nil
 
-  @type preset :: :raw | :dmg | :pocket | :cgb
+  @type preset :: :raw | :dmg | :pocket | :cgb | :crt
   @type t :: %__MODULE__{
           preset: preset(),
           shades: {binary(), binary(), binary(), binary()},
@@ -69,7 +69,7 @@ defmodule Atomboy.LCD do
   # 16.742 ms every host paces itself to.
   @frame_ms 16.742
 
-  @presets [:raw, :dmg, :pocket, :cgb]
+  @presets [:raw, :dmg, :pocket, :cgb, :crt]
 
   @doc "The panels on offer, in menu order."
   @spec presets() :: [preset()]
@@ -182,6 +182,28 @@ defmodule Atomboy.LCD do
       # 10-bit scale — which is why a CGB white tops out around 94%, never
       # at full brightness.
       matrix: {{26, 4, 2}, {0, 24, 8}, {6, 4, 22}}
+    }
+  end
+
+  # The television: not a Game Boy panel at all, but the Super Game Boy's
+  # way out — the handheld's frame on a living-room CRT. Punchy contrast,
+  # saturation with the pop of a tube, and a response so fast (phosphor,
+  # ~2 ms) that the ghosting all but vanishes: the smear was the LCD's,
+  # never the signal's. The scanlines and the aperture grille live in the
+  # shell's shader, where the display resolution is known.
+  defp profile(:crt) do
+    %{
+      base: [0xF4F4F4, 0xA8A8A8, 0x585858, 0x101010],
+      background: 0x101010,
+      density: 0.50,
+      gamma: 1.15,
+      saturation: 1.25,
+      warm: {1.00, 1.00, 1.00},
+      contrast: 1.05,
+      brightness: 0.98,
+      lift: 0.02,
+      response: {2.0, 2.0},
+      matrix: nil
     }
   end
 

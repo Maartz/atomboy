@@ -191,7 +191,7 @@ defmodule Atomboy.CLI do
     {:error,
      "usage: atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
        "[--link host:port] [--save name] [--hold N] [--frames N] " <>
-       "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb] " <>
+       "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb|crt] " <>
        "[--codes 01VVLLHH,…]"}
   end
 end

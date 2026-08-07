@@ -1,13 +1,27 @@
 // atomboy's macOS shell: SwiftUI up front, the BEAM behind.
 //
 // The engine is the Burrito binary embedded in the bundle, launched with
-// `--serveur`: it pushes RGB24 frames (<<'F', 69120 bytes>>) and stereo
-// s16le PCM at 32,768 Hz (<<'A', 2-byte length, data>>) on stdout; the
-// shell writes keys back as two-byte records (op '+'/'-', key) on stdin.
-// All of the emulation — menu, save states, mixer, link cable — lives on
-// the BEAM side; here we only draw (a CALayer with nearest-neighbour
-// filtering: crisp pixels), play sound (AVAudioEngine — no more ffplay)
-// and relay the keyboard.
+// `--serveur`: it pushes RGB24 frames (<<'F', 69120 bytes>>), stereo
+// s16le PCM at 32,768 Hz (<<'A', 2-byte length, data>>) and the panel
+// preset (<<'P', index>>) on stdout; the shell writes keys back as
+// two-byte records (op '+'/'-', key) on stdin. All of the emulation —
+// menu, save states, mixer, link cable — lives on the BEAM side.
+//
+// Here we draw, and drawing has two floors. The engine's frames arrive
+// with the panel's *colours* already applied but nothing else: the
+// temporal and spatial life of the screen belongs to this side, because
+// only the display knows its own resolution and its own clock. A Metal
+// layer runs two passes per frame — the response curve (each RGB channel
+// slides towards its target, fast when darkening, slow when brightening:
+// the ghosting of a real panel, per channel, so colour games get it too),
+// then the dot structure (integer-scaled pixels with the reflector
+// showing through the gaps, each dot shadowing its gap, paper grain, a
+// breath of vignette). The 'P' message picks the parameters; preset 0
+// (raw) degenerates to a plain nearest-neighbour blit through the same
+// pipeline. If Metal fails to wake, the old CALayer path still draws —
+// sharp, ghost-free, but alive.
+//
+// Sound is AVAudioEngine (no more ffplay); the keyboard is relayed.
 //
 // Compiled by swiftc directly (see bin/build --app): no Xcode project,
 // a single file.
@@ -15,10 +29,389 @@
 import SwiftUI
 import AVFoundation
 import GameController
+import Metal
+import QuartzCore
 
 let WIDTH = 160
 let HEIGHT = 144
 let FRAME_BYTES = WIDTH * HEIGHT * 3
+
+// ── The panel on the GPU ─────────────────────────────────────────────────────
+
+// The uniforms as four float4s: a layout Swift and MSL can agree on
+// without a shared header.
+//   a = (alphaFall, alphaRise, seed, gapFraction)
+//   b = (shadow, grain, vignette, crt flag)
+//   reflector = the colour in the gaps, rgb + unused
+//   geometry = (offset.x, offset.y, drawable width, drawable height)
+//              — scale rides in a separate slot computed per frame
+struct PanelUniforms {
+    var a: SIMD4<Float>
+    var b: SIMD4<Float>
+    var reflector: SIMD4<Float>
+    var geometry: SIMD4<Float>
+    var scale: SIMD4<Float>
+}
+
+// One preset per '?P' index — the mirror of Atomboy.LCD's profiles. The
+// alphas are 1 - e^(-16.742/τ) for the same τs as the Elixir side; raw is
+// the absence of a panel: instant response, no grid, no grain.
+struct PanelPreset {
+    let alphaFall: Float
+    let alphaRise: Float
+    let gap: Float
+    let shadow: Float
+    let grain: Float
+    let vignette: Float
+    let reflector: SIMD4<Float>
+    var crt: Bool = false
+
+    static let all: [PanelPreset] = [
+        // 0 raw
+        PanelPreset(alphaFall: 1.0, alphaRise: 1.0, gap: 0, shadow: 0, grain: 0,
+                    vignette: 0, reflector: SIMD4(0, 0, 0, 0)),
+        // 1 dmg — τ 21/61 ms, the STN smear
+        PanelPreset(alphaFall: 0.549, alphaRise: 0.240, gap: 0.14, shadow: 0.25, grain: 0.03,
+                    vignette: 0.06, reflector: SIMD4(0xD2 / 255.0, 0xDC / 255.0, 0xB0 / 255.0, 0)),
+        // 2 pocket — τ 16/44 ms, FSTN answers faster
+        PanelPreset(alphaFall: 0.649, alphaRise: 0.317, gap: 0.12, shadow: 0.20, grain: 0.025,
+                    vignette: 0.05, reflector: SIMD4(0xED / 255.0, 0xE9 / 255.0, 0xDC / 255.0, 0)),
+        // 3 cgb — τ 13/31 ms
+        PanelPreset(alphaFall: 0.724, alphaRise: 0.417, gap: 0.12, shadow: 0.15, grain: 0.02,
+                    vignette: 0.05, reflector: SIMD4(0xF4 / 255.0, 0xF4 / 255.0, 0xEC / 255.0, 0)),
+        // 4 crt — the Super Game Boy's television: phosphor answers in
+        // ~2 ms, so the response pass is effectively instant; the look is
+        // all scanlines, grille and vignette.
+        PanelPreset(alphaFall: 1.0, alphaRise: 1.0, gap: 0, shadow: 0, grain: 0.015,
+                    vignette: 0.14, reflector: SIMD4(0, 0, 0, 0), crt: true),
+    ]
+}
+
+// The whole shader, compiled at launch: with no Xcode project there is no
+// .metallib, and a source string keeps the single-file build.
+let PANEL_SHADER = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct Params {
+    float4 a;          // alphaFall, alphaRise, seed, gapFraction
+    float4 b;          // shadow, grain, vignette, crt flag
+    float4 reflector;
+    float4 geometry;   // offset.x, offset.y, drawable w, drawable h
+    float4 scale;      // integer scale in x
+};
+
+struct VOut { float4 pos [[position]]; float2 uv; };
+
+// One triangle over the whole target — three vertices, no buffer.
+vertex VOut fullscreen(uint id [[vertex_id]]) {
+    float2 v = float2((id << 1) & 2, id & 2);
+    VOut out;
+    out.pos = float4(v * 2.0 - 1.0, 0.0, 1.0);
+    out.uv = float2(v.x, 1.0 - v.y);
+    return out;
+}
+
+constexpr sampler nn(coord::normalized, filter::nearest);
+
+// Pass 1, at 160×144: every channel slides towards its target. Darkening
+// — the value falling — is the driven, fast direction; brightening only
+// relaxes. seed > 0.5 snaps to the target: the first frame of a game (or
+// of a new panel) arrives ghost-free.
+fragment float4 respond(VOut in [[stage_in]],
+                        texture2d<float> frame [[texture(0)]],
+                        texture2d<float> state [[texture(1)]],
+                        constant Params& p [[buffer(0)]]) {
+    float3 t = frame.sample(nn, in.uv).rgb;
+    float3 s = state.sample(nn, in.uv).rgb;
+    float3 a = float3(t.r < s.r ? p.a.x : p.a.y,
+                      t.g < s.g ? p.a.x : p.a.y,
+                      t.b < s.b ? p.a.x : p.a.y);
+    float3 next = mix(s, t, a);
+    return float4(p.a.z > 0.5 ? t : next, 1.0);
+}
+
+// Static hash noise in [-1, 1] — time-varying grain would flicker.
+float grain_hash(float2 v) {
+    return fract(sin(dot(v, float2(12.9898, 78.233))) * 43758.5453) * 2.0 - 1.0;
+}
+
+// Pass 2, at display resolution: the dot structure. The frame sits at an
+// integer scale, centred; outside it, the bezel. Inside, each game pixel
+// is a dot whose right and bottom edges give way to the reflector, held
+// under a ceiling: the grid may modulate a light shade by ~1.2% and a
+// dark one by ~31.4% — the measured numbers — and no more. (Geometry
+// alone was tried first: a near-white reflector against dark ink flooded
+// every dark scene.) Each dot shadows its own gap; paper grain and a
+// breath of vignette close the pass.
+fragment float4 dots(VOut in [[stage_in]],
+                     texture2d<float> state [[texture(0)]],
+                     constant Params& p [[buffer(0)]]) {
+    float scale = p.scale.x;
+    float2 px = in.pos.xy - p.geometry.xy;
+    float2 game = floor(px / scale);
+
+    if (game.x < 0.0 || game.x >= 160.0 || game.y < 0.0 || game.y >= 144.0)
+        return float4(0.02, 0.02, 0.02, 1.0);
+
+    float3 ink = state.sample(nn, (game + 0.5) / float2(160.0, 144.0)).rgb;
+    float3 color = ink;
+
+    if (p.b.w > 0.5) {
+        // The tube: the beam paints each game row as a bright core falling
+        // off vertically — bright lines swell, dark ones thin — and an
+        // aperture grille stripes the device pixels in R, G, B.
+        float2 cell = (px - game * scale) / scale;
+        float luma = dot(ink, float3(0.299, 0.587, 0.114));
+        float beam = mix(0.55, 1.0, luma);
+        float d = fabs(cell.y - 0.5) * 2.0;
+        float line = smoothstep(beam + 0.2, beam - 0.2, d);
+        color = ink * (0.30 + 0.80 * line);
+
+        int strip = int(px.x) % 3;
+        float3 grille = strip == 0 ? float3(1.05, 0.85, 0.85)
+                      : strip == 1 ? float3(0.85, 1.05, 0.85)
+                                   : float3(0.85, 0.85, 1.05);
+        color *= grille;
+    }
+
+    float gapPx = (p.a.w > 0.0 && scale >= 3.0) ? max(1.0, round(scale * p.a.w)) : 0.0;
+    if (gapPx > 0.0) {
+        float2 cell = px - game * scale;
+        if (cell.x >= scale - gapPx || cell.y >= scale - gapPx) {
+            float darkness = 1.0 - dot(ink, float3(0.299, 0.587, 0.114));
+            // The reflector shows through the gap, shadowed by its dot —
+            // but never brighter than the measured grid modulation: 1.2%
+            // over a light shade, 31.4% over a dark one, plus a whisper on
+            // true black so the grid does not vanish there. Without this
+            // ceiling a bright reflector floods every dark scene and the
+            // picture washes out.
+            float3 through = p.reflector.rgb * (1.0 - p.b.x * darkness);
+            float lift = mix(0.012, 0.314, darkness);
+            color = min(through, ink * (1.0 + lift) + lift * 0.08);
+        }
+    }
+
+    color *= 1.0 + p.b.y * grain_hash(floor(in.pos.xy));
+
+    float2 c = in.pos.xy / p.geometry.zw - 0.5;
+    color *= 1.0 - p.b.z * dot(c, c) * 4.0;
+
+    return float4(color, 1.0);
+}
+"""
+
+// The Metal path: a CAMetalLayer fed two passes per engine frame. `nil`
+// from init means no device or a shader that refused to compile — the
+// caller falls back to the CALayer and loses only the panel's life, not
+// the game.
+final class MetalScreen {
+    let layer = CAMetalLayer()
+    private let queue: MTLCommandQueue
+    private let respond: MTLRenderPipelineState
+    private let dots: MTLRenderPipelineState
+    private let frameTex: MTLTexture
+    private var states: [MTLTexture]
+    private var ping = 0
+    private var rgba = [UInt8](repeating: 255, count: WIDTH * HEIGHT * 4)
+
+    // Rendering lives on its own queue: `nextDrawable()` can block for up
+    // to a second when the window is occluded or mid-resize, and on the
+    // main thread that block is the beachball — with the engine's frames
+    // piling up behind it until the pipe freezes the game too. Here the
+    // stall lands on a thread nobody is watching, `pending` collapses the
+    // backlog to the newest frame, and the semaphore keeps the CPU off
+    // textures the GPU is still reading.
+    private let renderQueue = DispatchQueue(label: "atomboy.panel", qos: .userInteractive)
+    private let inflight = DispatchSemaphore(value: 1)
+    private let lock = NSLock()
+    private var pending: Data?
+    private var size = CGSize.zero
+    private var seed = true
+    private var preset = PanelPreset.all[0]
+
+    init?() {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue(),
+              let library = try? device.makeLibrary(source: PANEL_SHADER, options: nil)
+        else { return nil }
+
+        func pipeline(_ fragment: String, format: MTLPixelFormat) -> MTLRenderPipelineState? {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = library.makeFunction(name: "fullscreen")
+            d.fragmentFunction = library.makeFunction(name: fragment)
+            d.colorAttachments[0].pixelFormat = format
+            return try? device.makeRenderPipelineState(descriptor: d)
+        }
+
+        // The state lives in float16 — the article is blunt that 8-bit
+        // intermediates stall the decay into visible steps.
+        func texture(_ format: MTLPixelFormat, renderable: Bool) -> MTLTexture? {
+            let d = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: format, width: WIDTH, height: HEIGHT, mipmapped: false)
+            d.usage = renderable ? [.renderTarget, .shaderRead] : [.shaderRead]
+            return device.makeTexture(descriptor: d)
+        }
+
+        guard let respond = pipeline("respond", format: .rgba16Float),
+              let dots = pipeline("dots", format: .bgra8Unorm),
+              let frameTex = texture(.rgba8Unorm, renderable: false),
+              let stateA = texture(.rgba16Float, renderable: true),
+              let stateB = texture(.rgba16Float, renderable: true)
+        else { return nil }
+
+        self.queue = queue
+        self.respond = respond
+        self.dots = dots
+        self.frameTex = frameTex
+        self.states = [stateA, stateB]
+
+        layer.device = device
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
+        layer.backgroundColor = NSColor.black.cgColor
+    }
+
+    // The engine announced its panel: new parameters, and the state
+    // re-seeded — the old floats lived on another panel's colours.
+    func panel(_ index: Int) {
+        lock.lock()
+        preset = PanelPreset.all[min(max(index, 0), PanelPreset.all.count - 1)]
+        seed = true
+        lock.unlock()
+    }
+
+    // The view resized (or moved to another display): the drawable follows
+    // the device pixels. The next frame repaints — at 60 Hz it is never
+    // far away.
+    func resize(_ size: CGSize, contentsScale: CGFloat) {
+        layer.contentsScale = contentsScale
+        let w = size.width * contentsScale
+        let h = size.height * contentsScale
+        guard w > 0 && h > 0 else { return }
+        layer.drawableSize = CGSize(width: w, height: h)
+        lock.lock()
+        self.size = CGSize(width: w, height: h)
+        lock.unlock()
+    }
+
+    // Main thread: park the frame and return — never block. A frame that
+    // arrives while another renders replaces it: the newest picture wins,
+    // the backlog never grows.
+    func submit(_ rgb: Data) {
+        lock.lock()
+        let idle = pending == nil
+        pending = rgb
+        lock.unlock()
+        if idle { renderQueue.async { self.drain() } }
+    }
+
+    private func drain() {
+        while true {
+            lock.lock()
+            let rgb = pending
+            pending = nil
+            lock.unlock()
+            guard let rgb else { return }
+            render(rgb)
+        }
+    }
+
+    private func render(_ rgb: Data) {
+        lock.lock()
+        let size = self.size
+        let preset = self.preset
+        let seeding = self.seed
+        lock.unlock()
+
+        guard size.width >= CGFloat(WIDTH), size.height >= CGFloat(HEIGHT) else { return }
+
+        // RGB24 through an alpha channel: Metal has no 3-byte format.
+        rgb.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let src = raw.bindMemory(to: UInt8.self)
+            for i in 0..<(WIDTH * HEIGHT) {
+                rgba[4 * i] = src[3 * i]
+                rgba[4 * i + 1] = src[3 * i + 1]
+                rgba[4 * i + 2] = src[3 * i + 2]
+            }
+        }
+
+        // The block, if it comes, lands here — off the main thread.
+        guard let drawable = layer.nextDrawable() else { return }
+
+        // One frame in flight: the GPU signals on completion, and only
+        // then does the CPU touch the textures again.
+        inflight.wait()
+
+        frameTex.replace(
+            region: MTLRegionMake2D(0, 0, WIDTH, HEIGHT), mipmapLevel: 0,
+            withBytes: rgba, bytesPerRow: WIDTH * 4)
+
+        // Integer scale, centred: a fractional scale would moiré the grid.
+        // The drawable's own dimensions are the truth mid-resize.
+        let dw = drawable.texture.width
+        let dh = drawable.texture.height
+        let scale = max(1, min(dw / WIDTH, dh / HEIGHT))
+        let ox = (Float(dw) - Float(WIDTH * scale)) / 2
+        let oy = (Float(dh) - Float(HEIGHT * scale)) / 2
+
+        var uniforms = PanelUniforms(
+            a: SIMD4(preset.alphaFall, preset.alphaRise, seeding ? 1 : 0, preset.gap),
+            b: SIMD4(preset.shadow, preset.grain, preset.vignette, preset.crt ? 1 : 0),
+            reflector: preset.reflector,
+            geometry: SIMD4(ox, oy, Float(dw), Float(dh)),
+            scale: SIMD4(Float(scale), 0, 0, 0))
+
+        guard let commands = queue.makeCommandBuffer() else {
+            inflight.signal()
+            return
+        }
+
+        // The seed is spent only once a frame actually renders with it.
+        if seeding {
+            lock.lock()
+            seed = false
+            lock.unlock()
+        }
+
+        // Pass 1: the response curve, ping → pong.
+        let source = states[ping]
+        let target = states[1 - ping]
+        ping = 1 - ping
+
+        let respondPass = MTLRenderPassDescriptor()
+        respondPass.colorAttachments[0].texture = target
+        respondPass.colorAttachments[0].loadAction = .dontCare
+        respondPass.colorAttachments[0].storeAction = .store
+
+        if let encoder = commands.makeRenderCommandEncoder(descriptor: respondPass) {
+            encoder.setRenderPipelineState(respond)
+            encoder.setFragmentTexture(frameTex, index: 0)
+            encoder.setFragmentTexture(source, index: 1)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
+        }
+
+        // Pass 2: the dot structure, into the drawable.
+        let presentPass = MTLRenderPassDescriptor()
+        presentPass.colorAttachments[0].texture = drawable.texture
+        presentPass.colorAttachments[0].loadAction = .dontCare
+        presentPass.colorAttachments[0].storeAction = .store
+
+        if let encoder = commands.makeRenderCommandEncoder(descriptor: presentPass) {
+            encoder.setRenderPipelineState(dots)
+            encoder.setFragmentTexture(target, index: 0)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
+        }
+
+        commands.addCompletedHandler { [inflight] _ in inflight.signal() }
+        commands.present(drawable)
+        commands.commit()
+    }
+}
 
 // ── The engine ────────────────────────────────────────────────────────────────
 
@@ -31,7 +424,10 @@ struct GSCode: Codable, Identifiable, Equatable {
 }
 
 final class Engine: ObservableObject {
-    let layer = CALayer()
+    // The Metal path when the device wakes, the CALayer otherwise — one
+    // `layer` either way, and the view never knows which it got.
+    let metal = MetalScreen()
+    let layer: CALayer
     @Published var settingsRequested = false
     @Published var game: String?
     @Published var recentROMs: [URL] = Engine.loadRecents()
@@ -47,9 +443,16 @@ final class Engine: ObservableObject {
     private var audioStarted = false
 
     init() {
-        layer.magnificationFilter = .nearest
-        layer.contentsGravity = .resizeAspect
-        layer.backgroundColor = NSColor.black.cgColor
+        if let metal {
+            layer = metal.layer
+        } else {
+            let fallback = CALayer()
+            fallback.magnificationFilter = .nearest
+            fallback.contentsGravity = .resizeAspect
+            fallback.backgroundColor = NSColor.black.cgColor
+            layer = fallback
+        }
+
         attachGamepads()
     }
 
@@ -153,6 +556,13 @@ final class Engine: ObservableObject {
         try? input?.write(contentsOf: Data([UInt8(ascii: "X"), mask]))
     }
 
+    // The native panel picker: 'N' carries the preset index down the pipe;
+    // the engine recompiles its tables and answers with 'P' — the shader
+    // follows without a restart.
+    func setPanel(_ index: Int) {
+        try? input?.write(contentsOf: Data([UInt8(ascii: "N"), UInt8(max(0, min(4, index)))]))
+    }
+
     func launch(rom: URL) {
         stop()
 
@@ -196,6 +606,7 @@ final class Engine: ObservableObject {
             volume(defaults.object(forKey: "reglages.volume") as? Int ?? 100)
             let mask = defaults.object(forKey: "reglages.voixMasque") as? Int ?? 15
             voices((0..<4).map { mask & (1 << $0) != 0 })
+            setPanel(defaults.object(forKey: "reglages.panneau") as? Int ?? 0)
             sendActiveCodes()
         }
     }
@@ -274,6 +685,10 @@ final class Engine: ObservableObject {
                 guard buffer.count >= 3 + n else { return }
                 play(buffer.subdata(in: 3..<(3 + n)))
                 buffer.removeSubrange(0..<(3 + n))
+            } else if tag == UInt8(ascii: "P") {
+                guard buffer.count >= 2 else { return }
+                metal?.panel(Int(buffer[1]))
+                buffer.removeSubrange(0..<2)
             } else {
                 // Stream out of sync: drop the byte and catch up.
                 buffer.removeFirst()
@@ -282,6 +697,11 @@ final class Engine: ObservableObject {
     }
 
     private func draw(_ rgb: Data) {
+        if let metal {
+            metal.submit(rgb)
+            return
+        }
+
         guard let provider = CGDataProvider(data: rgb as CFData),
               let image = CGImage(
                   width: WIDTH, height: HEIGHT, bitsPerComponent: 8, bitsPerPixel: 24,
@@ -386,6 +806,18 @@ final class ScreenView: NSView {
         }
     }
 
+    // The Metal drawable tracks the view in device pixels — through
+    // resizes and through moves to a display with another scale factor.
+    override func layout() {
+        super.layout()
+        engine?.metal?.resize(bounds.size, contentsScale: window?.backingScaleFactor ?? 2)
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        engine?.metal?.resize(bounds.size, contentsScale: window?.backingScaleFactor ?? 2)
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.isARepeat { return }
 
@@ -463,6 +895,37 @@ struct GeneralSettings: View {
         Form {
             Toggle("Resume the last game on launch", isOn: $resume)
             Text("Otherwise, the app asks you to pick a ROM.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+    }
+}
+
+struct ScreenSettings: View {
+    let engine: Engine
+    // French key, like every persisted "reglages.*" name.
+    @AppStorage("reglages.panneau") private var panel = 0
+
+    private static let names = [
+        "Raw — the pixels, straight",
+        "DMG — the 1989 green, ghosting and all",
+        "Pocket — the FSTN gray, tighter",
+        "Color — the CGB glass",
+        "CRT — the Super Game Boy's television",
+    ]
+
+    var body: some View {
+        Form {
+            Picker("Panel", selection: $panel) {
+                ForEach(0..<5, id: \.self) { i in
+                    Text(Self.names[i]).tag(i)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .onChange(of: panel) { engine.setPanel(panel) }
+
+            Text("The screen the game is seen through: colour, response curve and dot structure, live — no restart.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -774,6 +1237,8 @@ struct AtomboyApp: App {
             TabView {
                 GeneralSettings()
                     .tabItem { Label("General", systemImage: "gearshape") }
+                ScreenSettings(engine: delegate.engine)
+                    .tabItem { Label("Screen", systemImage: "display") }
                 AudioSettings(engine: delegate.engine)
                     .tabItem { Label("Audio", systemImage: "speaker.wave.2") }
                 CodesSettings(engine: delegate.engine)

@@ -37,7 +37,7 @@ defmodule Mix.Tasks.Atomboy.Play do
       interactive if ffplay is installed — `brew install ffmpeg`).
     * `--palette dmg|gray` — the green of the original panel (default) or
       neutral grays.
-    * `--panel raw|dmg|pocket|cgb` — the screen the frame is seen through:
+    * `--panel raw|dmg|pocket|cgb|crt` — the screen the frame is seen through:
       `raw` is no screen at all (default, the palette straight), the others
       model a real panel's colour and its response curve — the ghosting of
       moving images, in the window and the kitty terminal (half blocks stay
