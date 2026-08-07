@@ -50,7 +50,7 @@ defmodule Atomboy.Link do
     with {:ok, lsock} <-
            :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true]),
          IO.puts(:stderr, "link cable: waiting for the partner on port #{port}…"),
-         {:ok, socket} <- :gen_tcp.accept(lsock, 120_000) do
+         {:ok, socket} <- :gen_tcp.accept(lsock, :infinity) do
       :gen_tcp.close(lsock)
       :inet.setopts(socket, nodelay: true)
       IO.puts(:stderr, "link cable: partner plugged in.")

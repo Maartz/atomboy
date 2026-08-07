@@ -636,6 +636,9 @@ final class LinkCenter: NSObject, ObservableObject, NetServiceDelegate, NetServi
     }
 
     @Published var peers: [Peer] = []
+    // Discovery that fails must say so: macOS gates local-network access
+    // per app, and a denial otherwise looks exactly like an empty room.
+    @Published var trouble: String?
     private var service: NetService?
     private var browser: NetServiceBrowser?
     // Services being resolved must be retained, and their names remembered
@@ -648,6 +651,8 @@ final class LinkCenter: NSObject, ObservableObject, NetServiceDelegate, NetServi
         stopAdvertising()
         let service = NetService(
             domain: "", type: Self.serviceType, name: name, port: Int32(port))
+        service.delegate = self
+        service.schedule(in: .main, forMode: .common)
         service.publish()
         self.service = service
     }
@@ -659,9 +664,13 @@ final class LinkCenter: NSObject, ObservableObject, NetServiceDelegate, NetServi
 
     func browse() {
         stopBrowsing()
+        trouble = nil
         let browser = NetServiceBrowser()
         browser.delegate = self
-        browser.searchForServices(ofType: Self.serviceType, inDomain: "")
+        // .common, not the default mode: the default starves while the UI
+        // tracks a control, and the sheet is nothing but controls.
+        browser.schedule(in: .main, forMode: .common)
+        browser.searchForServices(ofType: Self.serviceType, inDomain: "local.")
         self.browser = browser
     }
 
@@ -670,6 +679,27 @@ final class LinkCenter: NSObject, ObservableObject, NetServiceDelegate, NetServi
         browser = nil
         resolving = []
         peers = []
+    }
+
+    // The failures that used to be an eternal spinner.
+    func netServiceBrowser(
+        _ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]
+    ) {
+        trouble = explain(errorDict)
+    }
+
+    func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+        trouble = explain(errorDict)
+    }
+
+    private func explain(_ errorDict: [String: NSNumber]) -> String {
+        // -72008: the per-app local-network permission said no.
+        if errorDict[NetService.errorCode]?.intValue == -72008 {
+            return "macOS is blocking Atomboy's local network access. "
+                + "Allow it under System Settings → Privacy & Security → Local Network, "
+                + "then close and reopen this sheet."
+        }
+        return "The network said no: \(errorDict)"
     }
 
     func netServiceBrowser(
@@ -1597,7 +1627,7 @@ struct LinkSheet: View {
                     ProgressView().controlSize(.small)
                     Text("The cable is out — waiting for the other Game Boy.")
                 }
-                Text("The engine waits two minutes; if nobody plugs in, the game restarts alone.")
+                Text("Stop Hosting puts the cable away and resumes alone.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -1611,7 +1641,11 @@ struct LinkSheet: View {
 
                 Divider()
 
-                if center.peers.isEmpty {
+                if let trouble = center.trouble {
+                    Label(trouble, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                } else if center.peers.isEmpty {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Looking for cables on the network…")
