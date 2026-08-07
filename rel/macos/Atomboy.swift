@@ -621,6 +621,82 @@ struct Keybind: Identifiable {
     }
 }
 
+// ── The link cable's directory assistance ────────────────────────────────────
+
+// Bonjour, both directions: publish "this Mac hosts a cable" when hosting,
+// list everyone else's cables otherwise. NetService is deprecated and
+// complete — the modern replacement cannot hand back a plain host:port,
+// which is exactly what the engine's --link flag wants.
+final class LinkCenter: NSObject, ObservableObject, NetServiceDelegate, NetServiceBrowserDelegate {
+    struct Peer: Identifiable, Equatable {
+        var id: String { "\(name)@\(host):\(port)" }
+        let name: String
+        let host: String
+        let port: UInt16
+    }
+
+    @Published var peers: [Peer] = []
+    private var service: NetService?
+    private var browser: NetServiceBrowser?
+    // Services being resolved must be retained, and their names remembered
+    // so a vanished host leaves the list too.
+    private var resolving: [NetService] = []
+
+    static let serviceType = "_atomboy._tcp."
+
+    func advertise(name: String, port: UInt16) {
+        stopAdvertising()
+        let service = NetService(
+            domain: "", type: Self.serviceType, name: name, port: Int32(port))
+        service.publish()
+        self.service = service
+    }
+
+    func stopAdvertising() {
+        service?.stop()
+        service = nil
+    }
+
+    func browse() {
+        stopBrowsing()
+        let browser = NetServiceBrowser()
+        browser.delegate = self
+        browser.searchForServices(ofType: Self.serviceType, inDomain: "")
+        self.browser = browser
+    }
+
+    func stopBrowsing() {
+        browser?.stop()
+        browser = nil
+        resolving = []
+        peers = []
+    }
+
+    func netServiceBrowser(
+        _ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool
+    ) {
+        // Our own cable is not a partner.
+        guard service.name != self.service?.name else { return }
+        service.delegate = self
+        resolving.append(service)
+        service.resolve(withTimeout: 5)
+    }
+
+    func netServiceBrowser(
+        _ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool
+    ) {
+        peers.removeAll { $0.name == service.name }
+        resolving.removeAll { $0 == service }
+    }
+
+    func netServiceDidResolveAddress(_ service: NetService) {
+        guard let host = service.hostName else { return }
+        let peer = Peer(name: service.name, host: host, port: UInt16(service.port))
+        if !peers.contains(peer) { peers.append(peer) }
+        resolving.removeAll { $0 == service }
+    }
+}
+
 final class Engine: ObservableObject {
     // The Metal path when the device wakes, the CALayer otherwise — one
     // `layer` either way, and the view never knows which it got.
@@ -629,6 +705,17 @@ final class Engine: ObservableObject {
     @Published var settingsRequested = false
     @Published var savesRequested = false
     @Published var library: LibraryInfo?
+    @Published var linkRequested = false
+    @Published var hosting = false
+    let link = LinkCenter()
+    // The port both sides of the cable agree on — the engine's
+    // Link.default_port, coupled the same knowing way as "atomboy-moteur".
+    static let linkPort: UInt16 = 7373
+    private(set) var currentROM: URL?
+    // A link attempt that dies (the 120 s accept timeout, a refused
+    // connection) relaunches the game without the cable instead of
+    // quitting the app with it.
+    private var linkAttempt = false
     @Published var game: String?
     @Published var recentROMs: [URL] = Engine.loadRecents()
     var runningProcess: Process? { process }
@@ -864,8 +951,16 @@ final class Engine: ObservableObject {
         backgroundPaused = false
     }
 
-    func launch(rom: URL) {
+    enum LinkMode {
+        case host
+        case join(String, UInt16)
+    }
+
+    func launch(rom: URL, link linkMode: LinkMode? = nil) {
         stop()
+        currentROM = rom
+        linkAttempt = linkMode != nil
+        hosting = false
 
         // "atomboy-moteur", not "atomboy": APFS is case-insensitive, and
         // "atomboy" would clobber the "Atomboy" shell (learned the hard way).
@@ -875,7 +970,25 @@ final class Engine: ObservableObject {
         p.executableURL = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/atomboy-moteur")
         // `--serveur` is the engine's own CLI flag: it stays as it is.
-        p.arguments = [rom.path, "--serveur"]
+        var arguments = [rom.path, "--serveur"]
+
+        switch linkMode {
+        case .host:
+            arguments += ["--listen", "\(Engine.linkPort)"]
+            hosting = true
+            link.advertise(
+                name: "\(Host.current().localizedName ?? "A Mac") — "
+                    + rom.deletingPathExtension().lastPathComponent,
+                port: Engine.linkPort)
+
+        case let .join(host, port):
+            arguments += ["--link", "\(host):\(port)"]
+
+        case nil:
+            link.stopAdvertising()
+        }
+
+        p.arguments = arguments
         p.currentDirectoryURL = rom.deletingLastPathComponent()
 
         let fromEngine = Pipe()
@@ -890,8 +1003,18 @@ final class Engine: ObservableObject {
             DispatchQueue.main.async { self?.receive(data) }
         }
 
-        p.terminationHandler = { _ in
-            DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                // A cable that never connected (the engine's two-minute
+                // accept timeout, a refused join) is not a reason to lose
+                // the game: relaunch it plain instead of quitting.
+                if let self, self.linkAttempt, let rom = self.currentROM {
+                    self.linkAttempt = false
+                    self.launch(rom: rom)
+                } else {
+                    NSApplication.shared.terminate(nil)
+                }
+            }
         }
 
         input = toEngine.fileHandleForWriting
@@ -971,6 +1094,23 @@ final class Engine: ObservableObject {
         try? input?.close()
         process?.terminate()
         process = nil
+    }
+
+    // ── The cable: plugged at boot, like the real one ────────────────────────
+
+    func hostLink() {
+        guard let rom = currentROM else { return }
+        launch(rom: rom, link: .host)
+    }
+
+    func joinLink(_ peer: LinkCenter.Peer) {
+        guard let rom = currentROM else { return }
+        launch(rom: rom, link: .join(peer.host, peer.port))
+    }
+
+    func unplugLink() {
+        guard let rom = currentROM else { return }
+        launch(rom: rom)
     }
 
     // ── The incoming stream: frames and PCM, sliced as they arrive ───────────
@@ -1436,6 +1576,77 @@ struct StateCard: View {
     }
 }
 
+// ── The link sheet: two Game Boys, one living room ───────────────────────────
+
+struct LinkSheet: View {
+    @ObservedObject var engine: Engine
+    @ObservedObject var center: LinkCenter
+    @Environment(\.dismiss) private var dismiss
+
+    init(engine: Engine) {
+        self.engine = engine
+        self.center = engine.link
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Link Cable").font(.title2.bold())
+
+            if engine.hosting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("The cable is out — waiting for the other Game Boy.")
+                }
+                Text("The engine waits two minutes; if nobody plugs in, the game restarts alone.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button("Stop Hosting") { engine.unplugLink() }
+            } else {
+                Button("Host Link Cable") { engine.hostLink() }
+                    .disabled(engine.isIdle)
+                Text("Restarts the game with the cable out and announces it on the local network.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Divider()
+
+                if center.peers.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Looking for cables on the network…")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ForEach(center.peers) { peer in
+                        HStack {
+                            Image(systemName: "cable.connector")
+                            Text(peer.name)
+                            Spacer()
+                            Button("Plug In") { engine.joinLink(peer) }
+                                .disabled(engine.isIdle)
+                        }
+                    }
+                }
+            }
+
+            Spacer()
+
+            HStack {
+                Text("Both sides restart their game — batteries are safe in the library.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 440, height: 320)
+        .onAppear { center.browse() }
+        .onDisappear { if !engine.hosting { center.stopBrowsing() } }
+    }
+}
+
 struct ControlsSettings: View {
     @State private var recording: String?
     @State private var monitor: Any?
@@ -1672,6 +1883,9 @@ struct MainScene: View {
         .sheet(isPresented: $engine.savesRequested) {
             SavesSheet(engine: engine)
         }
+        .sheet(isPresented: $engine.linkRequested) {
+            LinkSheet(engine: engine)
+        }
         // A ROM dropped on the screen slots in like a cartridge.
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard let provider = providers.first, provider.canLoadObject(ofClass: URL.self)
@@ -1868,6 +2082,8 @@ struct AtomboyApp: App {
 
                 Button("Reset") { delegate.engine.reset() }
                     .keyboardShortcut("r", modifiers: [.command, .option])
+                Button("Link Cable…") { delegate.engine.linkRequested = true }
+                    .keyboardShortcut("l")
                 Button("Retro Menu (in game)") { delegate.engine.press("M") }
             }
         }

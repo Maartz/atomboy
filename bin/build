@@ -5,6 +5,8 @@
 #     bin/build --fast       skip the tests
 #     bin/build --install    + copy to ~/.local/bin/atomboy
 #     bin/build --app        + Atomboy.app (native SwiftUI shell)
+#     bin/build --release    + Developer ID signing, notarization, a zip
+#                              that runs on any Mac (implies --app)
 #     bin/build --clean      purge the extraction caches (close the game first!)
 #
 # Under the hood: Burrito requires zig 0.16.0 (mise installs it if needed),
@@ -20,12 +22,14 @@ fast=false
 install=false
 clean=false
 app=false
+release=false
 for arg in "$@"; do
   case "$arg" in
     --vite|--fast) fast=true ;;
     --install) install=true ;;
     --menage|--clean) clean=true ;;
     --app) app=true ;;
+    --release) app=true; release=true ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -75,6 +79,44 @@ if $app; then
   codesign --force --deep --sign - /tmp/Atomboy.app 2> /dev/null
   mv /tmp/Atomboy.app burrito_out/Atomboy.app
   echo "  burrito_out/Atomboy.app (drag it into /Applications)"
+fi
+
+if $release; then
+  # The app that leaves this Mac: Developer ID, hardened runtime (with the
+  # JIT entitlements a BEAM cannot live without), notarized and stapled.
+  # One-time setup for the notary profile:
+  #     xcrun notarytool store-credentials atomboy \
+  #         --apple-id you@example.com --team-id TEAMID
+  # (with an app-specific password from appleid.apple.com).
+  echo "── release ──"
+  identity="${ATOMBOY_SIGN_ID:-$(security find-identity -v -p codesigning \
+    | grep -m1 "Developer ID Application" | sed 's/.*"\(.*\)"/\1/')}"
+  [ -n "$identity" ] || { echo "no Developer ID Application identity in the keychain" >&2; exit 1; }
+  profile="${ATOMBOY_NOTARY_PROFILE:-atomboy}"
+  echo "  signing as: $identity"
+
+  bundle=burrito_out/Atomboy.app
+  ent=rel/macos/Entitlements.plist
+  # Inner binary first, then the bundle — --deep is the deprecated shortcut
+  # that signs in the wrong order.
+  codesign --force --options runtime --entitlements "$ent" --sign "$identity" \
+    "$bundle/Contents/MacOS/atomboy-moteur"
+  codesign --force --options runtime --entitlements "$ent" --sign "$identity" "$bundle"
+  codesign --verify --strict "$bundle"
+
+  echo "  notarizing (this talks to Apple; a few minutes)…"
+  rm -f burrito_out/Atomboy.zip
+  ditto -c -k --keepParent "$bundle" burrito_out/Atomboy.zip
+  if ! xcrun notarytool submit burrito_out/Atomboy.zip \
+      --keychain-profile "$profile" --wait; then
+    echo "notarization failed — if the profile '$profile' does not exist yet:" >&2
+    echo "    xcrun notarytool store-credentials $profile --apple-id … --team-id …" >&2
+    exit 1
+  fi
+  xcrun stapler staple "$bundle"
+  rm -f burrito_out/Atomboy.zip
+  ditto -c -k --keepParent "$bundle" burrito_out/Atomboy.zip
+  echo "  burrito_out/Atomboy.zip — AirDrop it to any Mac; it double-clicks clean"
 fi
 
 echo "── binaries ──"

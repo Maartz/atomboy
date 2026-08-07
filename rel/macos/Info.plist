@@ -22,6 +22,12 @@
 	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Atomboy looks for other Game Boys on your network to plug in the link cable.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_atomboy._tcp</string>
+	</array>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>CFBundleDocumentTypes</key>
