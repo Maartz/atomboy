@@ -127,6 +127,40 @@ frame CRC matches a direct replay in a test; the encode itself is smoke-
 tested behind an ffmpeg-present guard (excluded tag if absent, the suite
 already knows excluded tests).
 
+## Task 7 — The console's own clock (added 2026-08-08 evening)
+
+*After Task 4 (shares server.ex and Atomboy.swift). Files:
+`lib/atomboy/cpu/cart_loop.ex`, `lib/atomboy/play.ex`,
+`lib/atomboy/movie.ex` (format v1 stays readable), `lib/atomboy/server.ex`,
+`rel/macos/Atomboy.swift`, tests.*
+
+Discovered during the arc: the MBC3 RTC (cart_loop.ex `rtc_now/0`) serves
+`System.os_time` + the `ATOMBOY_RTC_OFFSET` env var — real wall clock, which
+(a) leaves Crystal's calendar events waiting on real days, and (b) breaks
+movie determinism for RTC games (the spec's "no wall clock in the core" was
+wrong; test ROMs never read the RTC so the Task 2 property didn't catch it).
+
+1. **Runtime offset**: the offset moves from env-var-only into the machine's
+   memory map (env var seeds it for compatibility), settable live via a new
+   server-protocol op (signed seconds). The RTC latch semantics are
+   unchanged.
+2. **Virtual time under record/replay**: the movie anchor captures the RTC
+   epoch (real time + offset at anchor); while recording or replaying, the
+   served "now" derives from that epoch plus the frame counter
+   (`frames × 70224 / 4194304` seconds) — never the wall clock. Same movie,
+   same clock, every replay. Movie format: additive header field, old
+   movies read fine (epoch absent → replay still virtualizes from the
+   file's created_at, documented).
+3. **SwiftUI**: Settings gains a "Console clock" control — a DatePicker
+   ("the console believes it is…"), a "real time" toggle to snap back, and
+   a +1 day nudge button, persisted PER GAME the way GameShark codes are
+   (`codes.*`-style keying), sent on boot catch-up and on change.
+4. Tests: an RTC test ROM (write one in the fixtures style: latch, read,
+   paint seconds to the background) proving offset arithmetic, latch
+   freezing, and — the point — that a recorded RTC-reading session replays
+   with identical frame CRCs. Mutation: make replay serve the wall clock —
+   the new determinism test must die.
+
 ## Task 6 — The checklist and the sign-off
 
 *Last. Fixes only.* Record a real session (a commercial ROM by hand),
