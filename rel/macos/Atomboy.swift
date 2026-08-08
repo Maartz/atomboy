@@ -738,6 +738,10 @@ final class Engine: ObservableObject {
     @Published var library: LibraryInfo?
     @Published var linkRequested = false
     @Published var hosting = false
+    // Turbo is held on the wire, so somebody has to remember whose finger is
+    // down: the HUD button and the menu item latch, the keys and the shoulder
+    // hold, and all four ends move this one flag.
+    @Published private(set) var turboLatched = false
     let link = LinkCenter()
     // The port both sides of the cable agree on — the engine's
     // Link.default_port, coupled the same knowing way as "atomboy-moteur".
@@ -783,6 +787,21 @@ final class Engine: ObservableObject {
         // disconnect fakes — so the drawn console cannot be left holding a
         // button no hand is on.
         ConsoleState.shared.apply(key, pressed: pressed)
+        if key == "T" { setLatched(pressed) }
+    }
+
+    // The HUD and the menu bar latch turbo: one click sends the press and
+    // pockets the release until the next. Reading the flag back from the
+    // edges themselves keeps them honest — a shoulder let go, or a tapped
+    // Tab, unlights the button nobody clicked.
+    func toggleTurbo() { button("T", pressed: !turboLatched) }
+
+    private func setLatched(_ on: Bool) {
+        if Thread.isMainThread {
+            if turboLatched != on { turboLatched = on }
+        } else {
+            DispatchQueue.main.async { self.setLatched(on) }
+        }
     }
 
     // ── The gamepad: GameController, edges only ──────────────────────────────
@@ -838,16 +857,15 @@ final class Engine: ObservableObject {
         if pad.buttonMenu.isPressed { wanted.insert("S") }
         if pad.buttonOptions?.isPressed == true { wanted.insert("E") }
         if pad.leftShoulder.isPressed { wanted.insert("W") }
+        // Turbo is held on the engine side, not latched, so the right
+        // shoulder joins the edge-diffed set like any other button: press
+        // down, release up — and a disconnect lets go of it for free.
+        if pad.rightShoulder.isPressed || pad.rightTrigger.isPressed { wanted.insert("T") }
 
         let held = heldButtons[id] ?? []
         for key in wanted.subtracting(held) { button(key, pressed: true) }
         for key in held.subtracting(wanted) { button(key, pressed: false) }
         heldButtons[id] = wanted
-
-        // Turbo is a toggle on the engine side: rising edge only.
-        let turbo = pad.rightShoulder.isPressed || pad.rightTrigger.isPressed
-        if turbo && !turboHeld { press("T") }
-        turboHeld = turbo
 
         // X saves, Y reloads — the console reflex, on the rising edge.
         if pad.buttonX.isPressed && !saveHeld { press("s") }
@@ -856,7 +874,6 @@ final class Engine: ObservableObject {
         loadHeld = pad.buttonY.isPressed
     }
 
-    private var turboHeld = false
     private var saveHeld = false
     private var loadHeld = false
 
@@ -865,6 +882,14 @@ final class Engine: ObservableObject {
         let byte = UInt8(key.asciiValue ?? 0)
         try? input?.write(contentsOf: Data([UInt8(ascii: "+"), byte]))
         try? input?.write(contentsOf: Data([UInt8(ascii: "-"), byte]))
+    }
+
+    // How fast turbo runs when it is engaged: 2, 4 or 8 times the frame
+    // deadline, or 0 for the uncapped sprint the app has always done. An op
+    // byte in the first position, where the keys' 'T' never stands.
+    func setTurboSpeed(_ n: Int) {
+        let level = [2, 4, 8].contains(n) ? n : 0
+        try? input?.write(contentsOf: Data([UInt8(ascii: "T"), UInt8(level)]))
     }
 
     // The native mixer: volume 0-100 ('V') and the four-voice mask ('X').
@@ -1050,6 +1075,7 @@ final class Engine: ObservableObject {
                 // The battery light goes out with the engine, whatever
                 // happens next.
                 ConsoleState.shared.power(false)
+                self?.setLatched(false)
                 // A cable that never connected (the engine's two-minute
                 // accept timeout, a refused join) is not a reason to lose
                 // the game: relaunch it plain instead of quitting.
@@ -1072,6 +1098,9 @@ final class Engine: ObservableObject {
         // button survives the boot.
         ConsoleState.shared.power(p.isRunning)
         ConsoleState.shared.releaseAll()
+        // A new engine holds nothing: the latch cannot survive the machine it
+        // was pressed against.
+        setLatched(false)
 
         // The persisted settings catch up with the freshly born engine.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -1081,6 +1110,7 @@ final class Engine: ObservableObject {
             let mask = defaults.object(forKey: "reglages.voixMasque") as? Int ?? 15
             voices((0..<4).map { mask & (1 << $0) != 0 })
             setPanel(defaults.object(forKey: "reglages.panneau") as? Int ?? 0)
+            setTurboSpeed(defaults.object(forKey: "reglages.turbo") as? Int ?? 0)
             sendActiveCodes()
 
             let dial = defaults.object(forKey: "reglages.contraste") as? Int ?? -1
@@ -1146,6 +1176,7 @@ final class Engine: ObservableObject {
         process = nil
         ConsoleState.shared.power(false)
         ConsoleState.shared.releaseAll()
+        setLatched(false)
     }
 
     // ── The cable: plugged at boot, like the real one ────────────────────────
@@ -1271,6 +1302,8 @@ final class Engine: ObservableObject {
         // the right piece of plastic.
         ConsoleState.shared.apply(key, pressed: pressed)
         if pressed, key == "P" { ConsoleState.shared.togglePause() }
+        // Tab is a hold, and the lit HUD button follows the finger.
+        if key == "T" { setLatched(pressed) }
         return true
     }
 }
@@ -1359,18 +1392,27 @@ struct Screen: NSViewRepresentable {
 struct HUDButton: View {
     let symbol: String
     let tooltip: String
+    // A button that stays down after the click says so: the glyph takes the
+    // accent colour and a faint tablet behind it.
+    var active = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(active ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                 .frame(width: 34, height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(.primary.opacity(active ? 0.12 : 0))
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(tooltip)
         .accessibilityLabel(tooltip)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 
@@ -1379,7 +1421,11 @@ struct HUD: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            HUDButton(symbol: "forward.fill", tooltip: "Turbo (Tab)") { engine.press("T") }
+            HUDButton(
+                symbol: "forward.fill",
+                tooltip: engine.turboLatched ? "Turbo — on (Tab)" : "Turbo (Tab)",
+                active: engine.turboLatched
+            ) { engine.toggleTurbo() }
             HUDButton(symbol: "square.and.arrow.down", tooltip: "Save State (⌘S)") { engine.press("s") }
             HUDButton(symbol: "arrow.counterclockwise", tooltip: "Load State (⌘R)") { engine.press("r") }
             HUDButton(symbol: "square.stack", tooltip: "Saves (⌘⇧S)") { engine.savesRequested = true }
@@ -1388,6 +1434,18 @@ struct HUD: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .modifier(Glass())
+    }
+}
+
+// The menu bar cannot hold a key down, so ⌘T latches like the HUD does — and
+// wears a checkmark while the game is running fast.
+struct TurboCommand: View {
+    @ObservedObject var engine: Engine
+
+    var body: some View {
+        Toggle(
+            "Turbo",
+            isOn: Binding(get: { engine.turboLatched }, set: { _ in engine.toggleTurbo() }))
     }
 }
 
@@ -1439,10 +1497,15 @@ struct SettingsChrome: NSViewRepresentable {
 }
 
 struct GeneralSettings: View {
+    let engine: Engine
     // Legacy French UserDefaults key — kept for data compatibility.
     @AppStorage("reglages.reprise") private var resume = true
 
     @AppStorage("reglages.pauseFond") private var pauseInBackground = true
+
+    // 2, 4 and 8 divide the frame deadline; 0 is the uncapped sprint, which
+    // is what the app has always done — so it stays the default.
+    @AppStorage("reglages.turbo") private var turbo = 0
 
     var body: some View {
         Form {
@@ -1453,6 +1516,18 @@ struct GeneralSettings: View {
 
             Toggle("Pause when in the background", isOn: $pauseInBackground)
             Text("The game holds its breath while another app has the stage.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Turbo speed", selection: $turbo) {
+                Text("2×").tag(2)
+                Text("4×").tag(4)
+                Text("8×").tag(8)
+                Text("Uncapped").tag(0)
+            }
+            .onChange(of: turbo) { engine.setTurboSpeed(turbo) }
+
+            Text("How fast the game runs while turbo is held. Uncapped goes as fast as the machine allows; sound stays out of the way at every speed.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -2201,7 +2276,7 @@ struct AtomboyApp: App {
 
                 Divider()
 
-                Button("Turbo") { delegate.engine.press("T") }
+                TurboCommand(engine: delegate.engine)
                     .keyboardShortcut("t")
                 Button("Save Screenshot") { delegate.engine.saveScreenshot() }
                     .keyboardShortcut("s", modifiers: [.command, .option])
@@ -2220,7 +2295,7 @@ struct AtomboyApp: App {
         // SwiftUI: audio (mixer) and GameShark codes, both persisted.
         Settings {
             TabView {
-                GeneralSettings()
+                GeneralSettings(engine: delegate.engine)
                     .tabItem { Label("General", systemImage: "gearshape") }
                 ScreenSettings(engine: delegate.engine)
                     .tabItem { Label("Screen", systemImage: "display") }
