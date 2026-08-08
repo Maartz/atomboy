@@ -214,6 +214,9 @@ defmodule Atomboy.Server do
           |> from_the_start(opts)
         )
       after
+        # This kill retires the process; whether it also frees the thread
+        # the process was reading on is up to `read_stdin/1`, which is why
+        # that function is careful about what it agrees to read at all.
         Process.unlink(reader)
         Process.exit(reader, :kill)
         Link.close(link)
@@ -749,10 +752,33 @@ defmodule Atomboy.Server do
 
   # Two bytes per event, read as they come; the end of the stream (the shell
   # is gone) concludes the game.
+  #
+  # A terminal is never read at all, and the reason is a leak rather than a
+  # preference. The read below is `:file.read` on a `:raw` descriptor — a
+  # NIF, which parks one of the ten dirty IO scheduler threads inside
+  # `read(2)` for as long as the read lasts. Against a pipe that is a moment
+  # and then the shell's bytes, or end of stream when it closes; against a
+  # terminal, where nobody is ever going to type a binary protocol by hand,
+  # it lasts forever. An exit signal cannot interrupt a NIF, so the teardown
+  # kill retires the Erlang process and leaves the thread where it stands:
+  # `Process.alive?/1` answers false while the thread is gone for good. Ten
+  # runs in one VM — a test suite reaches that in one file — and the pool is
+  # empty, at which point every file operation in the whole node blocks,
+  # whoever asked for it.
+  #
+  # So the descriptor is asked what it is first. `false` covers the pipe the
+  # native shell speaks through and a stdin closed before we ever looked
+  # (the open then fails, and says so); `true` means there is no shell on
+  # the other end, and the game runs on to its own budget with the pad at
+  # rest — which is what a terminal was going to give it anyway.
   defp read_stdin(parent) do
-    case :file.open(~c"/dev/fd/0", [:read, :binary, :raw]) do
-      {:ok, f} -> read_loop(parent, f)
-      _ -> send(parent, :stdin_closed)
+    if :prim_tty.isatty(:stdin) == true do
+      :ok
+    else
+      case :file.open(~c"/dev/fd/0", [:read, :binary, :raw]) do
+        {:ok, f} -> read_loop(parent, f)
+        _ -> send(parent, :stdin_closed)
+      end
     end
   end
 

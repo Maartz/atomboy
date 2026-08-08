@@ -87,8 +87,8 @@ defmodule Atomboy.Play do
     lib = Library.open(rom, rom_path, opts)
     tty = pty_path()
 
-    with :ok <- ensure_sole_reader(tty),
-         {:ok, opts} <- opened(opts, rom),
+    with {:ok, opts} <- opened(opts, rom),
+         :ok <- ensure_sole_reader(tty),
          {:ok, link} <- link_up(opts) do
       saved = terminal_setup(tty)
 
@@ -119,11 +119,14 @@ defmodule Atomboy.Play do
     end
   end
 
-  # `--replay` is read and checked against the cartridge before the
-  # terminal is taken over: a movie from another game has to be able to say
-  # so on the shell's own line, and not from inside an alternate screen
-  # that is about to be torn down over it. What comes back is the options
-  # with the movie itself in place of its path.
+  # `--replay` is read and checked against the cartridge first of all: a
+  # movie from another game has to be able to say so on the shell's own
+  # line, and not from inside an alternate screen that is about to be torn
+  # down over it. First of all means before the terminal guard too — an
+  # argument that is wrong is wrong wherever it was typed, and a session
+  # refused for the shape of its terminal would otherwise answer for the
+  # movie's own faults. What comes back is the options with the movie
+  # itself in place of its path.
   defp opened(opts, rom) do
     case Keyword.fetch(opts, :replay) do
       :error ->
@@ -178,6 +181,10 @@ defmodule Atomboy.Play do
   # byte in three from the game — the arrows (3 bytes) never arrive whole.
   # Measured: 0/301 bytes received without -noinput, 301/301 with it. No
   # tty, no thief: redirected --frames trials pass without the flag.
+  #
+  # Asked once the arguments have been judged: this is the room the game
+  # would be played in, and there is no point describing the room to
+  # somebody whose movie was never going to load.
   defp ensure_sole_reader(tty) do
     if tty != nil and :init.get_argument(:noinput) == :error do
       {:error,
