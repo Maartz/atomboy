@@ -17,6 +17,9 @@ defmodule Atomboy.MovieLoopTest do
   @press 1
   @release 3
 
+  # Backspace: the rewind key, which only counts while it is held.
+  @backspace <<0x7F>>
+
   # A scripted session, frame by frame — what the fingers do. D-pad and
   # buttons overlap on purpose: a track of nothing but zeros proves nothing.
   @session %{
@@ -44,6 +47,47 @@ defmodule Atomboy.MovieLoopTest do
     40 => [{:up, @release}, {:down, @press}, {:select, @press}],
     55 => [{:a, @release}, {:down, @release}]
   }
+
+  # ── The re-record's three scripts ───────────────────────────────────────────
+  #
+  # The take is played, thrown away from @cut on, and played again. The
+  # three scripts are written so that both attempts walk into frame @cut
+  # holding nothing at all: the pad is not part of a savestate, so what the
+  # fingers were doing at the moment the state comes back has to be made to
+  # agree by hand, and releasing everything is the plainest way to agree.
+
+  # What survives the cut.
+  @head %{
+    2 => [{:right, @press}],
+    6 => [{:a, @press}],
+    11 => [{:right, @release}, {:down, @press}],
+    16 => [{:a, @release}, {:down, @release}]
+  }
+
+  # The attempt that is thrown away: pressed after the cut, released before
+  # the state comes back.
+  @waste %{
+    21 => [{:left, @press}],
+    26 => [{:b, @press}],
+    33 => [{:left, @release}, {:b, @release}],
+    38 => [{:start, @press}],
+    41 => [{:start, @release}]
+  }
+
+  # What is played instead, by its distance from the cut.
+  @tail %{
+    0 => [{:up, @press}],
+    3 => [{:b, @press}],
+    9 => [{:up, @release}],
+    12 => [{:select, @press}],
+    16 => [{:b, @release}, {:select, @release}]
+  }
+
+  # The frame the state was taken at, how far the first attempt got before
+  # it came back, and how long the movie is when it is all over.
+  @cut 20
+  @wasted 45
+  @length 40
 
   # The loop draws every frame it runs. The tests care about the machine
   # underneath the pixels, so the drawing goes where drawing goes to die.
@@ -230,6 +274,128 @@ defmodule Atomboy.MovieLoopTest do
     end
   end
 
+  describe "re-record" do
+    test "a state loaded mid-take cuts the track, and the second attempt takes its place",
+         %{tmp_dir: dir} do
+      # The same forty frames of input, reached two ways: played straight
+      # through, and played once, thrown away from frame @cut, played again.
+      {straight, plain} = record_session(dir, merge(@head, shift(@tail, @cut)), @length)
+      {rewritten, movie} = rerecord_session(dir)
+
+      assert Movie.frames(movie) == @length
+      assert movie.header.rerecords == 1
+
+      # Byte for byte the same take: the cut fell exactly where the state
+      # was taken, and the second attempt was appended in its place.
+      assert movie.track == plain.track
+
+      # And frame for frame the same machine — the property the whole
+      # sub-project rests on, asked of a take that was rewritten mid-flight.
+      assert replay_session(dir, movie) == straight
+
+      # The console the player is left sitting in front of is the one the
+      # straight run ended on, too: a re-record rewrites the recording, not
+      # the machine it is recording.
+      assert List.last(rewritten) == List.last(straight)
+    end
+
+    test "every state that comes back is one more take", %{tmp_dir: dir} do
+      ctx = Play.start_recording(kitty(console(dir)), anchor: :boot)
+      {ctx, _witnesses} = run(ctx, 6, %{4 => ["s"]})
+      {ctx, _witnesses} = run(ctx, 4, %{0 => ["r"]})
+      {ctx, _witnesses} = run(ctx, 3, %{0 => ["r"]})
+
+      # Twice back to frame four, and three frames played from there.
+      assert {:recording, movie} = ctx.movie
+      assert movie.header.rerecords == 2
+      assert Movie.frames(movie) == 7
+    end
+
+    test "a state from another session is refused, and the machine does not move",
+         %{tmp_dir: dir} do
+      # A state saved by a session that was recording nothing at all — the
+      # same library folder, the same slot, no take behind it.
+      {_ctx, _witnesses} = run(kitty(console(dir)), 5, %{3 => ["s"]})
+
+      ctx = Play.start_recording(kitty(console(dir)), anchor: :boot)
+      {ctx, _witnesses} = run(ctx, 4, @head)
+
+      feed("r")
+      refused = frame(ctx)
+      # The same frame again, with nothing asked of it: the refusal is what
+      # the difference between these two would be, and there is none.
+      control = frame(ctx)
+
+      assert witness(refused) == witness(control)
+      assert {"foreign state — refused while recording", _left} = refused.note
+      assert {:recording, movie} = refused.movie
+      assert movie.header.rerecords == 0
+      assert Movie.frames(movie) == 5
+    end
+
+    test "a state written mid-take loads like any other when no take is running",
+         %{tmp_dir: dir} do
+      script = %{2 => [{:right, @press}], 4 => [{:right, @release}]}
+
+      ctx = Play.start_recording(kitty(console(dir)), anchor: :boot)
+      writing = merge(script, %{5 => ["s"], 7 => [{:a, @press}], 10 => [{:a, @release}]})
+      {ctx, _witnesses} = run(ctx, 12, writing)
+      {_movie, ctx} = Play.stop_movie(ctx)
+
+      feed("r")
+      loaded = frame(ctx)
+
+      assert {"state loaded (slot 1)", _left} = loaded.note
+
+      # The stamp came off at the door: the cartridge runs on the map it
+      # wrote, and the loop's bookkeeping stays out of the memory map.
+      refute Map.has_key?(loaded.ram, :movie_take)
+
+      # And it really is that machine: a console that played the same five
+      # frames and one more lands on the same registers, RAM and pixels.
+      {reference, _witnesses} = run(kitty(console(dir)), 5, script)
+      {reference, _witnesses} = run(reference, 1, %{})
+
+      assert witness(loaded) == witness(reference)
+    end
+
+    test "a pull off the rewind ring rewrites the take like any other load", %{tmp_dir: dir} do
+      # No kitty on this one: a keystroke is then a hold, and a hold of one
+      # frame is exactly one step back — one pull off the ring.
+      ctx = Play.start_recording(console(dir, hold: 1), anchor: :boot)
+      {ctx, _witnesses} = run(ctx, 25, %{3 => [{:a, @press}], 12 => [{:right, @press}]})
+
+      assert {:recording, before} = ctx.movie
+      assert Movie.frames(before) == 25
+
+      feed(@backspace)
+      ctx = frame(ctx)
+
+      # The newest entry on the ring was taken at frame twenty: the track
+      # goes back to twenty, and the frame that follows the pull is the
+      # twenty-first.
+      assert {:recording, movie} = ctx.movie
+      assert Movie.frames(movie) == 21
+      assert movie.header.rerecords == 1
+    end
+
+    test "the ring cannot pull a take out of its own beginning", %{tmp_dir: dir} do
+      # Fifteen frames of ordinary play first: the ring's entries are older
+      # than the take, and no take can be rewound to before it started.
+      {ctx, _witnesses} = run(console(dir, hold: 1), 15, %{})
+      ctx = Play.start_recording(ctx, anchor: :boot)
+      {ctx, _witnesses} = run(ctx, 4, %{})
+
+      feed(@backspace)
+      ctx = frame(ctx)
+
+      assert {"foreign state — refused while recording", _left} = ctx.note
+      assert {:recording, movie} = ctx.movie
+      assert movie.header.rerecords == 0
+      assert Movie.frames(movie) == 5
+    end
+  end
+
   # ── The bench ───────────────────────────────────────────────────────────────
 
   # A whole take: record `frames` frames of `session`, keeping every frame's
@@ -241,6 +407,31 @@ defmodule Atomboy.MovieLoopTest do
 
     {witnesses, movie}
   end
+
+  # The take played twice over: @head, then @waste until frame @wasted,
+  # where the state saved at frame @cut comes back and @tail is played in
+  # the thrown-away attempt's place. `s` saves, `r` loads — the very keys a
+  # player presses, through the loop's own event path.
+  defp rerecord_session(dir) do
+    script =
+      @head
+      |> merge(%{@cut => ["s"]})
+      |> merge(@waste)
+      |> merge(shift(%{0 => ["r"]}, @wasted))
+      |> merge(shift(@tail, @wasted))
+
+    ctx = Play.start_recording(kitty(console(dir)), anchor: :boot, author: "the test")
+    {ctx, witnesses} = run(ctx, @wasted + @length - @cut, script)
+    {movie, _ctx} = Play.stop_movie(ctx)
+
+    {witnesses, movie}
+  end
+
+  # Two scripts on one keyboard: a frame both have something to say about
+  # says both, in order.
+  defp merge(one, other), do: Map.merge(one, other, fn _frame, a, b -> a ++ b end)
+
+  defp shift(script, by), do: for({frame, events} <- script, into: %{}, do: {frame + by, events})
 
   # The same take, read back — on a machine that has never seen it, with
   # another pair of hands mashing the pad throughout.
@@ -292,6 +483,10 @@ defmodule Atomboy.MovieLoopTest do
 
   defp keystrokes(nil), do: nil
   defp keystrokes(events), do: Enum.map_join(events, &sequence/1)
+
+  # A script may also say a key in plain bytes — `s`, `r`, the system keys
+  # that have no press and no release, only a stroke.
+  defp sequence(raw) when is_binary(raw), do: raw
 
   defp sequence({key, event}) when is_map_key(@arrows, key),
     do: "\e[1;1:#{event}#{<<@arrows[key]>>}"

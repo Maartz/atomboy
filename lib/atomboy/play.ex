@@ -226,6 +226,10 @@ defmodule Atomboy.Play do
       # The movie: nothing, a take being written, or a take being read back
       # with the frame it has reached. Consulted at one seam per frame.
       movie: nil,
+      # Which take is being written, as a thing and not as a name: minted
+      # by `start_recording/2`, worn by every machine frozen while it runs,
+      # and the whole of re-recording's judgement — see `stamp/2`.
+      take: nil,
       history: [],
       note: nil,
       # The hot seam: a function the caller may hand in, asked every so
@@ -402,18 +406,31 @@ defmodule Atomboy.Play do
   # it stands — the machine is not running, time is going back. The sound
   # falls silent; on resuming, the stream slaved to the wall clock realigns
   # itself.
+  #
+  # A pull off the ring is a state load like any other, so it goes through
+  # `restore/3`: while a take is recording it cuts the track back to the
+  # entry's frame and counts as a re-record, and an entry older than the
+  # take is refused — the ring is not a way out of a movie's own beginning.
+  # The refused entry stays on the ring: a pull that changed nothing must
+  # not spend anything either.
   defp rewind_step(ctx) do
     ctx =
       case ctx.history do
-        [{state, ram, apu} | rest] ->
-          %{ctx | state: state, ram: ram, apu: apu, history: rest}
+        [frozen | rest] ->
+          # The entry leaves the ring before the load is judged: what a
+          # re-record forgets of the ring, it forgets from what is left of
+          # it, never from the list this pull was taken off.
+          case restore(%{ctx | history: rest}, frozen, "⏪") do
+            {:ok, ctx} -> ctx
+            :refused -> refuse(ctx)
+          end
 
         [] ->
-          ctx
+          %{ctx | note: {"⏪", 30}}
       end
 
     pixels = PPU.render_frame(ctx.ram)
-    ctx = draw(%{ctx | note: {"⏪", 30}}, pixels, ctx.ram, [])
+    ctx = draw(ctx, pixels, ctx.ram, [])
 
     now = System.monotonic_time(:microsecond)
     deadline = max(ctx.deadline, now - 100_000)
@@ -425,9 +442,11 @@ defmodule Atomboy.Play do
 
   # The memory of rewinding: one snapshot every ten frames, a ring of 240 —
   # forty seconds of history, structurally shared (the map differs from one
-  # frame to the next only by its writes).
+  # frame to the next only by its writes). The stamp rides inside the entry
+  # rather than in a register kept beside it, so that eviction cannot strand
+  # a tag and a tag cannot outlive its machine.
   defp remember(%{frame: n} = ctx) when rem(n, 10) == 0 do
-    %{ctx | history: Enum.take([{ctx.state, ctx.ram, ctx.apu} | ctx.history], 240)}
+    %{ctx | history: Enum.take([{ctx.state, stamp(ctx, ctx.ram), ctx.apu} | ctx.history], 240)}
   end
 
   defp remember(ctx), do: ctx
@@ -638,7 +657,7 @@ defmodule Atomboy.Play do
     Library.save_state(
       ctx.lib,
       slot_name(ctx),
-      {ctx.state, ctx.ram, ctx.apu},
+      {ctx.state, stamp(ctx, ctx.ram), ctx.apu},
       Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
     )
 
@@ -647,21 +666,11 @@ defmodule Atomboy.Play do
 
   defp apply_event({tag, :load_state}, ctx) when tag in [:key, :press] do
     case Library.load_state(ctx.lib, slot_name(ctx)) do
-      {:ok, {state, ram, apu}} ->
-        # The current cable survives the trip through time.
-        ram =
-          case Map.get(ctx.ram, :link) do
-            nil -> Map.delete(ram, :link)
-            link -> Map.put(ram, :link, link)
-          end
-
-        %{
-          ctx
-          | state: state,
-            ram: ram,
-            apu: apu,
-            note: {"state loaded (slot #{ctx.state_slot})", 120}
-        }
+      {:ok, frozen} ->
+        case restore(ctx, frozen, "state loaded (slot #{ctx.state_slot})") do
+          {:ok, ctx} -> ctx
+          :refused -> refuse(ctx)
+        end
 
       :error ->
         %{ctx | note: {"slot #{ctx.state_slot} empty", 120}}
@@ -794,7 +803,7 @@ defmodule Atomboy.Play do
       codes = Map.get(ctx.ram, :codes, [])
       movie = Movie.new(ctx.rom, anchor(ctx, kind), Keyword.put_new(opts, :codes, codes))
 
-      %{ctx | movie: {:recording, movie}, note: {"● recording", 120}}
+      %{ctx | movie: {:recording, movie}, take: make_ref(), note: {"● recording", 120}}
     end
   end
 
@@ -819,7 +828,7 @@ defmodule Atomboy.Play do
         %{ctx | note: {"this movie was recorded on another cartridge", 180}}
 
       true ->
-        %{anchored(ctx, movie.anchor) | movie: {:replaying, movie, 0}}
+        %{anchored(ctx, movie.anchor) | movie: {:replaying, movie, 0}, take: nil}
     end
   end
 
@@ -829,10 +838,17 @@ defmodule Atomboy.Play do
   """
   @spec stop_movie(map()) :: {Movie.t() | nil, map()}
   def stop_movie(%{movie: {:recording, movie}} = ctx),
-    do: {movie, %{ctx | movie: nil, note: {"● stopped — #{Movie.frames(movie)} frames", 120}}}
+    do:
+      {movie,
+       %{
+         ctx
+         | movie: nil,
+           take: nil,
+           note: {"● stopped — #{Movie.frames(movie)} frames", 120}
+       }}
 
   def stop_movie(%{movie: {:replaying, movie, _cursor}} = ctx),
-    do: {movie, %{ctx | movie: nil, note: {"replay stopped", 120}}}
+    do: {movie, %{ctx | movie: nil, take: nil, note: {"replay stopped", 120}}}
 
   def stop_movie(ctx), do: {nil, ctx}
 
@@ -856,6 +872,113 @@ defmodule Atomboy.Play do
   defp linked?(ctx), do: Map.has_key?(ctx.ram, :link)
 
   defp refused(ctx, what), do: %{ctx | note: {"#{what} unavailable: link cable plugged in", 120}}
+
+  # ── Re-record ───────────────────────────────────────────────────────────────
+  #
+  # A take is not only what has been played: it is also everything the
+  # player went back and played again. Loading a machine frozen at frame N
+  # of the take being recorded means the take from N onwards never happened
+  # — the track is cut there, the counter goes up, and the recording carries
+  # on from N as if the first attempt had never been made.
+  #
+  # For that to hold, a frozen machine has to say which frame of which take
+  # it stands at. The stamp rides in the memory map, under an atom key,
+  # beside the `:link`, `:mixer` and `:cgb` the map already carries: the map
+  # is where the machine keeps what is not an address, a snapshot is that
+  # map plus two structs, and so nothing on disk changes shape. A state
+  # written mid-take is an ordinary `.state` file one key richer — a session
+  # that is not recording drops the key on the way in, exactly as it already
+  # drops a stale `:link` — and the live machine never carries it at all:
+  # only the copy that is frozen does, which is why a recorded frame and a
+  # replayed one still compare byte for byte.
+  #
+  # The take's identity is a `make_ref/0`. It survives `term_to_binary`, so
+  # a state saved to disk and loaded back within the same take is
+  # recognised; and nothing minted by another take, or by another run of the
+  # VM, can ever equal it. Foreign is therefore the default, which is the
+  # safe direction to fail in.
+  @stamp_key :movie_take
+
+  defp stamp(%{movie: {:recording, movie}, take: take} = _ctx, ram) when take != nil,
+    do: Map.put(ram, @stamp_key, {take, Movie.frames(movie)})
+
+  defp stamp(_ctx, ram), do: ram
+
+  # Every way back into a frozen machine comes through here — the keyboard's
+  # `r`, the menu's LOAD, a pull off the rewind ring. `said` is what the
+  # status line says when there is no take to rewrite; a re-record speaks
+  # for itself.
+  @spec restore(map(), {struct(), map(), struct()}, String.t()) :: {:ok, map()} | :refused
+  defp restore(ctx, {state, ram, apu}, said) do
+    {stamp, ram} = unstamp(ram)
+
+    case origin(ctx, stamp) do
+      {:take, frame} ->
+        {:recording, movie} = ctx.movie
+        movie = movie |> Movie.truncate(frame) |> Movie.rerecorded()
+        note = {"re-record ##{movie.header.rerecords} — frame #{frame}", 120}
+        ctx = install(ctx, state, ram, apu)
+
+        {:ok, forget_after(%{ctx | movie: {:recording, movie}, note: note}, frame)}
+
+      :free ->
+        {:ok, %{install(ctx, state, ram, apu) | note: {said, 120}}}
+
+      :foreign ->
+        :refused
+    end
+  end
+
+  # What a stamp is worth right now. Only a recording asks the question: with
+  # no take running, any machine is welcome, which is how a state saved
+  # mid-take still loads in an ordinary session.
+  #
+  # A stamp of this take from beyond the end of the track is as foreign as
+  # one from another take, and for the same reason: the frames it named were
+  # cut by an earlier re-record, so the machine it labels belongs to a take
+  # that no longer exists.
+  defp origin(%{movie: {:recording, movie}, take: take}, {take, frame})
+       when take != nil and is_integer(frame) do
+    if frame <= Movie.frames(movie), do: {:take, frame}, else: :foreign
+  end
+
+  defp origin(%{movie: {:recording, _movie}}, _stamp), do: :foreign
+  defp origin(_ctx, _stamp), do: :free
+
+  # The stamp read off a machine coming back in, and taken off it: the loop
+  # runs the cartridge on the map the cartridge wrote, never on one carrying
+  # our bookkeeping.
+  defp unstamp(ram), do: {Map.get(ram, @stamp_key), Map.delete(ram, @stamp_key)}
+
+  defp install(ctx, state, ram, apu) do
+    # The current cable survives the trip through time.
+    ram =
+      case Map.get(ctx.ram, :link) do
+        nil -> Map.delete(ram, :link)
+        link -> Map.put(ram, :link, link)
+      end
+
+    %{ctx | state: state, ram: ram, apu: apu}
+  end
+
+  # The erased future leaves the rewind ring holding machines that no longer
+  # happened. Pulling one back in would put the console further along than
+  # the track can account for, so they go with the frames they belonged to —
+  # the ring is newest first, and the stamps descend with it.
+  defp forget_after(ctx, frame) do
+    %{
+      ctx
+      | history:
+          Enum.drop_while(ctx.history, fn {_state, ram, _apu} ->
+            match?({_take, at} when at > frame, Map.get(ram, @stamp_key))
+          end)
+    }
+  end
+
+  # A machine from outside the take, turned away at the door: installing it
+  # would put the console somewhere the track cannot reach, and every frame
+  # recorded after that would be a lie.
+  defp refuse(ctx), do: %{ctx | note: {"foreign state — refused while recording", 180}}
 
   # The actions chosen in the menu take the same paths as the direct
   # shortcuts — the menu is only another way of pressing a key.
