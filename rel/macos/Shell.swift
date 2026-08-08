@@ -266,12 +266,45 @@ final class ShellState: ObservableObject {
         didSet { relockGameWindows() }
     }
 
+    // Whether the game window has taken the whole display. It matters to the
+    // drawing: a console in a window floats on the desktop with nothing
+    // behind it, while a console in fullscreen is staged on black.
+    @Published private(set) var fullscreen = false {
+        didSet { relockGameWindows() }
+    }
+
+    private var fullscreenWatch: [Any] = []
+
     private init() {
         let defaults = UserDefaults.standard
         // Absent means on: the console is what the app looks like out of the
         // box, and ⌘B is one keystroke away from today's plain window.
         enabled = defaults.object(forKey: Self.modeKey) as? Bool ?? true
         console = ConsoleBody.forPanel(defaults.object(forKey: Self.panelKey) as? Int ?? 0)
+        watchFullScreen()
+    }
+
+    // Fullscreen arrives from macOS, never from us — a green button, a menu
+    // item, a swipe — so the only way to hear about it is to listen. Only the
+    // game windows count; a Settings window going fullscreen is not our
+    // business.
+    private func watchFullScreen() {
+        let centre = NotificationCenter.default
+        let transitions: [(Notification.Name, Bool)] = [
+            (NSWindow.didEnterFullScreenNotification, true),
+            (NSWindow.didExitFullScreenNotification, false),
+        ]
+
+        fullscreenWatch = transitions.map { name, entering in
+            centre.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                guard let self,
+                    let window = note.object as? NSWindow,
+                    let content = window.contentView,
+                    ScreenView.hosted(in: content)
+                else { return }
+                if self.fullscreen != entering { self.fullscreen = entering }
+            }
+        }
     }
 
     var layout: BodyLayout { console.layout }
@@ -305,6 +338,7 @@ final class ShellState: ObservableObject {
         guard let window else { return }
 
         window.contentAspectRatio = NSSize(width: aspect, height: 1)
+        dress(window)
 
         // Fullscreen has no ratio to give: the shell letterboxes itself on
         // black there, and resizing the window under macOS would be rude.
@@ -333,6 +367,38 @@ final class ShellState: ObservableObject {
         // setContentSize grows downward from the title bar's corner; a body
         // that tall walks off the bottom of the display. Bring it home.
         if room.height > 0, !room.contains(window.frame) { window.center() }
+    }
+
+    // What the window is made of. A rectangle of plastic is not a rectangle:
+    // every corner the body rounds off, every millimetre of margin, and the
+    // whole band of air the television's aerial rises through, are places
+    // where the window has no console in it — and an opaque window paints
+    // them black. So in shell mode the window stops being a surface and
+    // becomes a frame around the drawing: the desktop shows through the
+    // corners and the ears cross real air.
+    //
+    // Both other cases keep exactly the opaque window this app has always
+    // had. Plain mode has a picture edge to edge and nothing to see through;
+    // fullscreen deliberately stages the console on black, and a transparent
+    // window there would only hand macOS a chance to show something else.
+    //
+    // The shadow goes with the opacity, and on purpose. A transparent window
+    // has macOS derive its shadow from whatever the content leaves opaque —
+    // which here already includes the soft drop shadow caseShell draws under
+    // the body, so the system would blur a blur and then hold the result
+    // stale until someone remembered to invalidate it after every resize. One
+    // shadow, drawn by the thing casting it, is both truer and cheaper.
+    private func dress(_ window: NSWindow) {
+        let floating = enabled && !window.styleMask.contains(.fullScreen)
+
+        window.isOpaque = !floating
+        window.backgroundColor = floating ? .clear : .windowBackgroundColor
+        window.hasShadow = !floating
+
+        // Transparency is not a hole: AppKit still hit-tests the window's
+        // whole rectangle, so the plastic — and the air beside it — stays
+        // grabbable and the console drags as one object.
+        window.isMovableByWindowBackground = true
     }
 
     // The scale presets (⌘⌥1…5) mean the same thing in both modes: the
@@ -459,7 +525,9 @@ struct ShellContent: View {
 
     var body: some View {
         if shell.enabled {
-            ConsoleView(engine: engine, console: shell.console, layout: shell.layout)
+            ConsoleView(
+                engine: engine, console: shell.console, layout: shell.layout,
+                letterboxed: shell.fullscreen)
         } else {
             Screen(engine: engine)
         }
@@ -471,6 +539,11 @@ struct ConsoleView: View {
     let console: ConsoleBody
     let layout: BodyLayout
 
+    // Whether there is a stage under the console. In fullscreen the display
+    // is ours and the console sits centred on black; in a window there is no
+    // ground at all, and what the margins show is the desk.
+    let letterboxed: Bool
+
     var body: some View {
         GeometryReader { geo in
             let size = layout.fit(in: geo.size)
@@ -479,7 +552,10 @@ struct ConsoleView: View {
                 .frame(width: size.width, height: size.height)
                 .frame(width: geo.size.width, height: geo.size.height)
         }
-        .background(Color.black)
+        // Color.clear is not "no view": it takes the same space and the same
+        // clicks, which is what keeps the transparent air beside the body
+        // draggable.
+        .background(letterboxed ? Color.black : Color.clear)
     }
 }
 
