@@ -49,3 +49,4 @@ esp32/native/sdkconfig*
 
 # clangd's index, written by the editor rather than by the build.
 esp32/native/.cache/
+/.superpowers/
