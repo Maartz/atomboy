@@ -87,18 +87,72 @@ defmodule Atomboy.Play do
     tty = pty_path()
 
     with :ok <- ensure_sole_reader(tty),
+         {:ok, opts} <- opened(opts, rom),
          {:ok, link} <- link_up(opts) do
       saved = terminal_setup(tty)
 
-      try do
-        case play(rom, lib, tty, link, opts) do
-          {:error, _message} = error -> error
-          _ctx -> :ok
+      result =
+        try do
+          play(rom, lib, tty, link, opts)
+        after
+          Link.close(link)
+          terminal_restore(tty, saved)
         end
-      after
-        Link.close(link)
-        terminal_restore(tty, saved)
+
+      # Said once the terminal is the player's again: a line written under
+      # the alternate screen dies with it, and where the take landed is the
+      # one thing a `--record` session has to say out loud.
+      case result do
+        {:error, _message} = error ->
+          error
+
+        %{movie_file: {:error, reason}} ->
+          {:error, "the movie could not be written: #{:file.format_error(reason)}"}
+
+        %{movie_file: path} when is_binary(path) ->
+          IO.puts("● movie written: #{path}")
+
+        _ctx ->
+          :ok
       end
+    end
+  end
+
+  # `--replay` is read and checked against the cartridge before the
+  # terminal is taken over: a movie from another game has to be able to say
+  # so on the shell's own line, and not from inside an alternate screen
+  # that is about to be torn down over it. What comes back is the options
+  # with the movie itself in place of its path.
+  defp opened(opts, rom) do
+    case Keyword.fetch(opts, :replay) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, path} ->
+        with {:ok, movie} <- read_movie(path),
+             :ok <- verify_movie(movie, rom, path) do
+          {:ok, Keyword.put(opts, :replay, movie)}
+        end
+    end
+  end
+
+  defp read_movie(path) do
+    case Movie.read(path) do
+      {:ok, movie} -> {:ok, movie}
+      {:error, :corrupt} -> {:error, "not a movie: #{path}"}
+      {:error, reason} -> {:error, "cannot read #{path}: #{:file.format_error(reason)}"}
+    end
+  end
+
+  defp verify_movie(movie, rom, path) do
+    case Movie.verify(movie, rom) do
+      :ok ->
+        :ok
+
+      {:error, :wrong_rom} ->
+        {:error,
+         "#{Path.basename(path)} was recorded on #{movie.header.rom.id}, " <>
+           "and this cartridge is #{Library.game_id(rom)}"}
     end
   end
 
@@ -182,11 +236,15 @@ defmodule Atomboy.Play do
       |> Save.load(sav)
       |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, "")))
 
-    %{
+    ctx = %{
       state: Screen.boot_state(rom, dmg?),
       rom: rom,
       ram: ram,
       sav: sav,
+      # What a power-on has to remember to be repeatable: a movie anchored
+      # on boot puts the machine back here, and it must land on the same
+      # machine the take began on.
+      dmg: dmg?,
       hold: %{},
       down: MapSet.new(),
       menu: nil,
@@ -230,6 +288,10 @@ defmodule Atomboy.Play do
       # by `start_recording/2`, worn by every machine frozen while it runs,
       # and the whole of re-recording's judgement — see `stamp/2`.
       take: nil,
+      # Where `--record` wants its take when the session ends. A recording
+      # started from the menu has no file until it is stopped; one started
+      # from the command line was given its name before the first frame.
+      movie_file: Keyword.get(opts, :record),
       history: [],
       note: nil,
       # The hot seam: a function the caller may hand in, asked every so
@@ -251,6 +313,20 @@ defmodule Atomboy.Play do
       fps_mark: System.monotonic_time(:microsecond),
       deadline: System.monotonic_time(:microsecond) + @frame_us
     }
+
+    from_the_start(ctx, opts)
+  end
+
+  # A take asked for on the command line begins before the first frame:
+  # `--record` claims a boot anchor (the only honest one for a session that
+  # has not run yet), and `--replay` takes the movie `run/2` has already
+  # read and verified — or the path, for a caller holding one.
+  defp from_the_start(ctx, opts) do
+    cond do
+      Keyword.has_key?(opts, :record) -> start_recording(ctx, anchor: :boot)
+      movie = Keyword.get(opts, :replay) -> replay(ctx, movie)
+      true -> ctx
+    end
   end
 
   @doc false
@@ -465,7 +541,13 @@ defmodule Atomboy.Play do
   # Only `step/1` passes through here, so a paused frame, a frame spent in
   # the menu and a frame of rewind neither record nor consume the track: a
   # movie counts frames of *machine*, not frames of wall clock.
-  defp pad(%{movie: {:recording, movie}} = ctx, held) do
+  #
+  # Public because `Atomboy.Server` runs its own loop over the same kind of
+  # context and must reach the same seam: "there is one seam and no second"
+  # is a claim about the emulator, not about this module.
+  @doc false
+  @spec pad(map(), [atom()]) :: {map(), 0..15, 0..15}
+  def pad(%{movie: {:recording, movie}} = ctx, held) do
     dpad = Input.dpad_lines(held)
     btns = Input.button_lines(held)
     movie = Movie.append_frame(movie, Movie.from_lines(dpad, btns))
@@ -473,7 +555,7 @@ defmodule Atomboy.Play do
     {%{ctx | movie: {:recording, movie}}, dpad, btns}
   end
 
-  defp pad(%{movie: {:replaying, movie, cursor}} = ctx, held) do
+  def pad(%{movie: {:replaying, movie, cursor}} = ctx, held) do
     case Movie.at(movie.track, cursor) do
       nil ->
         # The track has run out of future. The pad goes back to the player
@@ -486,7 +568,7 @@ defmodule Atomboy.Play do
     end
   end
 
-  defp pad(ctx, held), do: {ctx, Input.dpad_lines(held), Input.button_lines(held)}
+  def pad(ctx, held), do: {ctx, Input.dpad_lines(held), Input.button_lines(held)}
 
   defp step(ctx) do
     held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
@@ -634,7 +716,8 @@ defmodule Atomboy.Play do
             ctx.palette,
             Map.get(ctx.ram, :cgb, false),
             Map.get(ctx.ram, :mixer),
-            ctx.lcd.preset
+            ctx.lcd.preset,
+            movie_state(ctx)
           ),
         down: MapSet.new(),
         hold: %{}
@@ -812,9 +895,15 @@ defmodule Atomboy.Play do
 
   The cartridge is checked before a single frame runs — a movie replayed
   against another dump desynchronises within seconds and blames the
-  emulator — and a snapshot anchor is installed on the spot. A boot anchor
-  asks instead for a machine already at power-on, which is what the caller
-  who opened the movie before starting the console is holding.
+  emulator — and the anchor is installed on the spot: a snapshot as the
+  machine, a boot anchor as a power-on with the take's own battery.
+
+  The codes travel with the take too: they poked the machine on every frame
+  that was recorded, so the header's list is the truth of the run and wins
+  over whatever the session had installed.
+
+  While a take plays, the cartridge's battery is a sandbox beside the
+  movies — watching somebody's run must not overwrite your own save.
 
   Refused while the link cable is plugged, for the reason recording is.
   """
@@ -828,7 +917,16 @@ defmodule Atomboy.Play do
         %{ctx | note: {"this movie was recorded on another cartridge", 180}}
 
       true ->
-        %{anchored(ctx, movie.anchor) | movie: {:replaying, movie, 0}, take: nil}
+        ctx = anchored(ctx, movie.anchor)
+
+        %{
+          ctx
+          | ram: Codes.installe(ctx.ram, movie.header.codes),
+            sav: Library.replay_sav(ctx.lib),
+            movie: {:replaying, movie, 0},
+            take: nil,
+            note: {"▶ #{Movie.frames(movie)} frames", 120}
+        }
     end
   end
 
@@ -852,11 +950,99 @@ defmodule Atomboy.Play do
 
   def stop_movie(ctx), do: {nil, ctx}
 
+  @doc """
+  What the machinery is doing, in one word — the menu's vocabulary, and
+  what a shell is told so its own badge can say the same thing.
+  """
+  @spec movie_state(map()) :: Menu.movie()
+  def movie_state(%{movie: {:recording, _movie}}), do: :recording
+  def movie_state(%{movie: {:replaying, _movie, _cursor}}), do: :replaying
+  def movie_state(_ctx), do: nil
+
+  @doc """
+  Stops a recording and writes it into the game's own folder, under the
+  hour it was stopped — the take leaves the machine with a name and a
+  place, which is what makes it findable again from the menu.
+
+  Returns the path written, or `nil` when there was no recording to write
+  (a replay is stopped and nothing else: it already has a file).
+  """
+  @spec stop_and_save(map(), String.t() | nil) :: {Path.t() | nil, map()}
+  def stop_and_save(ctx, name \\ nil)
+
+  def stop_and_save(%{movie: {:recording, _movie}} = ctx, name) do
+    {movie, ctx} = stop_movie(ctx)
+    path = Library.movie_path(ctx.lib, name || Library.movie_name())
+
+    case Movie.write(movie, path) do
+      :ok ->
+        {path, %{ctx | note: {"● #{Movie.frames(movie)} frames → #{Path.basename(path)}", 240}}}
+
+      {:error, reason} ->
+        {nil, %{ctx | note: {"× could not write the movie: #{:file.format_error(reason)}", 240}}}
+    end
+  end
+
+  def stop_and_save(ctx, _name) do
+    {_movie, ctx} = stop_movie(ctx)
+    {nil, ctx}
+  end
+
+  @doc """
+  Plays back a take: a movie already in hand, or the path of one on disk.
+
+  A path that will not read, and a movie recorded on another cartridge,
+  come back as a note in the status line rather than as a crash — this is
+  reachable from a menu and from a shell's open panel, and neither is a
+  place to raise from.
+  """
+  @spec replay(map(), Movie.t() | Path.t()) :: map()
+  def replay(ctx, %Movie{} = movie), do: start_replay(ctx, movie)
+
+  def replay(ctx, path) when is_binary(path) do
+    case Movie.read(path) do
+      {:ok, movie} -> start_replay(ctx, movie)
+      {:error, :corrupt} -> %{ctx | note: {"× #{Path.basename(path)} is not a movie", 240}}
+      {:error, reason} -> %{ctx | note: {"× #{:file.format_error(reason)}", 240}}
+    end
+  end
+
+  @doc """
+  Plays this game's most recent take — what the menu's REPLAY MOVIE means,
+  since the menu has no keyboard to type a path with.
+  """
+  @spec replay_latest(map()) :: map()
+  def replay_latest(ctx) do
+    case Library.movies(ctx.lib) do
+      [newest | _older] -> replay(ctx, newest)
+      [] -> %{ctx | note: {"no movie recorded for this game yet", 180}}
+    end
+  end
+
   # A snapshot anchor is the same three values a saved state carries, and
-  # travels the same way. The battery of a boot anchor belongs to the reset
-  # that powers the machine on, which happens before a context exists.
+  # travels the same way.
+  #
+  # A boot anchor powers the machine on — the take began at the very first
+  # frame, so nothing of the session that opened the movie may survive into
+  # it — and the battery it starts on is the one the movie carries, laid in
+  # from memory rather than from the player's own `.sav`. The mixer crosses
+  # over: it belongs to the room, not to the cartridge.
   defp anchored(ctx, {:snapshot, state, ram, apu}), do: %{ctx | state: state, ram: ram, apu: apu}
-  defp anchored(ctx, {:boot, _sram}), do: ctx
+
+  defp anchored(ctx, {:boot, sram}) do
+    ram =
+      Screen.boot_ram(ctx.rom, ctx.dmg)
+      |> then(&if(mixer = Map.get(ctx.ram, :mixer), do: Map.put(&1, :mixer, mixer), else: &1))
+      |> then(&if(is_binary(sram), do: Save.install(&1, sram), else: &1))
+
+    %{
+      ctx
+      | state: Screen.boot_state(ctx.rom, ctx.dmg),
+        ram: ram,
+        apu: %APU{},
+        history: []
+    }
+  end
 
   defp anchor(ctx, :snapshot), do: {:snapshot, ctx.state, ctx.ram, ctx.apu}
 
@@ -899,17 +1085,27 @@ defmodule Atomboy.Play do
   # safe direction to fail in.
   @stamp_key :movie_take
 
-  defp stamp(%{movie: {:recording, movie}, take: take} = _ctx, ram) when take != nil,
+  @doc false
+  # Public for `Atomboy.Server`, which freezes machines through its own
+  # library ops: a stamp written by one front-end and read by the other has
+  # to come from one implementation, or a saved state means two things.
+  @spec stamp(map(), map()) :: map()
+  def stamp(%{movie: {:recording, movie}, take: take} = _ctx, ram) when take != nil,
     do: Map.put(ram, @stamp_key, {take, Movie.frames(movie)})
 
-  defp stamp(_ctx, ram), do: ram
+  def stamp(_ctx, ram), do: ram
 
   # Every way back into a frozen machine comes through here — the keyboard's
-  # `r`, the menu's LOAD, a pull off the rewind ring. `said` is what the
-  # status line says when there is no take to rewrite; a re-record speaks
-  # for itself.
+  # `r`, the menu's LOAD, a pull off the rewind ring, the shell's load op.
+  # `said` is what the status line says when there is no take to rewrite; a
+  # re-record speaks for itself.
+  #
+  # Public for the same reason `stamp/2` is: a machine that comes back with
+  # a stamp still on it is a machine the cartridge would run our
+  # bookkeeping on, and there must be exactly one door that takes it off.
+  @doc false
   @spec restore(map(), {struct(), map(), struct()}, String.t()) :: {:ok, map()} | :refused
-  defp restore(ctx, {state, ram, apu}, said) do
+  def restore(ctx, {state, ram, apu}, said) do
     {stamp, ram} = unstamp(ram)
 
     case origin(ctx, stamp) do
@@ -984,6 +1180,13 @@ defmodule Atomboy.Play do
   # shortcuts — the menu is only another way of pressing a key.
   defp menu_action(:save_state, ctx), do: apply_event({:key, :save_state}, ctx)
   defp menu_action(:load_state, ctx), do: apply_event({:key, :load_state}, ctx)
+
+  # The take's three verbs. A recording started here is anchored on the
+  # machine as it stands — the player is mid-game, and asking them to
+  # restart is not what they meant by "record".
+  defp menu_action(:record_movie, ctx), do: start_recording(ctx)
+  defp menu_action(:stop_movie, ctx), do: elem(stop_and_save(ctx), 1)
+  defp menu_action(:replay_movie, ctx), do: replay_latest(ctx)
   defp menu_action({:slot, n}, ctx), do: apply_event({:key, {:slot, n}}, ctx)
   defp menu_action({:palette, p}, ctx), do: recompile(%{ctx | palette: p})
   defp menu_action({:panel, p}, ctx), do: recompile(%{ctx | lcd: %{ctx.lcd | preset: p}})
@@ -1019,8 +1222,24 @@ defmodule Atomboy.Play do
   defp finish(ctx) do
     Save.flush(ctx.ram, ctx.sav)
     dump(ctx)
-    ctx
+    written(ctx)
   end
+
+  # `--record` named its file before the first frame, and the session
+  # ending is what stops the take: the movie is written where it was asked
+  # for, not into the library. What `movie_file` holds afterwards is what
+  # `run/2` has to say about it — the path, nothing, or why not: an hour of
+  # play that failed to reach the disk is not a session that ended well.
+  defp written(%{movie_file: path, movie: {:recording, _movie}} = ctx) when is_binary(path) do
+    {movie, ctx} = stop_movie(ctx)
+
+    case Movie.write(movie, path) do
+      :ok -> ctx
+      {:error, reason} -> %{ctx | movie_file: {:error, reason}}
+    end
+  end
+
+  defp written(ctx), do: %{ctx | movie_file: nil}
 
   defp dump(%{dump: path, last_frame: pixels}) when is_binary(path) and is_binary(pixels) do
     File.write!(path, Screen.to_pgm(pixels))

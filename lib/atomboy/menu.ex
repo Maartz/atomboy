@@ -21,9 +21,17 @@ defmodule Atomboy.Menu do
             palette: :dmg,
             panel: :raw,
             color: false,
+            movie: :absent,
             mixer: %{volume: 100, voices: {true, true, true, true}}
 
   @type mixer :: %{volume: 0..100, voices: {boolean(), boolean(), boolean(), boolean()}}
+
+  @typedoc """
+  What the host's movie machinery is doing — and `:absent` for a front-end
+  that has none, which is offered nothing rather than offered a verb that
+  would do nothing.
+  """
+  @type movie :: :absent | nil | :recording | :replaying
 
   @type action ::
           :resume
@@ -33,6 +41,9 @@ defmodule Atomboy.Menu do
           | {:palette, :dmg | :gray}
           | {:panel, Atomboy.LCD.preset()}
           | {:mixer, mixer()}
+          | :record_movie
+          | :stop_movie
+          | :replay_movie
           | :quit
 
   @type t :: %__MODULE__{}
@@ -43,24 +54,37 @@ defmodule Atomboy.Menu do
 
   @doc """
   Opens the menu on the host loop's current state. `color` hides the
-  palette choice — it only tints DMG frames.
+  palette choice — it only tints DMG frames; `movie` says which of the
+  take's verbs are worth offering, and hides all of them by default.
   """
-  @spec open(1..9, :dmg | :gray, boolean(), mixer(), Atomboy.LCD.preset()) :: t()
-  def open(slot, palette, color \\ false, mixer \\ nil, panel \\ :raw),
+  @spec open(1..9, :dmg | :gray, boolean(), mixer(), Atomboy.LCD.preset(), movie()) :: t()
+  def open(slot, palette, color \\ false, mixer \\ nil, panel \\ :raw, movie \\ :absent),
     do: %__MODULE__{
       cursor: 0,
       slot: slot,
       palette: palette,
       panel: panel,
       color: color,
+      movie: movie,
       mixer: mixer || mixer_default()
     }
 
   defp items(%{page: :mixer}), do: [:volume, :voices1, :voices2, :voices3, :voices4, :back]
-  defp items(%{color: true}), do: [:resume, :save, :load, :slot, :panel, :mixer, :quit]
 
-  defp items(_menu),
-    do: [:resume, :save, :load, :slot, :palette, :panel, :mixer, :quit]
+  defp items(menu) do
+    [:resume, :save, :load, :slot] ++
+      takes(menu.movie) ++
+      if(menu.color, do: [], else: [:palette]) ++
+      [:panel, :mixer, :quit]
+  end
+
+  # Only what can happen from here: a take that is running can be stopped
+  # and nothing else, and a machine with nothing running can start one of
+  # each. The menu never shows a verb that would answer with a refusal.
+  defp takes(nil), do: [:record, :replay]
+  defp takes(:recording), do: [:stop_take]
+  defp takes(:replaying), do: [:stop_take]
+  defp takes(:absent), do: []
 
   @doc """
   One key in the menu. Returns `{menu, actions}` — `menu` is `nil` when it
@@ -83,6 +107,9 @@ defmodule Atomboy.Menu do
       :resume -> {nil, []}
       :save -> {nil, [:save_state]}
       :load -> {nil, [:load_state]}
+      :record -> {nil, [:record_movie]}
+      :stop_take -> {nil, [:stop_movie]}
+      :replay -> {nil, [:replay_movie]}
       :slot -> adjust(menu, 1)
       :palette -> adjust(menu, 1)
       :panel -> adjust(menu, 1)
@@ -167,6 +194,11 @@ defmodule Atomboy.Menu do
       :resume -> "RESUME"
       :save -> "SAVE STATE"
       :load -> "LOAD STATE"
+      :record -> "RECORD MOVIE"
+      # The ampersand is not in the font, and a menu of this era would have
+      # spelled it out anyway.
+      :stop_take -> if menu.movie == :recording, do: "STOP AND SAVE", else: "STOP REPLAY"
+      :replay -> "REPLAY MOVIE"
       :slot -> "STATE SLOT <#{menu.slot}>"
       :palette -> "PALETTE <#{if menu.palette == :dmg, do: "GREEN", else: "GRAY"}>"
       :panel -> "PANEL <#{menu.panel |> Atom.to_string() |> String.upcase()}>"

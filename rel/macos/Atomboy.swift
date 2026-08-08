@@ -580,6 +580,9 @@ struct Keybind: Identifiable {
         Keybind(id: "turbo", label: "Turbo", letter: "T", defaultCode: 48, defaultKey: "Tab"),
         Keybind(id: "rembobiner", label: "Rewind", letter: "W", defaultCode: 51, defaultKey: "Delete"),
         Keybind(id: "pause", label: "Pause", letter: "P", defaultCode: 35, defaultKey: "P"),
+        // One frame of machine, bought while the world is held still — the
+        // first verb of a tool-assisted run, and rebindable like the rest.
+        Keybind(id: "avance", label: "Frame Advance", letter: ".", defaultCode: 47, defaultKey: "."),
         Keybind(id: "menu", label: "Settings", letter: "M", defaultCode: 46, defaultKey: "M"),
     ]
 
@@ -728,6 +731,13 @@ final class LinkCenter: NSObject, ObservableObject, NetServiceDelegate, NetServi
     }
 }
 
+// The three states of a take, as the engine announces them on 'R'.
+enum MovieState: UInt8 {
+    case idle = 0
+    case recording = 1
+    case replaying = 2
+}
+
 final class Engine: ObservableObject {
     // The Metal path when the device wakes, the CALayer otherwise — one
     // `layer` either way, and the view never knows which it got.
@@ -742,6 +752,12 @@ final class Engine: ObservableObject {
     // down: the HUD button and the menu item latch, the keys and the shoulder
     // hold, and all four ends move this one flag.
     @Published private(set) var turboLatched = false
+    // What the engine says its movie machinery is doing. Turbo has to be
+    // latched here because the wire cannot hold a key down; a take is the
+    // opposite — the engine knows, it says so on 'R', and it refuses one
+    // outright while the link cable is plugged. A badge lit at the click
+    // site would light for a refusal too, so this one waits to be told.
+    @Published private(set) var movie: MovieState = .idle
     let link = LinkCenter()
     // The port both sides of the cable agree on — the engine's
     // Link.default_port, coupled the same knowing way as "atomboy-moteur".
@@ -931,6 +947,27 @@ final class Engine: ObservableObject {
     func setProfile(_ name: String) { libraryOp("F", name) }
     func exportSav() { libraryOp("E") }
 
+    // ── The movies: two ops out, the state announced back ────────────────────
+
+    // 'R' carries 1 to start a take on the machine as it stands and 0 to
+    // stop it and write it into the game's folder. Neither touches `movie`:
+    // the engine answers with what actually happened.
+    func recordMovie() { try? input?.write(contentsOf: Data([UInt8(ascii: "R"), 1])) }
+    func stopMovie() { try? input?.write(contentsOf: Data([UInt8(ascii: "R"), 0])) }
+
+    // 'M' carries a path, its length in two bytes — a path is not a save's
+    // name, and a byte of length would cut one short somewhere down a home
+    // folder. A path no length can carry is not sent at all.
+    func replayMovie(_ url: URL) {
+        let bytes = Array(url.path.utf8)
+        guard bytes.count <= 0xFFFF else { return }
+        var data = Data([
+            UInt8(ascii: "M"), UInt8(bytes.count >> 8), UInt8(bytes.count & 0xFF),
+        ])
+        data.append(contentsOf: bytes)
+        try? input?.write(contentsOf: data)
+    }
+
     // The contrast dial: 0-100 down the pipe, anything else asks the
     // engine for the preset's own resting point.
     func setDial(_ value: Int) {
@@ -1099,8 +1136,10 @@ final class Engine: ObservableObject {
         ConsoleState.shared.power(p.isRunning)
         ConsoleState.shared.releaseAll()
         // A new engine holds nothing: the latch cannot survive the machine it
-        // was pressed against.
+        // was pressed against, and neither can a take — the one that was
+        // running belonged to the process that just died.
         setLatched(false)
+        movie = .idle
 
         // The persisted settings catch up with the freshly born engine.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -1177,6 +1216,7 @@ final class Engine: ObservableObject {
         ConsoleState.shared.power(false)
         ConsoleState.shared.releaseAll()
         setLatched(false)
+        movie = .idle
     }
 
     // ── The cable: plugged at boot, like the real one ────────────────────────
@@ -1229,6 +1269,10 @@ final class Engine: ObservableObject {
                 guard buffer.count >= 2 else { return }
                 metal?.panel(Int(buffer[1]))
                 ShellState.shared.follow(panel: Int(buffer[1]))
+                buffer.removeSubrange(0..<2)
+            } else if tag == UInt8(ascii: "R") {
+                guard buffer.count >= 2 else { return }
+                movie = MovieState(rawValue: buffer[1]) ?? .idle
                 buffer.removeSubrange(0..<2)
             } else {
                 // Stream out of sync: drop the byte and catch up.
@@ -1416,11 +1460,31 @@ struct HUDButton: View {
     }
 }
 
+// A take in progress, said the way a camera says it: a red dot while one is
+// being written, a triangle while one is being played. It is a light and not
+// a button — the verbs live in the Game menu, and a badge that could be
+// clicked would be a fourth place to stop a movie by accident.
+struct MovieBadge: View {
+    let state: MovieState
+
+    var body: some View {
+        if state != .idle {
+            Image(systemName: state == .recording ? "record.circle" : "play.circle")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.tint)
+                .frame(width: 22, height: 30)
+                .help(state == .recording ? "Recording a movie" : "Replaying a movie")
+                .accessibilityLabel(state == .recording ? "Recording a movie" : "Replaying a movie")
+        }
+    }
+}
+
 struct HUD: View {
     @ObservedObject var engine: Engine
 
     var body: some View {
         HStack(spacing: 2) {
+            MovieBadge(state: engine.movie)
             HUDButton(
                 symbol: "forward.fill",
                 tooltip: engine.turboLatched ? "Turbo — on (Tab)" : "Turbo (Tab)",
@@ -1434,6 +1498,42 @@ struct HUD: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .modifier(Glass())
+    }
+}
+
+// The take's verbs in the menu bar. One item does whatever there is to do —
+// start a take, stop and file the one being written, drop the one being
+// played — because the engine's state is known here, and a menu that offers
+// what cannot happen is a menu that lies. The other opens a `.tas` and hands
+// its path down the pipe.
+struct MovieCommands: View {
+    let delegate: AppDelegate
+    @ObservedObject var engine: Engine
+
+    init(delegate: AppDelegate) {
+        self.delegate = delegate
+        self.engine = delegate.engine
+    }
+
+    var body: some View {
+        Group {
+            Button(label) {
+                if engine.movie == .idle { engine.recordMovie() } else { engine.stopMovie() }
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(engine.isIdle)
+
+            Button("Replay Movie…") { delegate.chooseMovie() }
+                .disabled(engine.isIdle)
+        }
+    }
+
+    private var label: String {
+        switch engine.movie {
+        case .idle: return "Record Movie"
+        case .recording: return "Stop Recording & Save"
+        case .replaying: return "Stop Replay"
+        }
     }
 }
 
@@ -2175,6 +2275,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine.launch(rom: url)
         }
     }
+
+    // A take from anywhere on disk, not only from this game's folder: a
+    // movie is a file people send each other. The engine is the one that
+    // checks it belongs to the cartridge in the drive.
+    func chooseMovie() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a movie"
+        panel.allowedFileTypes = ["tas"]
+        if panel.runModal() == .OK, let url = panel.url {
+            engine.replayMovie(url)
+        }
+    }
 }
 
 extension Engine {
@@ -2280,6 +2392,10 @@ struct AtomboyApp: App {
                     .keyboardShortcut("t")
                 Button("Save Screenshot") { delegate.engine.saveScreenshot() }
                     .keyboardShortcut("s", modifiers: [.command, .option])
+
+                Divider()
+
+                MovieCommands(delegate: delegate)
 
                 Divider()
 

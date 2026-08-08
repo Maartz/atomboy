@@ -35,18 +35,26 @@ defmodule Atomboy.Save do
   @spec load(map(), Path.t()) :: map()
   def load(ram, sav_path) do
     case File.read(sav_path) do
-      {:ok, data} ->
-        limit = banks(ram) * @sram_size
-
-        data
-        |> binary_part(0, min(byte_size(data), limit))
-        |> :binary.bin_to_list()
-        |> Enum.with_index()
-        |> Enum.reduce(ram, fn {byte, i}, ram -> Map.put(ram, key(i), byte) end)
-
-      _ ->
-        ram
+      {:ok, data} -> install(ram, data)
+      _ -> ram
     end
+  end
+
+  @doc """
+  A battery straight from memory, laid into the map — the same bytes `load/2`
+  reads off disk, for the callers that hold them without a file: a movie's
+  boot anchor carries its SRAM inside the take, and writing it out only to
+  read it back would put the player's own save in the way.
+  """
+  @spec install(map(), binary()) :: map()
+  def install(ram, data) when is_binary(data) do
+    limit = banks(ram) * @sram_size
+
+    data
+    |> binary_part(0, min(byte_size(data), limit))
+    |> :binary.bin_to_list()
+    |> Enum.with_index()
+    |> Enum.reduce(ram, fn {byte, i}, ram -> Map.put(ram, key(i), byte) end)
   end
 
   @doc """

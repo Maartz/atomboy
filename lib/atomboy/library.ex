@@ -120,6 +120,68 @@ defmodule Atomboy.Library do
 
   defp states_dir(lib), do: Path.join([lib.dir, "states", lib.profile])
 
+  # ── Movies ──────────────────────────────────────────────────────────────────
+
+  @doc """
+  Where this game's takes live — beside its states, one folder per profile,
+  since a movie belongs to the cartridge and to the player who recorded it.
+  In sidecar mode they land beside the ROM, like everything else does there.
+  """
+  @spec movies_dir(t()) :: Path.t()
+  def movies_dir(%{mode: :library} = lib), do: Path.join([lib.dir, "movies", lib.profile])
+  def movies_dir(%{mode: :sidecar} = lib), do: Path.dirname(lib.rom_path)
+
+  @doc """
+  The file a take called `name` is written to. The folder is created here:
+  a recording is stopped once, and it must not be lost to a missing folder.
+  """
+  @spec movie_path(t(), String.t()) :: Path.t()
+  def movie_path(lib, name) do
+    dir = movies_dir(lib)
+    File.mkdir_p!(dir)
+    Path.join(dir, sanitize(name) <> Atomboy.Movie.extension())
+  end
+
+  @doc """
+  This game's takes, newest first — full paths. The clock in the name is
+  what sorts them: every take stopped from a menu is written under
+  `movie_name/1`, and one named by hand sorts among them alphabetically,
+  which in a folder of timestamps comes to the same thing.
+  """
+  @spec movies(t()) :: [Path.t()]
+  def movies(lib) do
+    dir = movies_dir(lib)
+    extension = Atomboy.Movie.extension()
+
+    for file <- ls(dir), String.ends_with?(file, extension) do
+      Path.join(dir, file)
+    end
+    |> Enum.sort(:desc)
+  end
+
+  @doc """
+  The battery a replaying machine writes to — a sandbox beside the takes.
+
+  A movie carries the save it was recorded on, and the game inside it will
+  go on writing to the cartridge as it plays. That battery is the take's,
+  not the player's, so it goes here and the profile's own `.sav` is left
+  exactly as it was found.
+  """
+  @spec replay_sav(t()) :: Path.t()
+  def replay_sav(lib) do
+    dir = movies_dir(lib)
+    File.mkdir_p!(dir)
+    Path.join(dir, "replay.sav")
+  end
+
+  @doc """
+  A name for a take started now: the date and the hour it began, which is
+  how a player finds the run they remember among a folder of them.
+  """
+  @spec movie_name(DateTime.t()) :: String.t()
+  def movie_name(now \\ DateTime.utc_now()),
+    do: Calendar.strftime(now, "%Y-%m-%d %H-%M-%S")
+
   defp sidecar_profile(%{profile: @default_profile}), do: nil
   defp sidecar_profile(%{profile: profile}), do: profile
 

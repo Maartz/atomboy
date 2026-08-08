@@ -10,6 +10,7 @@ defmodule Atomboy.Server do
       <<?F, rgb::binary-69120>>          one 160×144 frame in RGB24
       <<?A, n::16-big, pcm::binary-n>>   s16le stereo PCM at 32,768 Hz
       <<?P, preset>>                     the panel, announced
+      <<?R, state>>                      the movie: 0 idle, 1 recording, 2 replaying
 
   The RGB comes out of the same `Screen.to_rgb` as the window — palette
   included, overlay menu included: the shell draws, it knows nothing. The
@@ -30,8 +31,10 @@ defmodule Atomboy.Server do
 
   Two-byte records: `<<op, key>>`, where `op` is `?+` (press) or `?-`
   (release). Keys: `?U ?D ?L ?R` the directions, `?A ?B` the buttons, `?S`
-  Start, `?E` Select, `?M` the menu, `?W` rewind (held), `?P` pause — plus
-  the direct actions for the native menu bar: `?s`/`?r` save/load state,
+  Start, `?E` Select, `?M` the menu, `?W` rewind (held), `?P` pause, `?.`
+  frame advance (one frame of machine while the menu holds the world
+  still) — plus the direct actions for the native menu bar: `?s`/`?r`
+  save/load state,
   `?1`-`?9` the slot. `?T`, turbo, is held rather than latched: `<<?+, ?T>>`
   engages it and `<<?-, ?T>>` lets it go. Five operations carry a value
   rather than a key: `<<?V, v>>` sets the mixer volume (0-100), `<<?X,
@@ -56,6 +59,21 @@ defmodule Atomboy.Server do
   cycle: battery flushed, machine reset on the other player's cartridge.
   `<<?E, _>>` exports the battery back beside the ROM.
 
+  ## The movies
+
+  Two more operations, and one answer. `<<?R, 1>>` starts recording from
+  the machine as it stands (a snapshot anchor — the shell's player is
+  mid-game) and `<<?R, 0>>` stops and writes the take into the game's own
+  folder under the hour it was stopped. `<<?M, len::16-big, path>>` plays a
+  movie back from a path: two bytes of length rather than the one the
+  library's names get, because a path down a home folder outruns 255 bytes
+  in a way a save's name never does.
+
+  Whatever moves — the ops, a track running out, a take refused for
+  belonging to another cartridge — the engine answers with `<<?R, state>>`,
+  and only when the state actually changes. The shell's badge is therefore
+  never a guess about what the engine did with a click.
+
   Everything else is the usual machinery: menu inside the frame, states,
   mixer, link cable (`--listen`/`--link` work in server mode too).
   """
@@ -69,8 +87,9 @@ defmodule Atomboy.Server do
   alias Atomboy.Library
   alias Atomboy.Link
   alias Atomboy.Menu
+  alias Atomboy.Movie
+  alias Atomboy.Play
   alias Atomboy.Play.Audio
-  alias Atomboy.Play.Input
   alias Atomboy.Play.Turbo
   alias Atomboy.PPU
   alias Atomboy.Save
@@ -91,6 +110,7 @@ defmodule Atomboy.Server do
           ?W => :rewind,
           ?P => :pause,
           ?T => :turbo,
+          ?. => :frame_advance,
           # The direct actions — the native menu bar uses these.
           ?s => :save_state,
           ?r => :load_state
@@ -132,6 +152,9 @@ defmodule Atomboy.Server do
             ram: ram,
             sav: sav,
             lib: lib,
+            # What a power-on has to remember: a movie anchored on boot
+            # puts the machine back here (`Play.start_replay/2`).
+            dmg: Keyword.get(opts, :dmg, false),
             state_slot: 1,
             palette: palette,
             lcd:
@@ -154,13 +177,26 @@ defmodule Atomboy.Server do
             # The shell resends the chosen speed on every boot (`?T`); the
             # flag is here for a server started from the command line.
             turbo_speed: Keyword.get(opts, :turbo_speed, :uncapped),
-            # What a power cycle must remember: the machine flags of boot.
-            reset: %{
-              dmg: Keyword.get(opts, :dmg, false),
-              codes: Keyword.get(opts, :codes, "")
-            },
+            # The movie machinery is the play loop's, field for field —
+            # `Play.pad/2`, `Play.stamp/2` and `Play.restore/3` are shared
+            # rather than copied, so a take recorded in the shell and one
+            # recorded in the terminal are the same artifact.
+            movie: nil,
+            take: nil,
+            movie_file: Keyword.get(opts, :record),
+            # What the shell was last told the machinery was doing.
+            movie_said: nil,
+            # The note the shared functions write. The shell has no status
+            # line to put it on — it learns the same news from `?R` — but
+            # the field has to exist for those functions to write it.
+            note: nil,
+            # The one frame `?.` buys while the menu holds the world still.
+            advance: false,
+            # What a power cycle must remember: the codes of boot.
+            reset: %{codes: Keyword.get(opts, :codes, "")},
             deadline: System.monotonic_time(:microsecond) + @frame_us
           })
+          |> from_the_start(opts)
         )
       after
         Process.unlink(reader)
@@ -193,20 +229,35 @@ defmodule Atomboy.Server do
 
   defp loop(ctx) do
     case drain(ctx) do
-      :quit -> finish(ctx)
-      ctx when ctx.menu != nil -> menu_idle(ctx)
-      ctx -> if MapSet.member?(ctx.down, :rewind), do: rewind_step(ctx), else: step(ctx)
+      :quit ->
+        finish(ctx)
+
+      # The menu is this front-end's pause — the machine sleeps behind it —
+      # so it is also where a frame is worth buying one at a time.
+      ctx when ctx.menu != nil and ctx.advance ->
+        step(%{ctx | advance: false})
+
+      ctx when ctx.menu != nil ->
+        menu_idle(ctx)
+
+      ctx ->
+        if MapSet.member?(ctx.down, :rewind), do: rewind_step(ctx), else: step(ctx)
     end
   end
 
   defp finish(ctx) do
     Save.flush(ctx.ram, ctx.sav)
+    written(ctx)
     :ok
   end
 
   defp step(ctx) do
     held = MapSet.to_list(ctx.down)
-    ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
+    # The movie's one seam, shared with the play loop: recording copies the
+    # pad the frame is about to be run on, replay dictates it.
+    {ctx, dpad, btns} = Play.pad(ctx, held)
+    ctx = announce_movie(ctx)
+    ram = Joypad.set(ctx.ram, dpad, btns)
     ram = Codes.applique(ram)
 
     # In turbo: one frame emitted per speed step (one in four uncapped),
@@ -289,6 +340,51 @@ defmodule Atomboy.Server do
     ctx
   end
 
+  # What the machinery is doing, whenever it stops being what the shell was
+  # last told. Every path that could move it passes through here — the ops,
+  # the menu's verbs, a state load that re-records, and the frame on which
+  # a track runs out — so the shell's badge is the engine's own answer and
+  # never an optimistic guess about a click.
+  defp announce_movie(ctx) do
+    said = Play.movie_state(ctx)
+
+    if said == ctx.movie_said do
+      ctx
+    else
+      IO.binwrite(:stdio, <<?R, movie_byte(said)>>)
+      %{ctx | movie_said: said}
+    end
+  end
+
+  defp movie_byte(:recording), do: 1
+  defp movie_byte(:replaying), do: 2
+  defp movie_byte(nil), do: 0
+
+  # A take asked for on the command line: `--record` claims a boot anchor,
+  # `--replay` names a file. The shell does not use these — it has the ops
+  # — but a server started by hand is still atomboy.
+  defp from_the_start(ctx, opts) do
+    cond do
+      Keyword.has_key?(opts, :record) ->
+        announce_movie(Play.start_recording(ctx, anchor: :boot))
+
+      path = Keyword.get(opts, :replay) ->
+        announce_movie(Play.replay(ctx, path))
+
+      true ->
+        ctx
+    end
+  end
+
+  # `--record` named its file before the first frame, and the shell closing
+  # is what stops the take.
+  defp written(%{movie_file: path, movie: {:recording, _movie}} = ctx) when is_binary(path) do
+    {movie, _ctx} = Play.stop_movie(ctx)
+    Movie.write(movie, path)
+  end
+
+  defp written(_ctx), do: :ok
+
   defp menu_idle(ctx) do
     ctx =
       if ctx.last_frame do
@@ -301,11 +397,23 @@ defmodule Atomboy.Server do
     loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
   end
 
+  # A pull off the ring is a state load like any other, so it goes through
+  # the same door: while a take records, it cuts the track back to the
+  # entry's frame and counts as a re-record, and an entry older than the
+  # take is refused rather than played into the middle of one — a refused
+  # pull stays on the ring, since it changed nothing and must spend
+  # nothing.
   defp rewind_step(ctx) do
     ctx =
       case ctx.history do
-        [{state, ram, apu} | rest] -> %{ctx | state: state, ram: ram, apu: apu, history: rest}
-        [] -> ctx
+        [frozen | rest] ->
+          case Play.restore(%{ctx | history: rest}, frozen, "⏪") do
+            {:ok, ctx} -> announce_movie(ctx)
+            :refused -> ctx
+          end
+
+        [] ->
+          ctx
       end
 
     pixels = PPU.render_frame(ctx.ram)
@@ -318,8 +426,15 @@ defmodule Atomboy.Server do
     loop(%{ctx | last_frame: pixels, deadline: deadline + @frame_us})
   end
 
+  # The stamp rides inside the entry, as it does in the play loop: a frozen
+  # machine has to say which frame of which take it stands at, or a rewind
+  # during a recording would land the console somewhere the track cannot
+  # account for.
   defp remember(%{frame: n} = ctx) when rem(n, 10) == 0 do
-    %{ctx | history: Enum.take([{ctx.state, ctx.ram, ctx.apu} | ctx.history], 240)}
+    %{
+      ctx
+      | history: Enum.take([{ctx.state, Play.stamp(ctx, ctx.ram), ctx.apu} | ctx.history], 240)
+    }
   end
 
   defp remember(ctx), do: ctx
@@ -370,7 +485,7 @@ defmodule Atomboy.Server do
         Library.save_state(
           ctx.lib,
           name,
-          {ctx.state, ctx.ram, ctx.apu},
+          {ctx.state, Play.stamp(ctx, ctx.ram), ctx.apu},
           Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
         )
 
@@ -389,6 +504,19 @@ defmodule Atomboy.Server do
       {:library, :export} ->
         Library.export(ctx.lib)
         drain(ctx)
+
+      # The movie ops. Recording starts on the machine as it stands — the
+      # player who clicked is mid-game — and stopping writes the take into
+      # the game's folder, which is where the shell's open panel will find
+      # it again.
+      {:key, ?R, 1} ->
+        drain(announce_movie(Play.start_recording(ctx)))
+
+      {:key, ?R, _stop} ->
+        drain(announce_movie(elem(Play.stop_and_save(ctx), 1)))
+
+      {:movie, :replay, path} ->
+        drain(announce_movie(Play.replay(ctx, path)))
 
       {:key, op, key} ->
         case press(ctx, op, Map.get(@keys, key)) do
@@ -419,6 +547,16 @@ defmodule Atomboy.Server do
 
   defp press(ctx, _op, nil), do: ctx
 
+  # The TAS verb, ahead of the menu's own keys: one frame, bought while the
+  # world is held still — which in this front-end is the menu being open. A
+  # running machine has nothing to buy, so it ignores the key, and so does
+  # the release the shell sends after every keybind: a frame is asked for,
+  # never held.
+  defp press(%{menu: menu} = ctx, ?+, :frame_advance) when menu != nil,
+    do: %{ctx | advance: true}
+
+  defp press(ctx, _op, :frame_advance), do: ctx
+
   defp press(%{menu: menu} = ctx, ?+, key) when menu != nil do
     {menu, actions} = Menu.press(ctx.menu, key)
 
@@ -439,7 +577,8 @@ defmodule Atomboy.Server do
             ctx.palette,
             Map.get(ctx.ram, :cgb, false),
             Map.get(ctx.ram, :mixer),
-            ctx.lcd.preset
+            ctx.lcd.preset,
+            Play.movie_state(ctx)
           ),
         down: MapSet.new()
     }
@@ -484,7 +623,7 @@ defmodule Atomboy.Server do
     Library.save_state(
       ctx.lib,
       slot_name(ctx),
-      {ctx.state, ctx.ram, ctx.apu},
+      {ctx.state, Play.stamp(ctx, ctx.ram), ctx.apu},
       Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
     )
 
@@ -497,6 +636,13 @@ defmodule Atomboy.Server do
   defp menu_action({:palette, p}, ctx), do: recompile(%{ctx | palette: p})
   defp menu_action({:panel, p}, ctx), do: recompile(%{ctx | lcd: %{ctx.lcd | preset: p}})
   defp menu_action({:mixer, m}, ctx), do: %{ctx | ram: Map.put(ctx.ram, :mixer, m)}
+
+  # The take's three verbs, as the in-game menu offers them — the same
+  # functions the shell's own menu bar reaches through `?R` and `?M`.
+  defp menu_action(:record_movie, ctx), do: announce_movie(Play.start_recording(ctx))
+  defp menu_action(:stop_movie, ctx), do: announce_movie(elem(Play.stop_and_save(ctx), 1))
+  defp menu_action(:replay_movie, ctx), do: announce_movie(Play.replay_latest(ctx))
+
   defp menu_action(:quit, _ctx), do: :quit
 
   # Palette and panel both feed the same tables: whichever moved, they are
@@ -509,17 +655,16 @@ defmodule Atomboy.Server do
         | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false), ctx.dial)
       })
 
-  # A state by name — the current cable survives the trip through time.
+  # A state by name, through the play loop's own door: the cable survives
+  # the trip through time, the take's stamp comes off the machine before
+  # the cartridge ever sees it, and a state loaded mid-take re-records.
   defp load_named(ctx, name) do
     case Library.load_state(ctx.lib, name) do
-      {:ok, {state, ram, apu}} ->
-        ram =
-          case Map.get(ctx.ram, :link) do
-            nil -> Map.delete(ram, :link)
-            link -> Map.put(ram, :link, link)
-          end
-
-        %{ctx | state: state, ram: ram, apu: apu}
+      {:ok, frozen} ->
+        case Play.restore(ctx, frozen, "state loaded") do
+          {:ok, ctx} -> announce_movie(ctx)
+          :refused -> ctx
+        end
 
       :error ->
         ctx
@@ -535,7 +680,7 @@ defmodule Atomboy.Server do
     sav = Library.sav_path(lib)
 
     ram =
-      Screen.boot_ram(ctx.rom, ctx.reset.dmg)
+      Screen.boot_ram(ctx.rom, ctx.dmg)
       |> then(&if(link = Map.get(ctx.ram, :link), do: Map.put(&1, :link, link), else: &1))
       |> then(&if(mixer = Map.get(ctx.ram, :mixer), do: Map.put(&1, :mixer, mixer), else: &1))
       |> Save.load(sav)
@@ -546,7 +691,7 @@ defmodule Atomboy.Server do
       | lib: lib,
         sav: sav,
         ram: ram,
-        state: Screen.boot_state(ctx.rom, ctx.reset.dmg),
+        state: Screen.boot_state(ctx.rom, ctx.dmg),
         apu: %APU{},
         history: [],
         last_frame: nil,
@@ -593,13 +738,7 @@ defmodule Atomboy.Server do
       # ?C: the GameShark codes — a length, then the ASCII list, which
       # REPLACES the active set (an empty list clears everything).
       {:ok, <<?C, len>>} ->
-        string =
-          case :file.read(f, len) do
-            {:ok, data} when len > 0 -> data
-            _ -> ""
-          end
-
-        send(parent, {:codes, string})
+        send(parent, {:codes, chunk(f, len)})
         read_loop(parent, f)
 
       # The library ops: L and E stand alone, K/O/D/F carry a name.
@@ -612,15 +751,23 @@ defmodule Atomboy.Server do
         read_loop(parent, f)
 
       {:ok, <<op, len>>} when op in ~c"KODF" ->
-        name =
-          case :file.read(f, len) do
-            {:ok, data} when len > 0 -> data
-            _ -> ""
-          end
-
         verb = %{?K => :save, ?O => :load, ?D => :delete, ?F => :profile}
-        send(parent, {:library, Map.fetch!(verb, op), name})
+        send(parent, {:library, Map.fetch!(verb, op), chunk(f, len)})
         read_loop(parent, f)
+
+      # ?M: a movie to replay, by path. The length is two bytes rather than
+      # the one a save's name gets — the high half rides where a value byte
+      # would — because 255 is generous for a name a player typed and thin
+      # for a path down somebody's home folder.
+      {:ok, <<?M, hi>>} ->
+        case :file.read(f, 1) do
+          {:ok, <<lo>>} ->
+            send(parent, {:movie, :replay, chunk(f, hi * 256 + lo)})
+            read_loop(parent, f)
+
+          _eof ->
+            send(parent, :stdin_closed)
+        end
 
       {:ok, <<op, key>>} ->
         send(parent, {:key, op, key})
@@ -628,6 +775,19 @@ defmodule Atomboy.Server do
 
       _eof ->
         send(parent, :stdin_closed)
+    end
+  end
+
+  # The payload of an op that carries one — a length already read, and the
+  # bytes that follow it. A truncated stream gives an empty string rather
+  # than a half a name: the op then does nothing, which is what a shell
+  # that died mid-write deserves.
+  defp chunk(_f, 0), do: ""
+
+  defp chunk(f, len) do
+    case :file.read(f, len) do
+      {:ok, data} -> data
+      _ -> ""
     end
   end
 end

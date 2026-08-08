@@ -48,4 +48,55 @@ defmodule Atomboy.CLITest do
   test "--turbo without a number is a parse error, not a silent uncapped" do
     assert {:error, _message} = CLI.parse([@rom, "--turbo"])
   end
+
+  describe "the movie flags" do
+    @tag :tmp_dir
+    test "--record names the file the take is written to", %{tmp_dir: dir} do
+      take = Path.join(dir, "run.tas")
+
+      assert {:ok, @rom, opts} = CLI.parse([@rom, "--record", take])
+      assert opts[:record] == take
+    end
+
+    @tag :tmp_dir
+    test "--replay names a movie that is there", %{tmp_dir: dir} do
+      take = Path.join(dir, "run.tas")
+      File.write!(take, "not read at parse time")
+
+      assert {:ok, @rom, opts} = CLI.parse([@rom, "--replay", take])
+      assert opts[:replay] == take
+    end
+
+    test "a movie that is not there is said so, not opened later" do
+      assert {:error, message} = CLI.parse([@rom, "--replay", "nowhere/run.tas"])
+      assert message =~ "movie not found: nowhere/run.tas"
+    end
+
+    test "recording into a folder that does not exist is refused" do
+      assert {:error, message} = CLI.parse([@rom, "--record", "nowhere/run.tas"])
+      assert message =~ "nowhere to record"
+    end
+
+    @tag :tmp_dir
+    test "the two flags are two ends of the same session", %{tmp_dir: dir} do
+      take = Path.join(dir, "run.tas")
+      File.write!(take, "")
+
+      assert {:error, message} = CLI.parse([@rom, "--record", take, "--replay", take])
+      assert message =~ "pick one"
+    end
+
+    @tag :tmp_dir
+    test "neither travels with the cable: it is the one input a track cannot deal again",
+         %{tmp_dir: dir} do
+      take = Path.join(dir, "run.tas")
+      File.write!(take, "")
+
+      for flags <- [["--listen", "9999"], ["--link", "host:7373"]],
+          movie <- [["--record", take], ["--replay", take]] do
+        assert {:error, message} = CLI.parse([@rom | flags] ++ movie)
+        assert message =~ "cannot share a session"
+      end
+    end
+  end
 end

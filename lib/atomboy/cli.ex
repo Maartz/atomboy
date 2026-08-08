@@ -11,6 +11,8 @@ defmodule Atomboy.CLI do
       atomboy zelda.gb
       atomboy pokemon.gbc --palette gray --no-sound
       atomboy zelda.gb --window --panel dmg
+      atomboy tetris.gb --record run.tas
+      atomboy tetris.gb --replay run.tas
 
   Arguments arrive through `:init.get_plain_arguments/0` — the path that
   does not depend on the Burrito module at runtime. Only starts in prod:
@@ -123,7 +125,9 @@ defmodule Atomboy.CLI do
           library: :string,
           dial: :integer,
           codes: :string,
-          turbo: :integer
+          turbo: :integer,
+          record: :string,
+          replay: :string
         ]
       )
 
@@ -131,6 +135,7 @@ defmodule Atomboy.CLI do
          {:ok, opts} <- panel(opts),
          {:ok, opts} <- dial(opts),
          {:ok, opts} <- turbo(opts),
+         {:ok, opts} <- movie(opts),
          {:ok, rom} <- rom(argv) do
       {:ok, rom, opts}
     end
@@ -213,6 +218,34 @@ defmodule Atomboy.CLI do
     end
   end
 
+  # The two takes' flags. A session writes a movie or plays one, never
+  # both — and never either with the cable plugged in: the other console
+  # is a source of bytes no track can promise to deal again, which is the
+  # same refusal the loop makes when the machinery is asked mid-game.
+  defp movie(opts) do
+    record = Keyword.get(opts, :record)
+    replay = Keyword.get(opts, :replay)
+
+    cond do
+      record && replay ->
+        {:error, "--record and --replay are two ends of the same session: pick one"}
+
+      (record || replay) && (Keyword.has_key?(opts, :listen) or Keyword.has_key?(opts, :link)) ->
+        {:error,
+         "a movie and the link cable cannot share a session: the other console is\n" <>
+           "the one input a track cannot promise to deal again"}
+
+      replay && not File.exists?(replay) ->
+        {:error, "movie not found: #{replay}"}
+
+      record && not File.dir?(Path.dirname(Path.expand(record))) ->
+        {:error, "nowhere to record: #{Path.dirname(record)} is not a folder"}
+
+      true ->
+        {:ok, opts}
+    end
+  end
+
   defp rom([rom]) do
     if File.exists?(rom) do
       {:ok, rom}
@@ -227,6 +260,7 @@ defmodule Atomboy.CLI do
        "[--link host:port] [--save name] [--library dir] [--hold N] [--frames N] " <>
        "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb|crt] " <>
        "[--dial 0-100] [--turbo 2|4|8] " <>
+       "[--record take.tas] [--replay take.tas] " <>
        "[--codes 01VVLLHH,…]"}
   end
 end

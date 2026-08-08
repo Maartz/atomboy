@@ -74,6 +74,42 @@ defmodule Atomboy.MenuTest do
     assert {nil, [:quit]} = Menu.press(menu, :a)
   end
 
+  describe "the movie rows" do
+    # A front-end with no movie machinery is offered none of its verbs —
+    # which is also why every test above still counts eight rows.
+    test "a front-end that cannot record is offered nothing" do
+      menu = Menu.open(1, :dmg)
+      rows = Enum.map(0..7, fn n -> elem(Menu.press(%{menu | cursor: n}, :a), 1) end)
+
+      refute :record_movie in List.flatten(rows)
+      refute :replay_movie in List.flatten(rows)
+    end
+
+    test "with nothing running, RECORD MOVIE and REPLAY MOVIE, in that order" do
+      menu = %{Menu.open(1, :dmg, false, nil, :raw, nil) | cursor: 4}
+      assert {nil, [:record_movie]} = Menu.press(menu, :a)
+      assert {nil, [:replay_movie]} = Menu.press(%{menu | cursor: 5}, :a)
+    end
+
+    test "while a take runs, the only verb left is stopping it" do
+      for state <- [:recording, :replaying] do
+        menu = %{Menu.open(1, :dmg, false, nil, :raw, state) | cursor: 4}
+        assert {nil, [:stop_movie]} = Menu.press(menu, :a)
+
+        # One row, not two: the next one along is the palette again.
+        assert {_menu, [{:palette, :gray}]} = Menu.press(%{menu | cursor: 5}, :right)
+      end
+    end
+
+    test "the label says which take is being stopped" do
+      frame = :binary.copy(<<0>>, 160 * 144)
+      recording = Menu.render(Menu.open(1, :dmg, false, nil, :raw, :recording), frame)
+      replaying = Menu.render(Menu.open(1, :dmg, false, nil, :raw, :replaying), frame)
+
+      refute recording == replaying
+    end
+  end
+
   test "the MIXER page: volume in steps of ten, clamped, voices switchable" do
     menu = %{Menu.open(1, :dmg) | cursor: 6}
     {menu, []} = Menu.press(menu, :a)
