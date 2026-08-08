@@ -191,10 +191,46 @@ struct BodyLayout {
             led: mm.rect(10.5, 22, 3.2, 3.2))
     }()
 
-    // TODO(Task 7): the living-room TV — landscape, its own aspect, wood and
-    // curved glass. The window ratio already comes from here, so the day this
-    // stops aliasing the DMG the window turns on its side by itself.
-    static let tv = BodyLayout.dmg
+    // The set in the corner of the living room: a twelve-inch portable from
+    // around 1980, near enough 320 × 256 mm seen head-on. The one landscape
+    // body — and the window turns with it, because the ratio has always come
+    // from here rather than from the mode.
+    //
+    // The bounds are not all cabinet. The top 52 mm are the air the aerial
+    // rises into: the ears are folded INSIDE the silhouette so everything
+    // drawn still lives in the rectangle the window was told about, and
+    // nothing waits outside the frame to be clipped.
+    static let tv: BodyLayout = {
+        let mm = Ruler(320, 256)
+
+        // The picture stays the Game Boy's 10:9 — a television only changes
+        // what is around the panel, never the panel. 168 mm across the tube
+        // leaves a 16 mm surround on all four sides of the opening.
+        let viewport = 168.0
+        let picture = viewport * 9 / 10
+
+        return BodyLayout(
+            aspect: mm.aspect,
+            corner: mm.across(12),
+            cornerBottomRight: mm.across(12),
+            bezelCorner: mm.across(16),
+            bezel: mm.rect(24, 64, 200, 174),
+            screen: mm.rect(40, 64 + (174 - picture) / 2, viewport, picture),
+            // A television has no thumbs on it. These rects exist because
+            // every body shares one struct; the TV simply never asks for
+            // them, and no view reads a zero rect.
+            dpad: .zero,
+            buttonA: .zero,
+            buttonB: .zero,
+            select: .zero,
+            start: .zero,
+            // Not a corner grill this time: a column of flat slots in the
+            // fascia, beside the tube where the sound came out.
+            speaker: mm.rect(240, 88, 52, 62),
+            // The pilot lamp under the channel dial — this body's whole
+            // reactive surface, and the same LED contract as the handhelds.
+            led: mm.rect(262, 220, 8, 8))
+    }()
 
     // The largest body that fits, ratio kept. The window normally already has
     // this exact shape, so this only bites in fullscreen — where it centres
@@ -447,9 +483,9 @@ struct ConsoleView: View {
     }
 }
 
-// Which case the panel preset put us in. The TV is still the DMG on purpose
-// — Task 7 fills it, and until it does a player who picks the CRT palette
-// gets a working console rather than a hole.
+// Which case the panel preset put us in. Three handhelds and a television,
+// and the television is the reason this switch cannot assume a portrait
+// window.
 struct ConsoleBodyArt: View {
     let engine: Engine
     let console: ConsoleBody
@@ -457,12 +493,14 @@ struct ConsoleBodyArt: View {
 
     var body: some View {
         switch console {
-        case .dmg, .tv:
+        case .dmg:
             DMGBody(engine: engine, layout: layout)
         case .pocket:
             PocketBody(engine: engine, layout: layout)
         case .cgb:
             CGBBody(engine: engine, layout: layout)
+        case .tv:
+            TVBody(engine: engine, layout: layout)
         }
     }
 }
@@ -527,6 +565,17 @@ struct Plastic {
     static let cgbPill = Plastic(0x55555C, 0x2E2E33, 0x121215)
     static let cgbBezel = Plastic(0x2C2C31, 0x141416, 0x050506)
     static let cgbGrill = Plastic(0x7DE6E0, 0x00837D, 0x004E4A)
+
+    // The television, which is not plastic at all above the fascia: walnut
+    // veneer, the warm ground the grain is drawn onto. Then the dark board
+    // the controls are set into, the tube's surround, the knob, the collar
+    // of the aerial, and the lip of the speaker slots on a dark panel.
+    static let tvCabinet = Plastic(0x8A5A33, 0x6A4123, 0x3C2312)
+    static let tvFascia = Plastic(0x3A2B22, 0x241A14, 0x120C09)
+    static let tvBezel = Plastic(0x33302D, 0x1B1917, 0x090808)
+    static let tvKnob = Plastic(0x6B6660, 0x3B3733, 0x161413)
+    static let tvChrome = Plastic(0xE4E1D8, 0x9C9890, 0x3E3B36)
+    static let tvGrill = Plastic(0x6B5340, 0x1E1611, 0x0B0806)
 }
 
 // ── The primitives ───────────────────────────────────────────────────────────
@@ -730,9 +779,11 @@ struct DPad: View {
 // Six bands on the diagonal, stacked along the corner they live in. The DMG
 // leaves them as long slots; the Pocket and the Color drill the same bands
 // into rows of round holes, which is the only difference between the three
-// grills on the real cases. The pale capsule under each opening is the lip
-// of the moulding catching the light — the cheapest possible inner shadow,
-// and the only one that reads at this size.
+// grills on the real cases. The television runs the same bands flat and
+// wider — a grill is a grill, and this one only had to learn which way it
+// lies. The pale capsule under each opening is the lip of the moulding
+// catching the light — the cheapest possible inner shadow, and the only one
+// that reads at this size.
 struct SpeakerGrill: View {
     enum Style {
         case slots, holes
@@ -742,20 +793,29 @@ struct SpeakerGrill: View {
     var slots = 6
     var style: Style = .slots
 
+    // Which way the bands run, and how far across their box they reach. The
+    // handhelds keep the corner diagonal they were moulded with; the set in
+    // the living room lays them flat and lets them nearly touch the sides.
+    var angle: Angle = .degrees(-45)
+    var span: CGFloat = 0.56
+
     var body: some View {
         GeometryReader { geo in
             let s = min(geo.size.width, geo.size.height)
             let step = s * 0.115
             let thickness = s * 0.062
+            // Bands stack along their own perpendicular, whatever angle they
+            // were laid at — which at -45° is the corner drift they always had.
+            let drift = CGSize(
+                width: CGFloat(-sin(angle.radians)), height: CGFloat(cos(angle.radians)))
 
             ZStack {
                 ForEach(0..<slots, id: \.self) { i in
                     let k = CGFloat(i) - CGFloat(slots - 1) / 2
-                    let drift = k * step * 0.7071
-                    band(length: s * (0.56 - 0.04 * abs(k) / 2.5), thickness: thickness, step: step)
+                    band(length: s * (span - 0.04 * abs(k) / 2.5), thickness: thickness, step: step)
                         .position(
-                            x: geo.size.width / 2 + drift,
-                            y: geo.size.height / 2 + drift)
+                            x: geo.size.width / 2 + k * step * drift.width,
+                            y: geo.size.height / 2 + k * step * drift.height)
                 }
             }
         }
@@ -766,7 +826,7 @@ struct SpeakerGrill: View {
         case .slots:
             opening(Capsule(), lip: thickness * 0.28)
                 .frame(width: length, height: thickness)
-                .rotationEffect(.degrees(-45))
+                .rotationEffect(angle)
         case .holes:
             // The same band, perforated: as many holes as fit at the pitch
             // the bands themselves are stacked at, so the lattice comes out
@@ -778,7 +838,7 @@ struct SpeakerGrill: View {
                     opening(Circle(), lip: d * 0.16).frame(width: d, height: d)
                 }
             }
-            .rotationEffect(.degrees(-45))
+            .rotationEffect(angle)
         }
     }
 
@@ -1458,6 +1518,516 @@ struct CGBBody: View {
         casePrint(
             text, rect, in: size, pt: CGBTrim.pt(2.8, in: size),
             ink: Color(hex: 0x0B3B38).opacity(0.85), weight: .semibold)
+    }
+}
+
+// ── The living room ──────────────────────────────────────────────────────────
+
+// The set's ornament, in the same millimetres as BodyLayout.tv. There is no
+// D-pad table here and no button trough: what a television wears instead is
+// a cabinet that does not fill its own bounds, an aerial standing in the
+// space left over, and one dark column of controls beside the tube.
+private enum TVTrim {
+    static let mm = Ruler(320, 256)
+
+    static func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> CGRect {
+        mm.rect(x, y, w, h)
+    }
+
+    static func pt(_ length: Double, in size: CGSize) -> CGFloat {
+        mm.pt(length, in: size)
+    }
+
+    // A millimetre coordinate as a point in the drawn body. The aerial is
+    // strokes and fills rather than placed frames, and paths want points.
+    static func point(_ p: CGPoint, in size: CGSize) -> CGPoint {
+        CGPoint(x: size.width * p.x / mm.width, y: size.height * p.y / mm.height)
+    }
+
+    // The cabinet, sitting on the floor of the bounds with the top 52 mm
+    // left as air. Twelve millimetres of walnut all the way round the tube.
+    static let cabinet = rect(12, 52, 296, 198)
+
+    // The fascia: the dark board right of the picture where a set of this
+    // age kept the badge, the sound, the dial and the lamp, in that order
+    // down the column.
+    static let fascia = rect(236, 64, 60, 174)
+    static let wordmark = rect(238, 69, 56, 12)
+    static let speakerWell = rect(238, 84, 56, 70)
+    static let dialWell = rect(239, 158, 54, 54)
+    static let dialKnob = rect(248, 167, 36, 36)
+    static let ledRing = rect(259, 217, 14, 14)
+
+    // Which channel the dial was left on: the eighth mark of twelve across
+    // the ring's 270°, which puts the pointer up and to the right.
+    static let dialChannels = 12
+    static let dialPointer = -135.0 + 270.0 * 7 / 11
+
+    // The aerial, in raw millimetres because it is drawn as geometry: one
+    // pod straddling the cabinet's top edge and two rods off it. The tips
+    // stop 5 mm inside the bounds — that clearance is what keeps the ears
+    // out of the letterbox.
+    static let pod = CGRect(x: 147, y: 40, width: 26, height: 14)
+    static let rodBase = CGPoint(x: 160, y: 43)
+    static let rodTips = [CGPoint(x: 74, y: 5), CGPoint(x: 246, y: 5)]
+    static let rodHalfAtBase = 1.3
+    static let rodHalfAtTip = 0.55
+    static let rodTipBall = 1.7
+}
+
+// A repeatable dice for the wood. The same seed draws the same grain on
+// every redraw, because a cabinet that reshuffles itself when the window
+// resizes is not a cabinet.
+private struct GrainDice {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> Double {
+        state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        return Double((state >> 33) & 0xFF_FFFF) / Double(0xFF_FFFF)
+    }
+}
+
+// The ring of channel marks around the dial, and the knurl on the knob's
+// own rim — the same shape twice, at two radii. The travel stops short of
+// the bottom, which is where a dial's dead zone always is.
+private struct DialTicks: Shape {
+    var count = 12
+    var inner: CGFloat = 0.84
+    var outer: CGFloat = 0.99
+    var sweep: Double = 270
+
+    func path(in rect: CGRect) -> Path {
+        let centre = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) / 2
+        var path = Path()
+
+        for i in 0..<count {
+            let t = count > 1 ? Double(i) / Double(count - 1) : 0.5
+            let angle = (-sweep / 2 + sweep * t) * .pi / 180
+            let direction = CGPoint(x: CGFloat(sin(angle)), y: CGFloat(-cos(angle)))
+            path.move(
+                to: CGPoint(
+                    x: centre.x + direction.x * radius * inner,
+                    y: centre.y + direction.y * radius * inner))
+            path.addLine(
+                to: CGPoint(
+                    x: centre.x + direction.x * radius * outer,
+                    y: centre.y + direction.y * radius * outer))
+        }
+        return path
+    }
+}
+
+// The front of the tube: one plate with a hole in it, filled even-odd, so
+// the glass's rounded corners are cut out of the surround and laid over the
+// picture rather than clipped out of it. The Metal layer keeps its honest
+// rectangle underneath and never learns that its corners are covered.
+private struct TubeFace: Shape {
+    let plate: CGRect
+    let hole: CGRect
+    let plateCorner: CGFloat
+    let holeCorner: CGFloat
+    var plateOnly = false
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        if !plateOnly {
+            path.addRoundedRect(
+                in: plate.scaled(in: rect.size),
+                cornerSize: CGSize(
+                    width: plateCorner * rect.width, height: plateCorner * rect.width),
+                style: .continuous)
+        }
+        path.addRoundedRect(
+            in: hole.scaled(in: rect.size),
+            cornerSize: CGSize(width: holeCorner * rect.width, height: holeCorner * rect.width),
+            style: .continuous)
+        return path
+    }
+}
+
+// The portable television, drawn. A walnut box on the floor of its own
+// bounds, two ears in the air above it, the tube's dark surround with the
+// picture's corners eaten by the glass, and a column of controls that do
+// nothing — except the lamp, which is the only thing on this body with a
+// pulse.
+struct TVBody: View {
+    let engine: Engine
+    let layout: BodyLayout
+    @ObservedObject private var console = ConsoleState.shared
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+
+            ZStack(alignment: .topLeading) {
+                cabinet(size)
+                aerial(size)
+                tube(size)
+                fascia(size)
+            }
+        }
+    }
+
+    // ── The cabinet ──────────────────────────────────────────────────────────
+
+    private func silhouette(_ size: CGSize) -> BodyShape {
+        let radius = layout.corner * size.width
+        return BodyShape(
+            topLeft: radius, topRight: radius,
+            bottomRight: layout.cornerBottomRight * size.width, bottomLeft: radius)
+    }
+
+    private func cabinet(_ size: CGSize) -> some View {
+        ZStack {
+            caseShell(silhouette(size), .tvCabinet, in: size)
+            grain(size).clipShape(silhouette(size))
+
+            // The room's light lands on the top of the box and the floor
+            // takes the rest: a veneer is flat, and only the lighting says
+            // which way up the thing stands.
+            silhouette(size)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            .white.opacity(0.10), .clear, .clear, .black.opacity(0.26),
+                        ],
+                        startPoint: .top, endPoint: .bottom))
+        }
+        .place(TVTrim.cabinet, in: size)
+    }
+
+    // Walnut, drawn rather than photographed: a hundred-odd streaks running
+    // the height of the cabinet, some darker than the ground and some
+    // lighter, each with a little sway in it. Blurred by a hair at the end,
+    // because sharp grain looks like pinstripes.
+    private func grain(_ size: CGSize) -> some View {
+        Canvas { context, area in
+            var dice = GrainDice(seed: 0x5EED_1978)
+            let streaks = max(24, Int(area.width / 3))
+
+            for _ in 0..<streaks {
+                let x = dice.next() * area.width
+                let width = area.width * (0.0010 + dice.next() * 0.0070)
+                let dark = dice.next() < 0.66
+                let alpha = (dark ? 0.14 : 0.075) * (0.25 + dice.next() * 0.75)
+                let sway = area.width * 0.005 * (dice.next() - 0.5)
+
+                var streak = Path()
+                streak.move(to: CGPoint(x: x, y: 0))
+                streak.addQuadCurve(
+                    to: CGPoint(x: x + sway, y: area.height),
+                    control: CGPoint(x: x - sway * 2, y: area.height * 0.5))
+
+                context.stroke(
+                    streak,
+                    with: .color(
+                        dark
+                            ? Color(hex: 0x21130A).opacity(alpha)
+                            : Color(hex: 0xCFA168).opacity(alpha)),
+                    lineWidth: width)
+            }
+        }
+        .blur(radius: max(0.25, size.width * 0.0008))
+    }
+
+    // ── The aerial ───────────────────────────────────────────────────────────
+
+    // Two rods off one pod, tapering to a ball, drawn straight onto the body
+    // in its own millimetres. They rise into the 52 mm the cabinet gave up
+    // for them and stop short of the top edge — which is why the ears never
+    // meet the letterbox: there is nothing outside the silhouette to clip.
+    private func aerial(_ size: CGSize) -> some View {
+        Canvas { context, area in
+            let chrome = GraphicsContext.Shading.linearGradient(
+                Gradient(colors: [
+                    Color(hex: 0xE8E5DD), Color(hex: 0x9A958C), Color(hex: 0x4A4640),
+                ]),
+                startPoint: CGPoint(x: 0, y: 0),
+                endPoint: CGPoint(x: 0, y: area.height))
+
+            let base = TVTrim.point(TVTrim.rodBase, in: area)
+
+            for tip in TVTrim.rodTips {
+                let end = TVTrim.point(tip, in: area)
+                let along = CGPoint(x: end.x - base.x, y: end.y - base.y)
+                let length = max(1, sqrt(along.x * along.x + along.y * along.y))
+                // The rod's own perpendicular, so it keeps its thickness
+                // whichever way it leans.
+                let normal = CGPoint(x: -along.y / length, y: along.x / length)
+                let atBase = TVTrim.pt(TVTrim.rodHalfAtBase, in: area)
+                let atTip = TVTrim.pt(TVTrim.rodHalfAtTip, in: area)
+
+                var rod = Path()
+                rod.move(to: CGPoint(x: base.x + normal.x * atBase, y: base.y + normal.y * atBase))
+                rod.addLine(to: CGPoint(x: end.x + normal.x * atTip, y: end.y + normal.y * atTip))
+                rod.addLine(to: CGPoint(x: end.x - normal.x * atTip, y: end.y - normal.y * atTip))
+                rod.addLine(to: CGPoint(x: base.x - normal.x * atBase, y: base.y - normal.y * atBase))
+                rod.closeSubpath()
+                context.fill(rod, with: chrome)
+
+                let ball = TVTrim.pt(TVTrim.rodTipBall, in: area)
+                context.fill(
+                    Path(ellipseIn: CGRect(
+                        x: end.x - ball, y: end.y - ball, width: ball * 2, height: ball * 2)),
+                    with: chrome)
+            }
+
+            // The pod the rods swivel in, straddling the cabinet's top edge
+            // so the aerial looks bolted to the set rather than balanced on it.
+            let pod = CGRect(
+                origin: TVTrim.point(
+                    CGPoint(x: TVTrim.pod.minX, y: TVTrim.pod.minY), in: area),
+                size: CGSize(
+                    width: TVTrim.pt(TVTrim.pod.width, in: area),
+                    height: TVTrim.pt(TVTrim.pod.height, in: area)))
+            let shell = Path(roundedRect: pod, cornerRadius: pod.height * 0.42)
+
+            context.fill(
+                shell,
+                with: .linearGradient(
+                    Gradient(colors: [
+                        Color(hex: 0x4C4640), Color(hex: 0x241F1B), Color(hex: 0x100D0B),
+                    ]),
+                    startPoint: CGPoint(x: pod.minX, y: pod.minY),
+                    endPoint: CGPoint(x: pod.minX, y: pod.maxY)))
+            context.stroke(shell, with: .color(.black.opacity(0.5)), lineWidth: max(0.4, atHair(area)))
+        }
+    }
+
+    private func atHair(_ size: CGSize) -> CGFloat { size.width * 0.0015 }
+
+    // ── The tube ─────────────────────────────────────────────────────────────
+
+    private func tube(_ size: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            // Black behind the picture, a hair wider than it, so no seam of
+            // wood shows through where the plate meets the glass.
+            Rectangle()
+                .fill(Color(hex: 0x07070A))
+                .place(layout.screen.insetBy(dx: -0.006, dy: -0.0075), in: size)
+
+            Screen(engine: engine)
+                .place(layout.screen, in: size)
+
+            surround(size)
+        }
+    }
+
+    // The surround, laid over the picture instead of around it: a dark plate
+    // with a generously rounded hole, the tube's own falloff darkening the
+    // edge of the image, a corner vignette and one diagonal sheen. Nothing
+    // here is the handhelds' ScreenBezel — a television has no script under
+    // the glass and no stripe over it, and the shape of its opening is the
+    // whole point.
+    private func surround(_ size: CGSize) -> some View {
+        let plateCorner = layout.bezelCorner
+        let holeCorner = layout.screen.width * 0.11
+
+        return ZStack(alignment: .topLeading) {
+            TubeFace(
+                plate: layout.bezel, hole: layout.screen,
+                plateCorner: plateCorner, holeCorner: holeCorner
+            )
+            .fill(
+                // Dark at the top and lighter at the chin: the plate is sunk
+                // into the wood, and the lip above it is what shades it.
+                LinearGradient(
+                    colors: [
+                        Plastic.tvBezel.dark, Plastic.tvBezel.base, Plastic.tvBezel.base,
+                        Plastic.tvBezel.light,
+                    ],
+                    startPoint: .top, endPoint: .bottom),
+                style: FillStyle(eoFill: true))
+            .shadow(
+                color: .black.opacity(0.45), radius: TVTrim.pt(2.4, in: size), x: 0,
+                y: TVTrim.pt(1, in: size))
+
+            // The glass sits proud of the plate: dark where the tube curves
+            // away at the opening, and one bright lip along the top where
+            // the room is reflected in the last millimetre of it.
+            TubeFace(
+                plate: .zero, hole: layout.screen,
+                plateCorner: 0, holeCorner: holeCorner, plateOnly: true
+            )
+            .stroke(Color.black.opacity(0.42), lineWidth: TVTrim.pt(2.6, in: size))
+            .blur(radius: TVTrim.pt(2.0, in: size))
+
+            TubeFace(
+                plate: .zero, hole: layout.screen,
+                plateCorner: 0, holeCorner: holeCorner, plateOnly: true
+            )
+            .stroke(Color.white.opacity(0.14), lineWidth: max(0.4, TVTrim.pt(0.7, in: size)))
+            .offset(y: -TVTrim.pt(0.5, in: size))
+
+            // The corners of a tube are always further from the gun than the
+            // middle, and always darker for it.
+            RadialGradient(
+                colors: [.clear, .clear, .black.opacity(0.20)],
+                center: .center, startRadius: 0,
+                endRadius: layout.screen.width * size.width * 0.68
+            )
+            .place(layout.screen, in: size)
+
+            // The one thing a curved front does that a flat one cannot: it
+            // catches the window behind you across its top-left quarter.
+            Ellipse()
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.10), .white.opacity(0.01)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+                .rotationEffect(.degrees(-24))
+                .blur(radius: TVTrim.pt(4, in: size))
+                .frame(
+                    width: layout.screen.width * size.width * 0.78,
+                    height: layout.screen.height * size.height * 0.34)
+                .place(layout.screen, in: size)
+                .offset(
+                    x: -layout.screen.width * size.width * 0.10,
+                    y: -layout.screen.height * size.height * 0.22)
+        }
+    }
+
+    // ── The fascia ───────────────────────────────────────────────────────────
+
+    private func fascia(_ size: CGSize) -> some View {
+        let board = RoundedRectangle(cornerRadius: TVTrim.pt(5, in: size), style: .continuous)
+
+        return ZStack(alignment: .topLeading) {
+            board
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Plastic.tvFascia.light, Plastic.tvFascia.base, Plastic.tvFascia.dark,
+                        ],
+                        startPoint: .top, endPoint: .bottom)
+                )
+                .overlay(
+                    // Set into the wood: the cabinet's shadow falls across
+                    // its top edge, and its bottom lip catches the light.
+                    board.stroke(Color.black.opacity(0.65), lineWidth: TVTrim.pt(2.4, in: size))
+                        .blur(radius: TVTrim.pt(1.2, in: size))
+                        .mask(board.fill())
+                )
+                .overlay(
+                    board.stroke(Color.white.opacity(0.10), lineWidth: max(0.4, atHair(size)))
+                        .offset(y: max(0.4, atHair(size)))
+                        .mask(board.fill())
+                )
+                .place(TVTrim.fascia, in: size)
+
+            wordmark(size)
+
+            caseWell(
+                RoundedRectangle(cornerRadius: TVTrim.pt(3, in: size), style: .continuous),
+                TVTrim.speakerWell, in: size)
+
+            // The handhelds' grill, laid flat and stretched: nine slots
+            // across the board instead of six on a corner's diagonal.
+            SpeakerGrill(plastic: .tvGrill, slots: 9, angle: .zero, span: 0.95)
+                .place(layout.speaker, in: size)
+
+            dial(size)
+            pilot(size)
+        }
+    }
+
+    // The badge. Chrome on a dark board, spaced out the way a nameplate is,
+    // with a black shadow under it so it stands off the fascia.
+    private func wordmark(_ size: CGSize) -> some View {
+        Text("ATOMBOY")
+            .font(.system(size: TVTrim.pt(7, in: size), weight: .semibold))
+            .tracking(TVTrim.pt(1.6, in: size))
+            .foregroundStyle(
+                LinearGradient(
+                    colors: [Plastic.tvChrome.light, Plastic.tvChrome.base, Plastic.tvChrome.dark],
+                    startPoint: .top, endPoint: .bottom)
+            )
+            .shadow(color: .black.opacity(0.75), radius: 0, x: 0, y: max(0.4, atHair(size)))
+            .lineLimit(1)
+            .minimumScaleFactor(0.4)
+            .place(TVTrim.wordmark, in: size)
+    }
+
+    // The channel dial: a ring of marks printed on the board, a knurled knob
+    // sunk in the middle of them, and a pointer left on the eighth channel.
+    // It is the one control on this body, and like every drawn control in
+    // this file it does not move — nobody has turned it since 1983.
+    private func dial(_ size: CGSize) -> some View {
+        let knob = CGSize(
+            width: TVTrim.dialKnob.width * size.width,
+            height: TVTrim.dialKnob.height * size.height)
+
+        return ZStack(alignment: .topLeading) {
+            caseWell(Circle(), TVTrim.dialWell, in: size)
+
+            DialTicks(count: TVTrim.dialChannels)
+                .stroke(
+                    Color(hex: 0xE8DAB8).opacity(0.45),
+                    lineWidth: max(0.4, TVTrim.pt(0.6, in: size))
+                )
+                .place(TVTrim.dialWell, in: size)
+
+            MoldedButton(plastic: .tvKnob)
+                .place(TVTrim.dialKnob, in: size)
+
+            // The knurl: the same marks again, finer and tighter, right on
+            // the knob's rim where a thumb would find them.
+            DialTicks(count: 28, inner: 0.80, outer: 0.98, sweep: 348)
+                .stroke(Color.black.opacity(0.32), lineWidth: max(0.3, TVTrim.pt(0.4, in: size)))
+                .place(TVTrim.dialKnob, in: size)
+
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [Plastic.tvChrome.light, Plastic.tvChrome.base],
+                        startPoint: .top, endPoint: .bottom)
+                )
+                .frame(width: TVTrim.pt(1.8, in: size), height: knob.height * 0.36)
+                .offset(y: -knob.height * 0.19)
+                .rotationEffect(.degrees(TVTrim.dialPointer))
+                .place(TVTrim.dialKnob, in: size)
+        }
+    }
+
+    // The pilot lamp in its chrome collar, under the dial. Lit while the
+    // engine runs, an ember while it is paused, a dead lens once it has
+    // gone — the same three states the handhelds' light has, because it is
+    // the same light.
+    private func pilot(_ size: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [Color(hex: 0x2A2622), Color(hex: 0x0C0A09)],
+                        center: .center, startRadius: 0,
+                        endRadius: TVTrim.ledRing.width * size.width * 0.6)
+                )
+                .overlay(
+                    Circle().stroke(
+                        LinearGradient(
+                            colors: [Plastic.tvChrome.base, Plastic.tvChrome.dark],
+                            startPoint: .top, endPoint: .bottom),
+                        lineWidth: max(0.5, TVTrim.pt(0.9, in: size)))
+                )
+                .place(TVTrim.ledRing, in: size)
+
+            PowerLED(glow: console.glow)
+                .place(layout.led, in: size)
+        }
+    }
+}
+
+extension CGRect {
+    // The same fractions `place` uses, as a rect in points — for the paths
+    // that are drawn across the whole body instead of into a placed frame.
+    fileprivate func scaled(in size: CGSize) -> CGRect {
+        CGRect(
+            x: minX * size.width, y: minY * size.height,
+            width: width * size.width, height: height * size.height)
     }
 }
 
