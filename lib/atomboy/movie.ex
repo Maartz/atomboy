@@ -2,11 +2,15 @@ defmodule Atomboy.Movie do
   @moduledoc """
   A movie: an anchor, and every button pressed since — the machine's memoir.
 
-  The emulation core touches no wall clock and no randomness, so a session is
-  entirely determined by where it started and what was held on each frame.
-  That is the whole artifact: an **anchor** (a starting machine) and a
-  **track** (one byte per frame). Replay is not a recording of the screen; it
-  is the same arithmetic run again, and it lands on the same pixel.
+  The emulation core touches no randomness, so a session is entirely
+  determined by where it started and what was held on each frame. That is
+  the whole artifact: an **anchor** (a starting machine) and a **track**
+  (one byte per frame). Replay is not a recording of the screen; it is the
+  same arithmetic run again, and it lands on the same pixel.
+
+  One thing in the machine would have answered differently tomorrow: an
+  MBC3's real-time clock. So the take carries its own hour too, and it is
+  the third thing the file holds — see `clock/2`.
 
   The file is a versioned term in the snapshot idiom `Atomboy.Save` set —
   `{:atomboy_movie, 1, header, anchor, track}` through
@@ -87,6 +91,7 @@ defmodule Atomboy.Movie do
           rerecords: non_neg_integer(),
           codes: [Atomboy.Codes.poke()],
           created_at: String.t() | nil,
+          epoch: integer() | nil,
           author: String.t()
         }
 
@@ -102,6 +107,7 @@ defmodule Atomboy.Movie do
     rerecords: 0,
     codes: [],
     created_at: nil,
+    epoch: nil,
     author: ""
   }
 
@@ -117,8 +123,9 @@ defmodule Atomboy.Movie do
   `opts` fills the rest of the header: `:codes` (the active GameShark pokes,
   kept in the shape `Atomboy.Codes` parses them into — they poke memory every
   frame, so they are part of the recording's truth), `:author`, `:created_at`
-  (an ISO 8601 string; stamped now when absent) and `:rerecords` for a
-  counter that starts somewhere other than zero.
+  (an ISO 8601 string; stamped now when absent), `:epoch` (the console clock
+  at the anchor — see `clock/2`) and `:rerecords` for a counter that starts
+  somewhere other than zero.
   """
   @spec new(binary(), anchor(), keyword()) :: t()
   def new(rom, anchor, opts \\ []) when is_binary(rom) do
@@ -129,6 +136,7 @@ defmodule Atomboy.Movie do
       rerecords: Keyword.get(opts, :rerecords, 0),
       codes: Keyword.get(opts, :codes, []),
       created_at: Keyword.get(opts, :created_at) || DateTime.to_iso8601(DateTime.utc_now()),
+      epoch: Keyword.get(opts, :epoch),
       author: Keyword.get(opts, :author, "")
     }
 
@@ -171,6 +179,54 @@ defmodule Atomboy.Movie do
   @doc "How many frames the movie holds."
   @spec frames(t()) :: non_neg_integer()
   def frames(%__MODULE__{track: track}), do: byte_size(track)
+
+  # ── The take's own clock ────────────────────────────────────────────────────
+
+  @doc """
+  What time it is on frame `frame` of this take — Unix seconds.
+
+  A cartridge with a clock in it (MBC3's RTC: Pokémon's berries, Crystal's
+  calendar) is the one thing in the machine that would answer differently
+  tomorrow, and a movie that asked the wall what time it was would desync on
+  the second replay. So a take carries its own hour: the header's **epoch**,
+  the console clock as it stood at the anchor, and time thereafter is
+  counted in frames — 70,224 T-cycles of a 4.194304 MHz machine each, in
+  integer arithmetic, which never runs backwards and never depends on how
+  fast the replay is going.
+
+  Because the hour is a function of the frame index alone, re-recording
+  needs no bookkeeping: `truncate/2` cuts the track, the frames that follow
+  are played again from the same anchor, and they are told the same time
+  they were told the first time round. A take's clock belongs to the take,
+  not to the attempt.
+
+  A movie written before this field existed has no epoch. Its `created_at`
+  stands in — the hour it was recorded, to the second the file remembers —
+  and failing even that, the Unix epoch itself: an old take replays with a
+  clock that is at least the same on every machine, which is the property
+  that matters.
+  """
+  @spec clock(t(), non_neg_integer()) :: integer()
+  def clock(%__MODULE__{} = movie, frame) when is_integer(frame) and frame >= 0,
+    do: epoch(movie) + div(frame * 70_224, 4_194_304)
+
+  @doc "The console clock at the anchor — see `clock/2` for what stands in when the file has none."
+  @spec epoch(t()) :: integer()
+  def epoch(%__MODULE__{header: header}) do
+    case Map.get(header, :epoch) do
+      seconds when is_integer(seconds) -> seconds
+      _absent -> created_at_epoch(Map.get(header, :created_at))
+    end
+  end
+
+  defp created_at_epoch(stamp) when is_binary(stamp) do
+    case DateTime.from_iso8601(stamp) do
+      {:ok, datetime, _offset} -> DateTime.to_unix(datetime)
+      _ -> 0
+    end
+  end
+
+  defp created_at_epoch(_absent), do: 0
 
   @doc """
   Cuts the movie back to `frame` frames — frames 0 to `frame - 1` survive,

@@ -968,6 +968,34 @@ final class Engine: ObservableObject {
         try? input?.write(contentsOf: data)
     }
 
+    // ── The console's clock: one op out, persisted per game ──────────────────
+
+    // 'H' carries how far the console is from real time, in signed seconds:
+    // eight bytes, big-endian, behind a padding byte where a value op's key
+    // would stand. A date is years wide in either direction, and no byte was
+    // ever going to carry one.
+    func setClockOffset(_ seconds: Int) {
+        var data = Data([UInt8(ascii: "H"), 0])
+        withUnsafeBytes(of: Int64(seconds).bigEndian) { data.append(contentsOf: $0) }
+        try? input?.write(contentsOf: data)
+    }
+
+    // Kept per game the way the codes are ("codes.<game>"), because a clock
+    // belongs to a save file: Crystal waiting for Monday is Crystal's
+    // business, and the cartridge next door keeps its own hour.
+    static func loadClock(_ game: String) -> Int {
+        UserDefaults.standard.object(forKey: "clock." + game) as? Int ?? 0
+    }
+
+    static func saveClock(_ seconds: Int, game: String) {
+        UserDefaults.standard.set(seconds, forKey: "clock." + game)
+    }
+
+    func sendClock() {
+        guard let game else { return }
+        setClockOffset(Engine.loadClock(game))
+    }
+
     // The contrast dial: 0-100 down the pipe, anything else asks the
     // engine for the preset's own resting point.
     func setDial(_ value: Int) {
@@ -1151,6 +1179,7 @@ final class Engine: ObservableObject {
             setPanel(defaults.object(forKey: "reglages.panneau") as? Int ?? 0)
             setTurboSpeed(defaults.object(forKey: "reglages.turbo") as? Int ?? 0)
             sendActiveCodes()
+            sendClock()
 
             let dial = defaults.object(forKey: "reglages.contraste") as? Int ?? -1
             if dial >= 0 { setDial(dial) }
@@ -2128,6 +2157,87 @@ struct CodesSettings: View {
     }
 }
 
+// The console's own clock, per game — the cartridge's RTC is told it is
+// whatever day the player says it is, and the berries grow accordingly.
+struct ClockSettings: View {
+    @ObservedObject var engine: Engine
+
+    // What the console believes, as a date rather than as an offset: the
+    // offset is what travels down the wire, but nobody thinks in seconds
+    // away from now. The two are the same fact — `date - now`.
+    @State private var date = Date()
+    @State private var real = true
+
+    init(engine: Engine) { self.engine = engine }
+
+    // A take owns the clock while it runs: its hour is derived from its
+    // anchor and its frame count, so nothing the panel does could reach it.
+    private var busy: Bool { engine.movie != .idle }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let game = engine.game {
+                Text(game).font(.headline)
+
+                Toggle("Real time", isOn: $real)
+                    .onChange(of: real) { if real { snapBack() } }
+                    .disabled(busy)
+
+                DatePicker(
+                    "The console believes it is…", selection: $date,
+                    displayedComponents: [.date, .hourAndMinute]
+                )
+                .disabled(real || busy)
+                .onChange(of: date) { commit() }
+
+                HStack {
+                    Button("+1 day") {
+                        real = false
+                        date = date.addingTimeInterval(86_400)
+                        commit()
+                    }
+                    Spacer()
+                }
+                .disabled(busy)
+
+                if busy {
+                    Text("A take is running: time belongs to the recording, which tells the cartridge its own hour on every replay.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Games with a clock in the cartridge — Pokémon's berries, Crystal's calendar — are told this time instead of yours. Kept with this game, like its codes.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Start a game to set its clock.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .onAppear { load() }
+        .onChange(of: engine.game) { load() }
+    }
+
+    private func load() {
+        let offset = engine.game.map(Engine.loadClock) ?? 0
+        real = offset == 0
+        date = Date().addingTimeInterval(TimeInterval(offset))
+    }
+
+    private func commit() {
+        guard let game = engine.game else { return }
+        let offset = Int(date.timeIntervalSinceNow.rounded())
+        Engine.saveClock(offset, game: game)
+        engine.setClockOffset(offset)
+    }
+
+    private func snapBack() {
+        date = Date()
+        commit()
+    }
+}
+
 // Liquid Glass when the system speaks it, frosted glass otherwise.
 struct Glass: ViewModifier {
     func body(content: Content) -> some View {
@@ -2421,6 +2531,8 @@ struct AtomboyApp: App {
                     .tabItem { Label("Audio", systemImage: "speaker.wave.2") }
                 CodesSettings(engine: delegate.engine)
                     .tabItem { Label("GameShark Codes", systemImage: "wand.and.stars") }
+                ClockSettings(engine: delegate.engine)
+                    .tabItem { Label("Clock", systemImage: "clock") }
             }
             .frame(width: 440)
             .background(SettingsChrome())

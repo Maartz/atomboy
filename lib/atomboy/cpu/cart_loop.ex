@@ -496,7 +496,7 @@ defmodule Atomboy.CPU.CartLoop do
   # registers — games write 0 then 1 and read a consistent snapshot.
   defp ram_write(ram, addr, value) when addr < 0x8000 do
     if Map.get(ram, :mbc) == :mbc3 and value == 0x01 do
-      Map.put(ram, :rtc_latch, rtc_now())
+      Map.put(ram, :rtc_latch, rtc_now(ram))
     else
       ram
     end
@@ -505,8 +505,8 @@ defmodule Atomboy.CPU.CartLoop do
   # Cartridge RAM — the one the battery keeps alive, per bank (key
   # addr + bank × 0x10000: bank 0 keeps its bare keys, so .sav files and MBC1
   # games see nothing change). Every write marks it dirty: Atomboy.Save then knows
-  # a .sav is worth writing. The RTC registers ignore writes — the clock follows
-  # the Mac's real time.
+  # a .sav is worth writing. The RTC registers ignore writes — the clock is the
+  # console's to set, not the cartridge's.
   defp ram_write(ram, addr, value) when addr >= 0xA000 and addr < 0xC000 do
     case ram do
       %{cram_enabled: true} ->
@@ -612,10 +612,6 @@ defmodule Atomboy.CPU.CartLoop do
   @spec poke(ram(), 0..0xFFFF, 0..0xFF) :: ram()
   def poke(ram, addr, value), do: ram_write(ram, addr, value)
 
-  # ── The MBC3's real-time clock ──────────────────────────────────────────────
-
-  # Seconds, minutes, hours, days (9 bits) — served from the Mac's own clock:
-  # Pokémon's day/night cycle follows your window.
   defp cpal_write(ram, spec_addr, base, value) do
     spec = Map.get(ram, spec_addr, 0)
     index = spec &&& 0x3F
@@ -628,20 +624,85 @@ defmodule Atomboy.CPU.CartLoop do
     end
   end
 
-  defp rtc_read(ram, reg) do
-    ram |> Map.get(:rtc_latch, rtc_now()) |> Map.get(reg, 0)
+  # ── The MBC3's real-time clock ──────────────────────────────────────────────
+  #
+  # Seconds, minutes, hours, days (9 bits). The clock the cartridge is served
+  # is the console's own, and the console's own is three answers deep: the
+  # second a movie dictates, else real time shifted by the offset the machine
+  # carries, else real time shifted by ATOMBOY_RTC_OFFSET. Pokémon's day and
+  # night therefore follow your window — until you tell the console
+  # otherwise, and until a take takes the clock over.
+
+  @doc """
+  The offset in force, in seconds — what the console's clock reads on top of
+  the machine's own.
+
+  `ATOMBOY_RTC_OFFSET` seeds it for a terminal that has no settings panel;
+  a map that carries `:rtc_offset` has been told otherwise, and wins.
+  """
+  @spec rtc_offset(ram()) :: integer()
+  def rtc_offset(ram) do
+    case Map.get(ram, :rtc_offset) do
+      nil -> env_offset()
+      seconds -> seconds
+    end
   end
 
-  defp rtc_now do
-    # ATOMBOY_RTC_OFFSET (in seconds) shifts the clock that gets served — the tool
-    # for hunting time-dependent bugs, and for time travel when growing berries.
-    offset =
-      case System.get_env("ATOMBOY_RTC_OFFSET") do
-        nil -> 0
-        v -> String.to_integer(v)
+  @doc """
+  Moves the console's clock: `seconds` away from real time, signed — the
+  future to the right, yesterday to the left.
+  """
+  @spec set_rtc_offset(ram(), integer()) :: ram()
+  def set_rtc_offset(ram, seconds) when is_integer(seconds),
+    do: Map.put(ram, :rtc_offset, seconds)
+
+  @doc """
+  The instant the clock would serve if it were read right now — the anchor a
+  movie writes down so that its replays can be told the same time.
+  """
+  @spec rtc_epoch(ram()) :: integer()
+  def rtc_epoch(ram), do: System.os_time(:second) + rtc_offset(ram)
+
+  @doc """
+  Hands the cartridge a time to believe in: from here on the RTC serves
+  `unix` seconds instead of asking the world what o'clock it is.
+
+  This is how a movie keeps its promise. A take's clock is derived from its
+  anchor and its frame counter, so the loop installs the second the frame is
+  about to run at, and the cartridge cannot tell that time has stopped
+  belonging to the room.
+
+  A cartridge without a clock is told nothing: only MBC3 has an RTC, and a
+  machine that cannot read the hour must not carry it around in its memory
+  map — a savestate would remember it and two identical runs would stop
+  looking identical.
+  """
+  @spec rtc_virtual(ram(), integer()) :: ram()
+  def rtc_virtual(%{mbc: :mbc3} = ram, unix) when is_integer(unix),
+    do: Map.put(ram, :rtc_now, unix)
+
+  def rtc_virtual(ram, unix) when is_integer(unix), do: ram
+
+  @doc "Gives the clock back to the world — what the end of a take restores."
+  @spec rtc_live(ram()) :: ram()
+  def rtc_live(ram) do
+    if Map.has_key?(ram, :rtc_now), do: Map.delete(ram, :rtc_now), else: ram
+  end
+
+  defp rtc_read(ram, reg) do
+    ram |> Map.get(:rtc_latch, rtc_now(ram)) |> Map.get(reg, 0)
+  end
+
+  # The five registers, from whichever second the machine is entitled to: the
+  # one a movie dictates when one is running, the world's plus the offset
+  # otherwise.
+  defp rtc_now(ram) do
+    now =
+      case Map.get(ram, :rtc_now) do
+        nil -> System.os_time(:second) + rtc_offset(ram)
+        unix -> unix
       end
 
-    now = System.os_time(:second) + offset
     days = div(now, 86_400)
 
     %{
@@ -651,5 +712,15 @@ defmodule Atomboy.CPU.CartLoop do
       0x0B => rem(days, 256),
       0x0C => rem(days, 512) |> bsr(8) |> band(1)
     }
+  end
+
+  # ATOMBOY_RTC_OFFSET (in seconds) shifts the clock that gets served — the
+  # tool for hunting time-dependent bugs, and for time travel when growing
+  # berries. It is the offset of a machine nobody has told anything else.
+  defp env_offset do
+    case System.get_env("ATOMBOY_RTC_OFFSET") do
+      nil -> 0
+      v -> String.to_integer(v)
+    end
   end
 end

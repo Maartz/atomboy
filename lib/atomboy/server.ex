@@ -74,6 +74,20 @@ defmodule Atomboy.Server do
   and only when the state actually changes. The shell's badge is therefore
   never a guess about what the engine did with a click.
 
+  ## The console's clock
+
+  `<<?H, 0, seconds::64-signed-big>>` sets what the cartridge's real-time
+  clock is served: `seconds` away from the machine's own time, signed —
+  the future to the right, yesterday to the left, zero for real time. Ten
+  bytes, because a date is not a byte: the two-byte record framing is kept
+  (the second byte is padding, as the value ops' key byte would be) and the
+  eight that follow carry the offset. The shell sends it on boot and on
+  every change; a terminal has `ATOMBOY_RTC_OFFSET` instead.
+
+  While a movie records or replays, the take's own hour wins over this
+  one — a recorded run is told the same time on every replay, and the
+  shell greys the control out for the duration.
+
   Everything else is the usual machinery: menu inside the frame, states,
   mixer, link cable (`--listen`/`--link` work in server mode too).
   """
@@ -82,6 +96,7 @@ defmodule Atomboy.Server do
 
   alias Atomboy.Codes
   alias Atomboy.APU
+  alias Atomboy.CPU.CartLoop
   alias Atomboy.Joypad
   alias Atomboy.LCD
   alias Atomboy.Library
@@ -466,6 +481,13 @@ defmodule Atomboy.Server do
       {:codes, string} ->
         drain(%{ctx | ram: Codes.installe(ctx.ram, Codes.analyse(string))})
 
+      # The console's clock: how far from real time it is set, in signed
+      # seconds. It shifts what the cartridge's RTC is served from the next
+      # read on — a game that has already latched keeps its snapshot until
+      # it latches again, which is the hardware's own rule.
+      {:clock, seconds} ->
+        drain(%{ctx | ram: CartLoop.set_rtc_offset(ctx.ram, seconds)})
+
       # The contrast dial: ?G carries 0-100; anything above returns the
       # panel to its resting point. The tables recompile mid-frame.
       {:key, ?G, v} ->
@@ -673,7 +695,7 @@ defmodule Atomboy.Server do
 
   # Switching profile is handing the console to the other player: the
   # battery flushed, the machine reset from boot on the other cartridge —
-  # cable and mixer surviving, they belong to the table, not the game.
+  # cable, mixer and clock surviving, they belong to the table, not the game.
   defp power_cycle(ctx, profile) do
     Save.flush(ctx.ram, ctx.sav)
     lib = Library.set_profile(ctx.lib, profile)
@@ -683,6 +705,7 @@ defmodule Atomboy.Server do
       Screen.boot_ram(ctx.rom, ctx.dmg)
       |> then(&if(link = Map.get(ctx.ram, :link), do: Map.put(&1, :link, link), else: &1))
       |> then(&if(mixer = Map.get(ctx.ram, :mixer), do: Map.put(&1, :mixer, mixer), else: &1))
+      |> then(&Play.carry_clock(&1, ctx.ram))
       |> Save.load(sav)
       |> Codes.installe(Codes.analyse(ctx.reset.codes))
 
@@ -754,6 +777,19 @@ defmodule Atomboy.Server do
         verb = %{?K => :save, ?O => :load, ?D => :delete, ?F => :profile}
         send(parent, {:library, Map.fetch!(verb, op), chunk(f, len)})
         read_loop(parent, f)
+
+      # ?H: the console's clock, as an offset from real time. Eight bytes,
+      # signed and big-endian: a date can be years either side of today, and
+      # a byte of value would only ever have carried a minute.
+      {:ok, <<?H, _pad>>} ->
+        case :file.read(f, 8) do
+          {:ok, <<seconds::64-signed-big>>} ->
+            send(parent, {:clock, seconds})
+            read_loop(parent, f)
+
+          _eof ->
+            send(parent, :stdin_closed)
+        end
 
       # ?M: a movie to replay, by path. The length is two bytes rather than
       # the one a save's name gets — the high half rides where a value byte

@@ -57,6 +57,7 @@ defmodule Atomboy.Play do
 
   alias Atomboy.APU
   alias Atomboy.Codes
+  alias Atomboy.CPU.CartLoop
   alias Atomboy.Joypad
   alias Atomboy.LCD
   alias Atomboy.Library
@@ -550,6 +551,7 @@ defmodule Atomboy.Play do
   def pad(%{movie: {:recording, movie}} = ctx, held) do
     dpad = Input.dpad_lines(held)
     btns = Input.button_lines(held)
+    ctx = movie_clock(ctx, movie, Movie.frames(movie))
     movie = Movie.append_frame(movie, Movie.from_lines(dpad, btns))
 
     {%{ctx | movie: {:recording, movie}}, dpad, btns}
@@ -564,11 +566,27 @@ defmodule Atomboy.Play do
 
       byte ->
         {dpad, btns} = Movie.to_lines(byte)
+        ctx = movie_clock(ctx, movie, cursor)
+
         {%{ctx | movie: {:replaying, movie, cursor + 1}}, dpad, btns}
     end
   end
 
-  def pad(ctx, held), do: {ctx, Input.dpad_lines(held), Input.button_lines(held)}
+  def pad(ctx, held) do
+    {%{ctx | ram: CartLoop.rtc_live(ctx.ram)}, Input.dpad_lines(held), Input.button_lines(held)}
+  end
+
+  # The other half of the seam: the hour the frame is run at. A cartridge
+  # with a clock in it is the one part of the machine that would answer
+  # differently tomorrow, so while a take is running the console is told what
+  # time it is — the take's own time, `epoch + frames`, the same on the
+  # thousandth replay as on the recording. Off a take, the key goes and the
+  # clock is the world's again.
+  #
+  # The frame counted is the movie's, not the session's: a paused frame and a
+  # frame spent in the menu cost the take no time either.
+  defp movie_clock(ctx, movie, frame),
+    do: %{ctx | ram: CartLoop.rtc_virtual(ctx.ram, Movie.clock(movie, frame))}
 
   defp step(ctx) do
     held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
@@ -872,7 +890,9 @@ defmodule Atomboy.Play do
   that the cartridge and the file reproduce the run on any machine. The rest
   of `opts` reaches `Atomboy.Movie.new/3` (`:author`, `:created_at`); the
   active GameShark codes are read off the machine, since they poke it every
-  frame and are part of what is being recorded.
+  frame and are part of what is being recorded — and so is the hour the
+  console believes it is, which the header keeps as its epoch so that every
+  replay is told the same time (`Atomboy.Movie.clock/2`).
 
   Refused while the link cable is plugged: the other console is a source of
   bytes no track can promise to deal again.
@@ -884,7 +904,13 @@ defmodule Atomboy.Play do
     else
       {kind, opts} = Keyword.pop(opts, :anchor, :snapshot)
       codes = Map.get(ctx.ram, :codes, [])
-      movie = Movie.new(ctx.rom, anchor(ctx, kind), Keyword.put_new(opts, :codes, codes))
+
+      opts =
+        opts
+        |> Keyword.put_new(:codes, codes)
+        |> Keyword.put_new(:epoch, CartLoop.rtc_epoch(ctx.ram))
+
+      movie = Movie.new(ctx.rom, anchor(ctx, kind), opts)
 
       %{ctx | movie: {:recording, movie}, take: make_ref(), note: {"● recording", 120}}
     end
@@ -1026,13 +1052,16 @@ defmodule Atomboy.Play do
   # frame, so nothing of the session that opened the movie may survive into
   # it — and the battery it starts on is the one the movie carries, laid in
   # from memory rather than from the player's own `.sav`. The mixer crosses
-  # over: it belongs to the room, not to the cartridge.
+  # over, and so does the console's clock: both belong to the room, not to
+  # the cartridge — and the take's own hour rules over the clock anyway for
+  # as long as it runs.
   defp anchored(ctx, {:snapshot, state, ram, apu}), do: %{ctx | state: state, ram: ram, apu: apu}
 
   defp anchored(ctx, {:boot, sram}) do
     ram =
       Screen.boot_ram(ctx.rom, ctx.dmg)
       |> then(&if(mixer = Map.get(ctx.ram, :mixer), do: Map.put(&1, :mixer, mixer), else: &1))
+      |> then(&carry_clock(&1, ctx.ram))
       |> then(&if(is_binary(sram), do: Save.install(&1, sram), else: &1))
 
     %{
@@ -1042,6 +1071,18 @@ defmodule Atomboy.Play do
         apu: %APU{},
         history: []
     }
+  end
+
+  @doc false
+  # A machine powered on keeps the hour it was set to — but only if it was
+  # set: a console nobody has told anything carries no clock key at all, and
+  # two runs of the same cartridge must stay comparable byte for byte.
+  @spec carry_clock(map(), map()) :: map()
+  def carry_clock(ram, from) do
+    case Map.get(from, :rtc_offset) do
+      nil -> ram
+      offset -> CartLoop.set_rtc_offset(ram, offset)
+    end
   end
 
   defp anchor(ctx, :snapshot), do: {:snapshot, ctx.state, ctx.ram, ctx.apu}
