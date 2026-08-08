@@ -37,7 +37,8 @@ defmodule Mix.Tasks.Atomboy.Native.Esp32 do
   def run(argv) do
     Mix.Task.run("compile")
 
-    {options, rest} = OptionParser.parse!(argv, strict: [frames: :integer, render: :boolean, audio: :boolean])
+    {options, rest} =
+      OptionParser.parse!(argv, strict: [frames: :integer, render: :boolean, audio: :boolean])
 
     path = List.first(rest) || "games/hero.gb"
     frames = options[:frames] || 10
