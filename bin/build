@@ -57,8 +57,9 @@ if $clean; then
 fi
 
 if $app; then
-  # The macOS .app: the SwiftUI shell (rel/macos/Atomboy.swift) up front,
-  # the Burrito binary as the `--serveur` engine behind it. Ad hoc signature —
+  # The macOS .app: the SwiftUI shell (rel/macos/Atomboy.swift plus
+  # rel/macos/Shell.swift, the drawn console body) up front, the Burrito
+  # binary as the `--serveur` engine behind it. Ad hoc signature —
   # mandatory on Apple Silicon, and enough locally.
   echo "── Atomboy.app ──"
   version=$(mix run --no-start -e 'IO.write(Atomboy.MixProject.project()[:version])' 2>/dev/null | tail -1)
@@ -72,7 +73,7 @@ if $app; then
   # would clobber the "Atomboy" shell (learned the hard way). The name is
   # baked into rel/macos/Atomboy.swift too.
   cp burrito_out/atomboy_macos_arm "$content/MacOS/atomboy-moteur"
-  swiftc -O -parse-as-library -target arm64-apple-macos14.0 -o "$content/MacOS/Atomboy" rel/macos/Atomboy.swift 2> /dev/null
+  swiftc -O -parse-as-library -target arm64-apple-macos14.0 -o "$content/MacOS/Atomboy" rel/macos/Atomboy.swift rel/macos/Shell.swift 2> /dev/null
   python3 rel/macos/icon.py "$content/Resources/Atomboy.icns"
   sed "s/VERSION_ATOMBOY/$version/g" rel/macos/Info.plist > "$content/Info.plist"
   xattr -cr /tmp/Atomboy.app

@@ -24,7 +24,8 @@
 // Sound is AVAudioEngine (no more ffplay); the keyboard is relayed.
 //
 // Compiled by swiftc directly (see bin/build --app): no Xcode project,
-// a single file.
+// two files — this one, and rel/macos/Shell.swift, which draws the console
+// body the screen sits in (⌘B).
 
 import SwiftUI
 import AVFoundation
@@ -877,7 +878,12 @@ final class Engine: ObservableObject {
     // the engine recompiles its tables and answers with 'P' — the shader
     // follows without a restart.
     func setPanel(_ index: Int) {
-        try? input?.write(contentsOf: Data([UInt8(ascii: "N"), UInt8(max(0, min(4, index)))]))
+        let preset = max(0, min(4, index))
+        try? input?.write(contentsOf: Data([UInt8(ascii: "N"), UInt8(preset)]))
+        // The plastic follows the glass. Told here as well as on the 'P' that
+        // comes back, because the picker also moves while no engine is alive
+        // to answer.
+        ShellState.shared.follow(panel: preset)
     }
 
     // ── The save library: six ops out, one JSON record back ─────────────────
@@ -1175,6 +1181,7 @@ final class Engine: ObservableObject {
             } else if tag == UInt8(ascii: "P") {
                 guard buffer.count >= 2 else { return }
                 metal?.panel(Int(buffer[1]))
+                ShellState.shared.follow(panel: Int(buffer[1]))
                 buffer.removeSubrange(0..<2)
             } else {
                 // Stream out of sync: drop the byte and catch up.
@@ -1261,13 +1268,14 @@ final class ScreenView: NSView {
         engine?.layer ?? CALayer()
     }
 
-    // The window keeps the panel's aspect ratio: no black bars — and the
-    // keyboard comes back to us as soon as the window exists, with no click
-    // first. Without a title bar, the frame itself is what you grab to move
-    // the window.
+    // The window keeps its aspect ratio: no black bars — and the keyboard
+    // comes back to us as soon as the window exists, with no click first.
+    // Without a title bar, the frame itself is what you grab to move the
+    // window. Which ratio is the shell's business: the panel's 10:9 bare, the
+    // console's silhouette when a body is worn.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.contentAspectRatio = NSSize(width: WIDTH, height: HEIGHT)
+        ShellState.shared.lockAspect(of: window)
         window?.isMovableByWindowBackground = true
         window?.makeFirstResponder(self)
 
@@ -1949,7 +1957,9 @@ struct MainScene: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Screen(engine: engine)
+            // The screen, or the console it lives in — Shell.swift decides,
+            // ⌘B flips it.
+            ShellContent(engine: engine)
                 .ignoresSafeArea()
 
             HUD(engine: engine)
@@ -2051,14 +2061,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.enteredForeground()
     }
 
-    // The scale presets: content sized to the exact multiple, which the
-    // shader's integer scale then fills edge to edge — no letterbox.
+    // The scale presets: the PICTURE sized to the exact multiple, which the
+    // shader's integer scale then fills edge to edge — no letterbox. The
+    // window is found by what it hosts rather than by its ratio, since in
+    // shell mode that ratio belongs to the console; the shell then says how
+    // big a body carries a screen that size.
     func setScale(_ n: Int) {
-        let game = NSApp.windows.first(where: {
-            $0.contentAspectRatio == NSSize(width: WIDTH, height: HEIGHT)
-        })
+        let game = NSApp.windows.first { window in
+            window.contentView.map(ScreenView.hosted(in:)) ?? false
+        }
 
-        game?.setContentSize(NSSize(width: WIDTH * n, height: HEIGHT * n))
+        game?.setContentSize(ShellState.shared.contentSize(forScale: n))
     }
 
     func chooseROM() {
@@ -2139,13 +2152,18 @@ struct AtomboyApp: App {
                     .keyboardShortcut("c")
             }
 
-            // The View menu: the window at an exact multiple of the panel.
+            // The View menu: the window at an exact multiple of the panel,
+            // and the console body it is set into.
             CommandGroup(after: .toolbar) {
                 ForEach(1...5, id: \.self) { n in
                     Button("Scale \(n)×") { delegate.setScale(n) }
                         .keyboardShortcut(
                             KeyEquivalent(Character("\(n)")), modifiers: [.command, .option])
                 }
+
+                Divider()
+
+                ShellToggle()
             }
 
             // The native idiom: the game's actions live in the menu bar too
