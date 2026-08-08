@@ -51,6 +51,32 @@ enum ConsoleBody: String {
     }
 }
 
+// A body's real millimetres, and the only arithmetic anyone does with them.
+// Every table below — the layout and the ornament alike — is written as
+// measurements off the actual object and divided by the case, so the numbers
+// stay checkable against a ruler and the fractions come out for free.
+struct Ruler {
+    let width: Double
+    let height: Double
+
+    init(_ width: Double, _ height: Double) {
+        self.width = width
+        self.height = height
+    }
+
+    func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> CGRect {
+        CGRect(x: x / width, y: y / height, width: w / width, height: h / height)
+    }
+
+    // A length read across the body — a corner radius, a stroke.
+    func across(_ mm: Double) -> CGFloat { CGFloat(mm / width) }
+
+    // Millimetres into points, at whatever size the window gave the body.
+    func pt(_ mm: Double, in size: CGSize) -> CGFloat { size.width * mm / width }
+
+    var aspect: CGFloat { CGFloat(width / height) }
+}
+
 // The geometry of one console. Every rect is a fraction of the body's own
 // size, origin top-left like SwiftUI's: multiply by the drawn size and you
 // have points, whatever the window does.
@@ -82,15 +108,9 @@ struct BodyLayout {
     let speaker: CGRect
     let led: CGRect
 
-    // The DMG-01, measured: 90 × 148 mm of gray plastic. Writing the numbers
-    // in millimetres and dividing by the case keeps them checkable against a
-    // ruler — and makes the fractions consistent for free.
+    // The DMG-01, measured: 90 × 148 mm of gray plastic.
     static let dmg: BodyLayout = {
-        let width = 90.0, height = 148.0
-
-        func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> CGRect {
-            CGRect(x: x / width, y: y / height, width: w / width, height: h / height)
-        }
+        let mm = Ruler(90, 148)
 
         // The visible LCD is 47 mm across, and 10:9 like the 160 × 144 it
         // shows. Deriving the height from the width is what guarantees the
@@ -98,26 +118,78 @@ struct BodyLayout {
         let viewport = 47.0
 
         return BodyLayout(
-            aspect: width / height,
-            corner: 6 / width,
-            cornerBottomRight: 24 / width,
-            bezelCorner: 5 / width,
-            bezel: rect(7, 14, 76, 62),
-            screen: rect((width - viewport) / 2, 27, viewport, viewport * 9 / 10),
-            dpad: rect(11, 88, 24, 24),
-            buttonA: rect(66.25, 89.25, 11.5, 11.5),
-            buttonB: rect(54.75, 96.25, 11.5, 11.5),
-            select: rect(28, 119.7, 13, 4.6),
-            start: rect(41.5, 116.7, 13, 4.6),
-            speaker: rect(58, 118, 20, 20),
-            led: rect(9.4, 45.5, 4.2, 4.2))
+            aspect: mm.aspect,
+            corner: mm.across(6),
+            cornerBottomRight: mm.across(24),
+            bezelCorner: mm.across(5),
+            bezel: mm.rect(7, 14, 76, 62),
+            screen: mm.rect((mm.width - viewport) / 2, 27, viewport, viewport * 9 / 10),
+            dpad: mm.rect(11, 88, 24, 24),
+            buttonA: mm.rect(66.25, 89.25, 11.5, 11.5),
+            buttonB: mm.rect(54.75, 96.25, 11.5, 11.5),
+            select: mm.rect(28, 119.7, 13, 4.6),
+            start: mm.rect(41.5, 116.7, 13, 4.6),
+            speaker: mm.rect(58, 118, 20, 20),
+            led: mm.rect(9.4, 45.5, 4.2, 4.2))
     }()
 
-    // TODO(Task 6): the Pocket's own silhouette — silver, slimmer, smaller.
-    static let pocket = BodyLayout.dmg
+    // The MGB-001, the Pocket: 77.6 × 127.6 mm. Two centimetres shorter than
+    // its parent and a bigger picture on it — the whole point of the model.
+    // Everything below the glass moved down and in: the cross and the pair
+    // sit lower, the pills lie flat instead of on the diagonal, and the
+    // corner grill traded slots for holes.
+    static let pocket: BodyLayout = {
+        let mm = Ruler(77.6, 127.6)
+        let viewport = 48.0
 
-    // TODO(Task 6): the CGB — teal, and its button pair rotated southeast.
-    static let cgb = BodyLayout.dmg
+        return BodyLayout(
+            aspect: mm.aspect,
+            corner: mm.across(7),
+            // The Pocket is the even-tempered one: four corners within a
+            // millimetre and a half of each other, where the DMG has a sweep.
+            cornerBottomRight: mm.across(8.5),
+            bezelCorner: mm.across(3),
+            bezel: mm.rect(6.3, 10.5, 65, 58),
+            screen: mm.rect((mm.width - viewport) / 2, 16.5, viewport, viewport * 9 / 10),
+            dpad: mm.rect(9, 81, 22, 22),
+            buttonA: mm.rect(57.5, 82.5, 10.5, 10.5),
+            buttonB: mm.rect(45.5, 88.5, 10.5, 10.5),
+            select: mm.rect(24.3, 109, 13, 4.4),
+            start: mm.rect(40.3, 109, 13, 4.4),
+            speaker: mm.rect(54, 102, 17, 17),
+            // Above the bezel, not beside it: the Pocket's one light sits out
+            // on the silver, under the switch and clear of it.
+            led: mm.rect(7.2, 6.6, 3.2, 3.2))
+    }()
+
+    // The CGB-001: 75 × 133.5 mm, narrower than a Pocket and taller than
+    // one, with the weight low. The flare below the waist is approximated
+    // where a Path can afford it — two generous bottom radii against two
+    // modest top ones read as the same swelling silhouette.
+    static let cgb: BodyLayout = {
+        let mm = Ruler(75, 133.5)
+        let viewport = 44.0
+
+        return BodyLayout(
+            aspect: mm.aspect,
+            corner: mm.across(7),
+            cornerBottomRight: mm.across(19),
+            bezelCorner: mm.across(3.5),
+            // The asymmetry that dates the machine: four millimetres of black
+            // above the picture and ten below it, because the name has to go
+            // somewhere and the Color put it on the chin.
+            bezel: mm.rect(8, 16.5, 59, 54),
+            screen: mm.rect((mm.width - viewport) / 2, 21, viewport, viewport * 9 / 10),
+            dpad: mm.rect(7, 83, 22, 22),
+            buttonA: mm.rect(55.5, 82, 11, 11),
+            buttonB: mm.rect(44, 91.5, 11, 11),
+            select: mm.rect(21.5, 115, 12.5, 4.2),
+            start: mm.rect(37, 115, 12.5, 4.2),
+            speaker: mm.rect(52, 106, 17, 17),
+            // Inside the black, in the margin left of the glass — the Color
+            // keeps its light on the bezel rather than the plastic.
+            led: mm.rect(10.5, 22, 3.2, 3.2))
+    }()
 
     // TODO(Task 7): the living-room TV — landscape, its own aspect, wood and
     // curved glass. The window ratio already comes from here, so the day this
@@ -375,9 +447,9 @@ struct ConsoleView: View {
     }
 }
 
-// Which case the panel preset put us in. Three of the four are still the
-// DMG on purpose — Tasks 6 and 7 fill them, and until they do a player who
-// picks the Pocket palette gets a working console rather than a hole.
+// Which case the panel preset put us in. The TV is still the DMG on purpose
+// — Task 7 fills it, and until it does a player who picks the CRT palette
+// gets a working console rather than a hole.
 struct ConsoleBodyArt: View {
     let engine: Engine
     let console: ConsoleBody
@@ -385,8 +457,12 @@ struct ConsoleBodyArt: View {
 
     var body: some View {
         switch console {
-        case .dmg, .pocket, .cgb, .tv:
+        case .dmg, .tv:
             DMGBody(engine: engine, layout: layout)
+        case .pocket:
+            PocketBody(engine: engine, layout: layout)
+        case .cgb:
+            CGBBody(engine: engine, layout: layout)
         }
     }
 }
@@ -431,6 +507,26 @@ struct Plastic {
     // The grill is the case with holes in it: the same plastic for the lip
     // that catches the light, and the shadow of the cabinet underneath.
     static let dmgGrill = Plastic(0xE4E0D8, 0x6B6760, 0x403D38)
+
+    // The Pocket's four: cold silver where the DMG was warm gray, and then
+    // black for everything a thumb touches. One case colour, one button
+    // colour — the model's whole idea.
+    static let pocketShell = Plastic(0xE9EAEE, 0xC9CBD2, 0x94969E)
+    static let pocketCross = Plastic(0x4A4A4F, 0x272729, 0x0E0E10)
+    static let pocketFace = Plastic(0x55555C, 0x2C2C31, 0x111114)
+    static let pocketPill = Plastic(0x4E4E55, 0x2A2A2F, 0x101013)
+    static let pocketBezel = Plastic(0x35353A, 0x1F1F23, 0x0A0A0C)
+    static let pocketGrill = Plastic(0xF2F3F6, 0x6E7076, 0x3E4045)
+
+    // The Color, in the teal it is remembered in. The face buttons are cast
+    // from the case here — the Color put its contrast in the cross and the
+    // pills and left the pair to match the shell.
+    static let cgbShell = Plastic(0x4FD9D1, 0x00B5AD, 0x00706A)
+    static let cgbFace = Plastic(0x36C2BA, 0x009189, 0x00443F)
+    static let cgbCross = Plastic(0x4B4B51, 0x252529, 0x0C0C0E)
+    static let cgbPill = Plastic(0x55555C, 0x2E2E33, 0x121215)
+    static let cgbBezel = Plastic(0x2C2C31, 0x141416, 0x050506)
+    static let cgbGrill = Plastic(0x7DE6E0, 0x00837D, 0x004E4A)
 }
 
 // ── The primitives ───────────────────────────────────────────────────────────
@@ -631,13 +727,20 @@ struct DPad: View {
     }
 }
 
-// Six slots on the diagonal, stacked along the corner they live in. The
-// pale capsule under each one is the lip of the moulding catching the light
-// — the cheapest possible inner shadow, and the only one that reads at this
-// size.
+// Six bands on the diagonal, stacked along the corner they live in. The DMG
+// leaves them as long slots; the Pocket and the Color drill the same bands
+// into rows of round holes, which is the only difference between the three
+// grills on the real cases. The pale capsule under each opening is the lip
+// of the moulding catching the light — the cheapest possible inner shadow,
+// and the only one that reads at this size.
 struct SpeakerGrill: View {
+    enum Style {
+        case slots, holes
+    }
+
     let plastic: Plastic
     var slots = 6
+    var style: Style = .slots
 
     var body: some View {
         GeometryReader { geo in
@@ -649,7 +752,7 @@ struct SpeakerGrill: View {
                 ForEach(0..<slots, id: \.self) { i in
                     let k = CGFloat(i) - CGFloat(slots - 1) / 2
                     let drift = k * step * 0.7071
-                    slot(length: s * (0.56 - 0.04 * abs(k) / 2.5), thickness: thickness)
+                    band(length: s * (0.56 - 0.04 * abs(k) / 2.5), thickness: thickness, step: step)
                         .position(
                             x: geo.size.width / 2 + drift,
                             y: geo.size.height / 2 + drift)
@@ -658,16 +761,35 @@ struct SpeakerGrill: View {
         }
     }
 
-    private func slot(length: CGFloat, thickness: CGFloat) -> some View {
+    @ViewBuilder private func band(length: CGFloat, thickness: CGFloat, step: CGFloat) -> some View {
+        switch style {
+        case .slots:
+            opening(Capsule(), lip: thickness * 0.28)
+                .frame(width: length, height: thickness)
+                .rotationEffect(.degrees(-45))
+        case .holes:
+            // The same band, perforated: as many holes as fit at the pitch
+            // the bands themselves are stacked at, so the lattice comes out
+            // square and lands on the diagonal like everything else here.
+            let count = max(1, Int((length / step).rounded()))
+            let d = thickness * 1.5
+            HStack(spacing: step - d) {
+                ForEach(0..<count, id: \.self) { _ in
+                    opening(Circle(), lip: d * 0.16).frame(width: d, height: d)
+                }
+            }
+            .rotationEffect(.degrees(-45))
+        }
+    }
+
+    private func opening<S: Shape>(_ shape: S, lip: CGFloat) -> some View {
         ZStack {
-            Capsule().fill(plastic.light.opacity(0.75)).offset(y: thickness * 0.28)
-            Capsule().fill(
+            shape.fill(plastic.light.opacity(0.75)).offset(y: lip)
+            shape.fill(
                 LinearGradient(
                     colors: [plastic.dark, plastic.base],
                     startPoint: .top, endPoint: .bottom))
         }
-        .frame(width: length, height: thickness)
-        .rotationEffect(.degrees(-45))
     }
 }
 
@@ -794,6 +916,92 @@ struct PowerLED: View {
     }
 }
 
+// The case itself: a moulded slab lit from above, a hairline of white where
+// the light wraps around its edge, and its own shadow underneath so it sits
+// on the black rather than in it. The silhouette is the only thing that
+// changes between bodies, which is why it comes in as a shape.
+func caseShell(_ outline: BodyShape, _ plastic: Plastic, in size: CGSize) -> some View {
+    outline
+        .fill(
+            LinearGradient(
+                colors: [plastic.light, plastic.base, plastic.dark],
+                startPoint: .top, endPoint: .bottom)
+        )
+        .overlay(
+            outline.stroke(Color.white.opacity(0.35), lineWidth: max(0.5, size.width * 0.003))
+                .blur(radius: size.width * 0.002)
+        )
+        .shadow(color: .black.opacity(0.55), radius: size.width * 0.05, x: 0, y: size.width * 0.02)
+}
+
+// The power switch on the top edge, seen head-on: a groove sunk into the
+// case and the nub riding in it. All three handhelds wear one — only its
+// size, and whether the case bothers to label it, changes.
+func caseSwitch(_ groove: CGRect, _ nub: CGRect, _ plastic: Plastic, in size: CGSize)
+    -> some View
+{
+    ZStack(alignment: .topLeading) {
+        Capsule()
+            .fill(
+                LinearGradient(
+                    colors: [plastic.dark, plastic.base],
+                    startPoint: .top, endPoint: .bottom)
+            )
+            .place(groove, in: size)
+
+        Capsule()
+            .fill(
+                LinearGradient(
+                    colors: [plastic.light, plastic.base],
+                    startPoint: .top, endPoint: .bottom)
+            )
+            .overlay(Capsule().stroke(Color.black.opacity(0.2), lineWidth: 0.5))
+            .place(nub, in: size)
+    }
+}
+
+// A depression in the case: darker than the plastic around it, with the
+// light lip along its bottom edge that says the surface went in and not out.
+// Every body has these — the dish the cross rocks in, the trough the face
+// buttons sit along — so they are drawn once and tilted to taste.
+func caseWell<S: Shape>(_ shape: S, _ rect: CGRect, in size: CGSize, tilt: Double = 0)
+    -> some View
+{
+    let hairline = max(0.4, size.width * 0.0018)
+    return shape
+        .fill(
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.16), Color.black.opacity(0.05),
+                    Color.white.opacity(0.10),
+                ],
+                startPoint: .top, endPoint: .bottom)
+        )
+        .overlay(
+            shape.stroke(Color.white.opacity(0.22), lineWidth: hairline)
+                .offset(y: hairline)
+                .mask(shape.fill())
+        )
+        .rotationEffect(.degrees(tilt))
+        .place(rect, in: size)
+}
+
+// A word printed on the case. Pad-printed lettering is never crisp and never
+// black; every body passes its own ink and its own point size, measured off
+// the same ruler as the rect it lands in.
+func casePrint(
+    _ text: String, _ rect: CGRect, in size: CGSize, pt: CGFloat, ink: Color,
+    weight: Font.Weight = .bold, tilt: Double = 0
+) -> some View {
+    Text(text)
+        .font(.system(size: pt, weight: weight))
+        .foregroundStyle(ink)
+        .lineLimit(1)
+        .minimumScaleFactor(0.3)
+        .rotationEffect(.degrees(tilt))
+        .place(rect, in: size)
+}
+
 // ── The DMG ──────────────────────────────────────────────────────────────────
 
 // The ornament: everything printed or moulded on this case that no other
@@ -801,16 +1009,14 @@ struct PowerLED: View {
 // what every body has and what the screen placement needs, and a power
 // switch groove is neither. Same millimetres as BodyLayout.dmg, same ruler.
 private enum DMGTrim {
-    static let width = 90.0
-    static let height = 148.0
+    static let mm = Ruler(90, 148)
 
     static func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> CGRect {
-        CGRect(x: x / width, y: y / height, width: w / width, height: h / height)
+        mm.rect(x, y, w, h)
     }
 
-    // Millimetres into points, at whatever size the window gave the body.
-    static func pt(_ mm: Double, in size: CGSize) -> CGFloat {
-        size.width * mm / width
+    static func pt(_ length: Double, in size: CGSize) -> CGFloat {
+        mm.pt(length, in: size)
     }
 
     static let powerGroove = rect(11, 4.6, 17, 2.8)
@@ -868,20 +1074,7 @@ struct DMGBody: View {
     }
 
     private func shell(_ size: CGSize) -> some View {
-        let outline = silhouette(size)
-        return outline
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Plastic.dmgShell.light, Plastic.dmgShell.base, Plastic.dmgShell.dark,
-                    ],
-                    startPoint: .top, endPoint: .bottom)
-            )
-            .overlay(
-                outline.stroke(Color.white.opacity(0.35), lineWidth: max(0.5, size.width * 0.003))
-                    .blur(radius: size.width * 0.002)
-            )
-            .shadow(color: .black.opacity(0.55), radius: size.width * 0.05, x: 0, y: size.width * 0.02)
+        caseShell(silhouette(size), .dmgShell, in: size)
     }
 
     // Everything the case wears without being a control: the switch on the
@@ -889,22 +1082,7 @@ struct DMGBody: View {
     // beside it — and the name under the bezel where the other one goes.
     private func printing(_ size: CGSize) -> some View {
         ZStack(alignment: .topLeading) {
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [Plastic.dmgShell.dark, Plastic.dmgShell.base],
-                        startPoint: .top, endPoint: .bottom)
-                )
-                .place(DMGTrim.powerGroove, in: size)
-
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [Plastic.dmgShell.light, Plastic.dmgShell.base],
-                        startPoint: .top, endPoint: .bottom)
-                )
-                .overlay(Capsule().stroke(Color.black.opacity(0.2), lineWidth: 0.5))
-                .place(DMGTrim.powerNub, in: size)
+            caseSwitch(DMGTrim.powerGroove, DMGTrim.powerNub, .dmgShell, in: size)
 
             Text("OFF ◂ ▸ ON")
                 .font(.system(size: DMGTrim.pt(1.8, in: size), weight: .semibold))
@@ -967,8 +1145,8 @@ struct DMGBody: View {
 
     private func controls(_ size: CGSize) -> some View {
         ZStack(alignment: .topLeading) {
-            well(Circle(), DMGTrim.dpadWell, size, tilt: 0)
-            well(Capsule(), DMGTrim.faceWell, size, tilt: DMGTrim.faceWellTilt)
+            caseWell(Circle(), DMGTrim.dpadWell, in: size)
+            caseWell(Capsule(), DMGTrim.faceWell, in: size, tilt: DMGTrim.faceWellTilt)
 
             DPad(
                 plastic: .dmgCross,
@@ -1000,45 +1178,286 @@ struct DMGBody: View {
         }
     }
 
-    // A depression in the case: darker than the plastic around it, with the
-    // light lip along its bottom edge that says the surface went in and not
-    // out.
-    private func well<S: Shape>(_ shape: S, _ rect: CGRect, _ size: CGSize, tilt: Double)
-        -> some View
-    {
-        shape
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color.black.opacity(0.16), Color.black.opacity(0.05),
-                        Color.white.opacity(0.10),
-                    ],
-                    startPoint: .top, endPoint: .bottom)
-            )
-            .overlay(
-                shape.stroke(Color.white.opacity(0.22), lineWidth: max(0.4, size.width * 0.0018))
-                    .offset(y: max(0.4, size.width * 0.0018))
-                    .mask(shape.fill())
-            )
-            .rotationEffect(.degrees(tilt))
-            .place(rect, in: size)
-    }
-
+    // The DMG's ink for its own lettering: the burgundy of the face buttons,
+    // thinned, which is what the real pad printing is.
     private func caption(_ text: String, _ rect: CGRect, _ size: CGSize, tilt: Double = 0)
         -> some View
     {
-        Text(text)
-            .font(.system(size: DMGTrim.pt(3.2, in: size), weight: .bold))
-            .foregroundStyle(Color(hex: 0x5A2340).opacity(0.85))
-            .lineLimit(1)
-            .minimumScaleFactor(0.3)
-            .rotationEffect(.degrees(tilt))
-            .place(rect, in: size)
+        casePrint(
+            text, rect, in: size, pt: DMGTrim.pt(3.2, in: size),
+            ink: Color(hex: 0x5A2340).opacity(0.85), tilt: tilt)
     }
 
     private func speaker(_ size: CGSize) -> some View {
         SpeakerGrill(plastic: .dmgGrill)
             .place(layout.speaker, in: size)
+    }
+}
+
+// ── The Pocket ───────────────────────────────────────────────────────────────
+
+// The Pocket's own ornament. There is markedly less of it than on the DMG:
+// the model's whole argument was that the case should get out of the way,
+// so the name moved onto the bezel and the silver was left blank.
+private enum PocketTrim {
+    static let mm = Ruler(77.6, 127.6)
+
+    static func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> CGRect {
+        mm.rect(x, y, w, h)
+    }
+
+    static func pt(_ length: Double, in size: CGSize) -> CGFloat {
+        mm.pt(length, in: size)
+    }
+
+    // Pushed right of the light, which the Pocket keeps in the corner.
+    static let powerGroove = rect(12, 3.4, 13, 2.2)
+    static let powerNub = rect(12.5, 3, 4.6, 3)
+
+    // The Pocket gives each face button its own round recess where the DMG
+    // ran one trough under both — the pair sits shallower and further apart
+    // on this case.
+    static let dpadWell = rect(7, 79, 26, 26)
+    static let wellA = rect(56, 81, 13.5, 13.5)
+    static let wellB = rect(44, 87, 13.5, 13.5)
+
+    static let labelA = rect(59.5, 94, 6, 3.4)
+    static let labelB = rect(47.5, 100, 6, 3.4)
+    static let selectLabel = rect(24.3, 114, 13, 3)
+    static let startLabel = rect(40.3, 114, 13, 3)
+}
+
+// The MGB-001, drawn. Silver case, black everything else, the pills laid
+// flat and centred, and a corner of round holes instead of the DMG's slots.
+struct PocketBody: View {
+    let engine: Engine
+    let layout: BodyLayout
+    @ObservedObject private var console = ConsoleState.shared
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+
+            ZStack(alignment: .topLeading) {
+                shell(size)
+                caseSwitch(PocketTrim.powerGroove, PocketTrim.powerNub, .pocketShell, in: size)
+                glass(size)
+                PowerLED(glow: console.glow).place(layout.led, in: size)
+                controls(size)
+                SpeakerGrill(plastic: .pocketGrill, slots: 5, style: .holes)
+                    .place(layout.speaker, in: size)
+            }
+        }
+    }
+
+    private func shell(_ size: CGSize) -> some View {
+        caseShell(
+            BodyShape(
+                topLeft: layout.corner * size.width,
+                topRight: layout.corner * size.width,
+                bottomRight: layout.cornerBottomRight * size.width,
+                bottomLeft: layout.cornerBottomRight * size.width),
+            .pocketShell, in: size)
+    }
+
+    private func glass(_ size: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            // No stripes: the Pocket dropped the red and blue hairlines and
+            // put its own name under the glass instead.
+            ScreenBezel(
+                plastic: .pocketBezel,
+                corner: layout.bezelCorner * size.width,
+                script: "ATOMBOY pocket"
+            )
+            .place(layout.bezel, in: size)
+
+            Rectangle()
+                .fill(Color(hex: 0x0B0B0D))
+                .place(layout.screen.insetBy(dx: -0.010, dy: -0.007), in: size)
+
+            Screen(engine: engine)
+                .place(layout.screen, in: size)
+        }
+    }
+
+    private func controls(_ size: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            caseWell(Circle(), PocketTrim.dpadWell, in: size)
+            caseWell(Circle(), PocketTrim.wellA, in: size)
+            caseWell(Circle(), PocketTrim.wellB, in: size)
+
+            DPad(
+                plastic: .pocketCross,
+                up: console.up, down: console.down,
+                left: console.left, right: console.right
+            )
+            .place(layout.dpad, in: size)
+
+            MoldedButton(plastic: .pocketFace, pressed: console.a)
+                .place(layout.buttonA, in: size)
+            MoldedButton(plastic: .pocketFace, pressed: console.b)
+                .place(layout.buttonB, in: size)
+
+            caption("A", PocketTrim.labelA, size)
+            caption("B", PocketTrim.labelB, size)
+
+            // Flat, side by side, straddling the centre line: the Pocket
+            // gave up the DMG's diagonal along with its logo.
+            PillButton(plastic: .pocketPill, pressed: console.select)
+                .place(layout.select, in: size)
+            PillButton(plastic: .pocketPill, pressed: console.start)
+                .place(layout.start, in: size)
+
+            caption("SELECT", PocketTrim.selectLabel, size)
+            caption("START", PocketTrim.startLabel, size)
+        }
+    }
+
+    // Dark gray on silver, the way the Pocket prints.
+    private func caption(_ text: String, _ rect: CGRect, _ size: CGSize) -> some View {
+        casePrint(
+            text, rect, in: size, pt: PocketTrim.pt(2.8, in: size),
+            ink: Color(hex: 0x3A3A40).opacity(0.85), weight: .semibold)
+    }
+}
+
+// ── The Color ────────────────────────────────────────────────────────────────
+
+private enum CGBTrim {
+    static let mm = Ruler(75, 133.5)
+
+    static func rect(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> CGRect {
+        mm.rect(x, y, w, h)
+    }
+
+    static func pt(_ length: Double, in size: CGSize) -> CGFloat {
+        mm.pt(length, in: size)
+    }
+
+    static let powerGroove = rect(8.5, 3.6, 12, 2.2)
+    static let powerNub = rect(9, 3.2, 4.4, 3)
+
+    // The infrared window in the top edge: the one thing on this case that
+    // looks at another console. Dark red glass, nearly black until the light
+    // catches it.
+    static let infrared = rect(30, 3.4, 15, 2.8)
+
+    static let dpadWell = rect(5, 81, 26, 26)
+    // The pair is steeper here than on the DMG — very nearly forty degrees,
+    // and the trough under it follows.
+    static let faceWell = rect(40.75, 85.25, 29, 14)
+    static let faceWellTilt = -39.6
+
+    static let labelA = rect(58, 94.5, 6, 3.4)
+    static let labelB = rect(46.5, 104, 6, 3.4)
+    static let selectLabel = rect(21.5, 120, 12.5, 3)
+    static let startLabel = rect(37, 120, 12.5, 3)
+}
+
+// The CGB-001, drawn. Teal case, teal pair, a black cross, and a bezel with
+// its weight in the chin where the name is printed.
+struct CGBBody: View {
+    let engine: Engine
+    let layout: BodyLayout
+    @ObservedObject private var console = ConsoleState.shared
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+
+            ZStack(alignment: .topLeading) {
+                shell(size)
+                caseSwitch(CGBTrim.powerGroove, CGBTrim.powerNub, .cgbShell, in: size)
+                infrared(size)
+                glass(size)
+                PowerLED(glow: console.glow).place(layout.led, in: size)
+                controls(size)
+                SpeakerGrill(plastic: .cgbGrill, slots: 5, style: .holes)
+                    .place(layout.speaker, in: size)
+            }
+        }
+    }
+
+    // Two modest radii at the top and two generous ones at the bottom: as
+    // close as four corners get to the Color's low, swollen waist.
+    private func shell(_ size: CGSize) -> some View {
+        caseShell(
+            BodyShape(
+                topLeft: layout.corner * size.width,
+                topRight: layout.corner * size.width,
+                bottomRight: layout.cornerBottomRight * size.width,
+                bottomLeft: layout.cornerBottomRight * size.width),
+            .cgbShell, in: size)
+    }
+
+    private func infrared(_ size: CGSize) -> some View {
+        RoundedRectangle(cornerRadius: CGBTrim.pt(1.2, in: size), style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [Color(hex: 0x120504), Color(hex: 0x2A0908)],
+                    startPoint: .top, endPoint: .bottom)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: CGBTrim.pt(1.2, in: size), style: .continuous)
+                    .stroke(Color.black.opacity(0.45), lineWidth: max(0.4, size.width * 0.002))
+            )
+            .place(CGBTrim.infrared, in: size)
+    }
+
+    private func glass(_ size: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            ScreenBezel(
+                plastic: .cgbBezel,
+                corner: layout.bezelCorner * size.width,
+                script: "ATOMBOY COLOR"
+            )
+            .place(layout.bezel, in: size)
+
+            Rectangle()
+                .fill(Color(hex: 0x08080A))
+                .place(layout.screen.insetBy(dx: -0.010, dy: -0.007), in: size)
+
+            Screen(engine: engine)
+                .place(layout.screen, in: size)
+        }
+    }
+
+    private func controls(_ size: CGSize) -> some View {
+        ZStack(alignment: .topLeading) {
+            caseWell(Circle(), CGBTrim.dpadWell, in: size)
+            caseWell(Capsule(), CGBTrim.faceWell, in: size, tilt: CGBTrim.faceWellTilt)
+
+            DPad(
+                plastic: .cgbCross,
+                up: console.up, down: console.down,
+                left: console.left, right: console.right
+            )
+            .place(layout.dpad, in: size)
+
+            MoldedButton(plastic: .cgbFace, pressed: console.a)
+                .place(layout.buttonA, in: size)
+            MoldedButton(plastic: .cgbFace, pressed: console.b)
+                .place(layout.buttonB, in: size)
+
+            caption("A", CGBTrim.labelA, size)
+            caption("B", CGBTrim.labelB, size)
+
+            PillButton(plastic: .cgbPill, pressed: console.select)
+                .place(layout.select, in: size)
+            PillButton(plastic: .cgbPill, pressed: console.start)
+                .place(layout.start, in: size)
+
+            caption("SELECT", CGBTrim.selectLabel, size)
+            caption("START", CGBTrim.startLabel, size)
+        }
+    }
+
+    // Ink on teal is the case's own colour taken down to nearly black —
+    // printing on a coloured shell never reads as a separate hue.
+    private func caption(_ text: String, _ rect: CGRect, _ size: CGSize) -> some View {
+        casePrint(
+            text, rect, in: size, pt: CGBTrim.pt(2.8, in: size),
+            ink: Color(hex: 0x0B3B38).opacity(0.85), weight: .semibold)
     }
 }
 
