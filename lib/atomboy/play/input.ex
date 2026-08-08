@@ -38,6 +38,7 @@ defmodule Atomboy.Play.Input do
       Backspace        rewind (hold)
       Tab              turbo (fast forward)
       p                pause
+      .                frame advance — one frame, then the pause closes again
       w                the watch — the game's cells, live (under mix atomboy.live)
       :                the listener — type `x = 20` into the running game
       q, Escape (kitty) or Ctrl-C    quit
@@ -59,6 +60,7 @@ defmodule Atomboy.Play.Input do
           | :load_state
           | :turbo
           | :pause
+          | :frame_advance
           | :watch
           | :listen
           | :rewind
@@ -87,6 +89,7 @@ defmodule Atomboy.Play.Input do
     ?r => :load_state,
     9 => :turbo,
     ?p => :pause,
+    ?. => :frame_advance,
     ?w => :watch,
     ?: => :listen,
     127 => :rewind,
@@ -168,6 +171,9 @@ defmodule Atomboy.Play.Input do
 
   defp decode(<<c, rest::binary>>, events) when c in [?p, ?P],
     do: decode(rest, [{:key, :pause} | events])
+
+  defp decode(<<?., rest::binary>>, events),
+    do: decode(rest, [{:key, :frame_advance} | events])
 
   defp decode(<<c, rest::binary>>, events) when c in [?w, ?W],
     do: decode(rest, [{:key, :watch} | events])
@@ -363,23 +369,34 @@ defmodule Atomboy.Play.Input do
     end
   end
 
+  # The four lines of each row, in the order the register carries them.
+  @dpad [right: 0x01, left: 0x02, up: 0x04, down: 0x08]
+  @buttons [a: 0x01, b: 0x02, select: 0x04, start: 0x08]
+
   @doc """
   The nibble of one line group from the set of held keys — 1 = released,
   just like the register's lines.
   """
   @spec dpad_lines(Enumerable.t(key())) :: 0..15
-  def dpad_lines(held) do
-    lines(held, [{:right, 0x01}, {:left, 0x02}, {:up, 0x04}, {:down, 0x08}])
-  end
+  def dpad_lines(held), do: lines(held, @dpad)
 
   @spec button_lines(Enumerable.t(key())) :: 0..15
-  def button_lines(held) do
-    lines(held, [{:a, 0x01}, {:b, 0x02}, {:select, 0x04}, {:start, 0x08}])
-  end
+  def button_lines(held), do: lines(held, @buttons)
+
+  @doc """
+  The keys behind a pair of line nibbles — the two functions above read
+  backwards. The status line names what the pad is holding, and on a frame
+  whose pad came from a movie rather than from the keyboard, the keyboard
+  is not the one to ask.
+  """
+  @spec keys(0..15, 0..15) :: [key()]
+  def keys(dpad, btns), do: pressed(dpad, @dpad) ++ pressed(btns, @buttons)
 
   defp lines(held, bits) do
     Enum.reduce(bits, 0x0F, fn {key, bit}, lines ->
       if key in held, do: band(lines, bnot(bit)), else: lines
     end)
   end
+
+  defp pressed(lines, bits), do: for({key, bit} <- bits, band(lines, bit) == 0, do: key)
 end

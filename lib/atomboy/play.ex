@@ -61,6 +61,7 @@ defmodule Atomboy.Play do
   alias Atomboy.LCD
   alias Atomboy.Library
   alias Atomboy.Menu
+  alias Atomboy.Movie
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
   alias Atomboy.Play.Turbo
@@ -90,7 +91,10 @@ defmodule Atomboy.Play do
       saved = terminal_setup(tty)
 
       try do
-        play(rom, lib, tty, link, opts)
+        case play(rom, lib, tty, link, opts) do
+          {:error, _message} = error -> error
+          _ctx -> :ok
+        end
       after
         Link.close(link)
         terminal_restore(tty, saved)
@@ -132,8 +136,6 @@ defmodule Atomboy.Play do
   end
 
   defp play(rom, lib, tty, link, opts) do
-    sav = Library.sav_path(lib)
-
     (fn ->
        parent = self()
        input = tty || "/dev/fd/0"
@@ -143,74 +145,15 @@ defmodule Atomboy.Play do
        # redirected trials — unless asked for explicitly (sound: true/false).
        audio = if Keyword.get(opts, :sound, tty != nil), do: Audio.open()
 
-       ram =
-         Screen.boot_ram(rom, Keyword.get(opts, :dmg, false))
-         |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
-         |> Save.load(sav)
-         |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, "")))
-
-       palette = Keyword.get(opts, :palette, :dmg)
-
        try do
+         ctx = context(rom, lib, opts, link)
+
          loop(%{
-           state: Screen.boot_state(rom, Keyword.get(opts, :dmg, false)),
-           rom: rom,
-           ram: ram,
-           sav: sav,
-           hold: %{},
-           down: MapSet.new(),
-           menu: nil,
-           kitty: false,
-           audio: audio,
-           sound?: audio != nil,
-           apu: %APU{},
-           pending: "",
-           frame: 0,
-           max_frames: Keyword.get(opts, :frames, :infinity),
-           hold_frames: Keyword.get(opts, :hold, @default_hold),
-           dump: Keyword.get(opts, :dump),
-           dump_every: Keyword.get(opts, :dump_every),
-           lib: lib,
-           state_slot: 1,
-           palette: palette,
-           lcd:
-             LCD.compile(
-               Keyword.get(opts, :panel, :raw),
-               palette,
-               Map.get(ram, :cgb, false),
-               Keyword.get(opts, :dial)
-             ),
-           dial: Keyword.get(opts, :dial),
-           ghost: nil,
-           gfx: false,
-           gfx_id: 1,
-           dims: terminal_dims(tty),
-           size_ok: Keyword.has_key?(opts, :frames),
-           turbo: false,
-           # How fast "fast forward" is: 2, 4, 8, or `:uncapped` — the
-           # suspended deadline that has always been turbo's speed.
-           turbo_speed: Keyword.get(opts, :turbo_speed, :uncapped),
-           paused: false,
-           history: [],
-           note: nil,
-           # The hot seam: a function the caller may hand in, asked every so
-           # often whether there is a newer cartridge. `Screen.frame` takes the
-           # ROM as an argument, so swapping it is an assignment -- the console
-           # keeps its RAM, its registers and its program counter, and the game
-           # changes underneath itself.
-           reload: Keyword.get(opts, :reload),
-           reload_mark: 0,
-           # The watch: the game's cells by name, handed in by `atomboy.live`
-           # -- a bare `.gb` has bytes, not names. On from the start when the
-           # names are known; `w` toggles it against the help line.
-           watch: Keyword.get(opts, :watch),
-           watching: Keyword.get(opts, :watch) != nil,
-           # The listener's prompt: nil closed, the line typed so far open.
-           prompt: nil,
-           last_frame: nil,
-           fps: 0.0,
-           fps_mark: System.monotonic_time(:microsecond),
-           deadline: System.monotonic_time(:microsecond) + @frame_us
+           ctx
+           | audio: audio,
+             sound?: audio != nil,
+             dims: terminal_dims(tty),
+             deadline: System.monotonic_time(:microsecond) + @frame_us
          })
        after
          Process.unlink(reader)
@@ -219,6 +162,99 @@ defmodule Atomboy.Play do
        end
      end).()
   end
+
+  @doc false
+  # The machine one instant before its first frame: the boot state, the
+  # battery reloaded, the codes installed, and every knob the options carry.
+  # `play/5` hangs the terminal and the audio port off what comes back; the
+  # movie tests take it bare and drive `drive/1` a frame at a time, which is
+  # the only way the seam a movie lives on can be tested as the loop runs it
+  # rather than as a copy of it.
+  @spec context(binary(), struct(), keyword(), term()) :: map()
+  def context(rom, lib, opts \\ [], link \\ nil) do
+    sav = Library.sav_path(lib)
+    dmg? = Keyword.get(opts, :dmg, false)
+    palette = Keyword.get(opts, :palette, :dmg)
+
+    ram =
+      Screen.boot_ram(rom, dmg?)
+      |> then(&if(link, do: Map.put(&1, :link, link), else: &1))
+      |> Save.load(sav)
+      |> Codes.installe(Codes.analyse(Keyword.get(opts, :codes, "")))
+
+    %{
+      state: Screen.boot_state(rom, dmg?),
+      rom: rom,
+      ram: ram,
+      sav: sav,
+      hold: %{},
+      down: MapSet.new(),
+      menu: nil,
+      kitty: false,
+      audio: nil,
+      sound?: false,
+      apu: %APU{},
+      pending: "",
+      frame: 0,
+      max_frames: Keyword.get(opts, :frames, :infinity),
+      hold_frames: Keyword.get(opts, :hold, @default_hold),
+      dump: Keyword.get(opts, :dump),
+      dump_every: Keyword.get(opts, :dump_every),
+      lib: lib,
+      state_slot: 1,
+      palette: palette,
+      lcd:
+        LCD.compile(
+          Keyword.get(opts, :panel, :raw),
+          palette,
+          Map.get(ram, :cgb, false),
+          Keyword.get(opts, :dial)
+        ),
+      dial: Keyword.get(opts, :dial),
+      ghost: nil,
+      gfx: false,
+      gfx_id: 1,
+      dims: nil,
+      size_ok: Keyword.has_key?(opts, :frames),
+      turbo: false,
+      # How fast "fast forward" is: 2, 4, 8, or `:uncapped` — the
+      # suspended deadline that has always been turbo's speed.
+      turbo_speed: Keyword.get(opts, :turbo_speed, :uncapped),
+      paused: false,
+      # The one frame a paused machine owes the `.` key.
+      advance: false,
+      # The movie: nothing, a take being written, or a take being read back
+      # with the frame it has reached. Consulted at one seam per frame.
+      movie: nil,
+      history: [],
+      note: nil,
+      # The hot seam: a function the caller may hand in, asked every so
+      # often whether there is a newer cartridge. `Screen.frame` takes the
+      # ROM as an argument, so swapping it is an assignment -- the console
+      # keeps its RAM, its registers and its program counter, and the game
+      # changes underneath itself.
+      reload: Keyword.get(opts, :reload),
+      reload_mark: 0,
+      # The watch: the game's cells by name, handed in by `atomboy.live`
+      # -- a bare `.gb` has bytes, not names. On from the start when the
+      # names are known; `w` toggles it against the help line.
+      watch: Keyword.get(opts, :watch),
+      watching: Keyword.get(opts, :watch) != nil,
+      # The listener's prompt: nil closed, the line typed so far open.
+      prompt: nil,
+      last_frame: nil,
+      fps: 0.0,
+      fps_mark: System.monotonic_time(:microsecond),
+      deadline: System.monotonic_time(:microsecond) + @frame_us
+    }
+  end
+
+  @doc false
+  # The frame loop itself, entered on a context and handed back when its
+  # frame budget runs out. `run/2` builds the terminal around it; a test
+  # raises `max_frames` by one and gets exactly one frame of the real thing.
+  @spec drive(map()) :: map() | {:error, String.t()}
+  def drive(ctx), do: loop(ctx)
 
   # The size of the terminal, on the named pty (`stty -f … -a` — "66 rows;
   # 269 columns;" on mac, "rows 66; columns 269" elsewhere).
@@ -337,6 +373,11 @@ defmodule Atomboy.Play do
         Process.sleep(50)
         loop(%{ctx | deadline: System.monotonic_time(:microsecond) + @frame_us})
 
+      ctx.paused and ctx.advance ->
+        # The one frame `.` bought: the machine wakes, runs it whole — the
+        # movie seam included — and finds the pause still closed around it.
+        step(%{ctx | advance: false})
+
       ctx.paused ->
         # Paused, the machine sleeps — the screen stays, the keyboard watches.
         ctx = if ctx.last_frame, do: draw(ctx, ctx.last_frame, ctx.ram, []), else: ctx
@@ -391,9 +432,47 @@ defmodule Atomboy.Play do
 
   defp remember(ctx), do: ctx
 
+  # ── The movie's one seam ────────────────────────────────────────────────────
+  #
+  # The pad the machine will read this frame, and the single place a movie
+  # touches the loop. It sits between the keys the events have settled and
+  # the `Joypad.set/3` that lays them on the lines, because this is exactly
+  # the pair of nibbles the frame is about to be run on: recording copies
+  # it, replay dictates it, and everything downstream — CPU, PPU, APU,
+  # battery — cannot tell a replayed frame from a played one. That
+  # indistinguishability is the property the whole sub-project rests on, so
+  # there is one seam and no second.
+  #
+  # Only `step/1` passes through here, so a paused frame, a frame spent in
+  # the menu and a frame of rewind neither record nor consume the track: a
+  # movie counts frames of *machine*, not frames of wall clock.
+  defp pad(%{movie: {:recording, movie}} = ctx, held) do
+    dpad = Input.dpad_lines(held)
+    btns = Input.button_lines(held)
+    movie = Movie.append_frame(movie, Movie.from_lines(dpad, btns))
+
+    {%{ctx | movie: {:recording, movie}}, dpad, btns}
+  end
+
+  defp pad(%{movie: {:replaying, movie, cursor}} = ctx, held) do
+    case Movie.at(movie.track, cursor) do
+      nil ->
+        # The track has run out of future. The pad goes back to the player
+        # on this very frame — a movie ends, it does not drop one.
+        pad(%{ctx | movie: nil, note: {"movie ended — controls are yours", 120}}, held)
+
+      byte ->
+        {dpad, btns} = Movie.to_lines(byte)
+        {%{ctx | movie: {:replaying, movie, cursor + 1}}, dpad, btns}
+    end
+  end
+
+  defp pad(ctx, held), do: {ctx, Input.dpad_lines(held), Input.button_lines(held)}
+
   defp step(ctx) do
     held = Enum.uniq(MapSet.to_list(ctx.down) ++ Map.keys(ctx.hold))
-    ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
+    {ctx, dpad, btns} = pad(ctx, held)
+    ram = Joypad.set(ctx.ram, dpad, btns)
     ram = Codes.applique(ram)
 
     # In turbo, one frame per speed step is displayed — rendering is the
@@ -415,7 +494,7 @@ defmodule Atomboy.Play do
     # without pushing anything.
     {ram, apu, audio} = sound(ram, ctx.apu, ctx.audio)
 
-    ctx = if render?, do: draw(ctx, pixels, ram, held), else: ctx
+    ctx = if render?, do: draw(ctx, pixels, ram, Input.keys(dpad, btns)), else: ctx
 
     # Pacing by absolute deadline: every excess of sleep is recovered on the
     # next frame, so the long-term rate is exactly 59.7275 Hz — the
@@ -605,9 +684,9 @@ defmodule Atomboy.Play do
   # releases to give toggles, while press and release engage turbo while
   # held. `Turbo.asked/3` tells them apart — and refuses the cable.
   defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press, :release] do
-    case Turbo.asked(tag, ctx.turbo, Map.has_key?(ctx.ram, :link)) do
+    case Turbo.asked(tag, ctx.turbo, linked?(ctx)) do
       :none -> ctx
-      :refused -> %{ctx | note: {"turbo unavailable: link cable plugged in", 120}}
+      :refused -> refused(ctx, "turbo")
       :on -> turbo_set(ctx, true)
       :off -> turbo_set(ctx, false)
     end
@@ -615,6 +694,14 @@ defmodule Atomboy.Play do
 
   defp apply_event({tag, :pause}, ctx) when tag in [:key, :press],
     do: %{ctx | paused: not ctx.paused}
+
+  # The first TAS verb: while paused, `.` buys exactly one frame — the
+  # machine, the panel, the sound and the movie all move by one and stop
+  # again. A running machine has nothing to buy, so it ignores the key.
+  defp apply_event({tag, :frame_advance}, %{paused: true} = ctx) when tag in [:key, :press],
+    do: %{ctx | advance: true}
+
+  defp apply_event({_tag, :frame_advance}, ctx), do: ctx
 
   defp apply_event({tag, :watch}, %{watch: nil} = ctx) when tag in [:key, :press],
     do: %{ctx | note: {"no cells to watch — run mix atomboy.live", 180}}
@@ -681,6 +768,95 @@ defmodule Atomboy.Play do
     %{ctx | turbo: turbo, audio: audio, deadline: System.monotonic_time(:microsecond) + @frame_us}
   end
 
+  # ── The movie ───────────────────────────────────────────────────────────────
+
+  @doc """
+  Starts recording, from this frame on.
+
+  `opts[:anchor]` says where the take begins. `:snapshot`, the default,
+  freezes the machine as it stands into the movie — the very term a saved
+  state is, so a movie and a savestate remain interchangeable. `:boot`
+  claims power-on instead and embeds the battery as it stands on disk, so
+  that the cartridge and the file reproduce the run on any machine. The rest
+  of `opts` reaches `Atomboy.Movie.new/3` (`:author`, `:created_at`); the
+  active GameShark codes are read off the machine, since they poke it every
+  frame and are part of what is being recorded.
+
+  Refused while the link cable is plugged: the other console is a source of
+  bytes no track can promise to deal again.
+  """
+  @spec start_recording(map(), keyword()) :: map()
+  def start_recording(ctx, opts \\ []) do
+    if linked?(ctx) do
+      refused(ctx, "recording")
+    else
+      {kind, opts} = Keyword.pop(opts, :anchor, :snapshot)
+      codes = Map.get(ctx.ram, :codes, [])
+      movie = Movie.new(ctx.rom, anchor(ctx, kind), Keyword.put_new(opts, :codes, codes))
+
+      %{ctx | movie: {:recording, movie}, note: {"● recording", 120}}
+    end
+  end
+
+  @doc """
+  Hands the pad over to `movie`, from its first frame.
+
+  The cartridge is checked before a single frame runs — a movie replayed
+  against another dump desynchronises within seconds and blames the
+  emulator — and a snapshot anchor is installed on the spot. A boot anchor
+  asks instead for a machine already at power-on, which is what the caller
+  who opened the movie before starting the console is holding.
+
+  Refused while the link cable is plugged, for the reason recording is.
+  """
+  @spec start_replay(map(), Movie.t()) :: map()
+  def start_replay(ctx, %Movie{} = movie) do
+    cond do
+      linked?(ctx) ->
+        refused(ctx, "replay")
+
+      Movie.verify(movie, ctx.rom) != :ok ->
+        %{ctx | note: {"this movie was recorded on another cartridge", 180}}
+
+      true ->
+        %{anchored(ctx, movie.anchor) | movie: {:replaying, movie, 0}}
+    end
+  end
+
+  @doc """
+  Puts the pad back in the player's hands and hands back what was running —
+  a recording for the caller to write, a replay to forget, or `nil`.
+  """
+  @spec stop_movie(map()) :: {Movie.t() | nil, map()}
+  def stop_movie(%{movie: {:recording, movie}} = ctx),
+    do: {movie, %{ctx | movie: nil, note: {"● stopped — #{Movie.frames(movie)} frames", 120}}}
+
+  def stop_movie(%{movie: {:replaying, movie, _cursor}} = ctx),
+    do: {movie, %{ctx | movie: nil, note: {"replay stopped", 120}}}
+
+  def stop_movie(ctx), do: {nil, ctx}
+
+  # A snapshot anchor is the same three values a saved state carries, and
+  # travels the same way. The battery of a boot anchor belongs to the reset
+  # that powers the machine on, which happens before a context exists.
+  defp anchored(ctx, {:snapshot, state, ram, apu}), do: %{ctx | state: state, ram: ram, apu: apu}
+  defp anchored(ctx, {:boot, _sram}), do: ctx
+
+  defp anchor(ctx, :snapshot), do: {:snapshot, ctx.state, ctx.ram, ctx.apu}
+
+  defp anchor(ctx, :boot) do
+    case File.read(ctx.sav) do
+      {:ok, sram} -> {:boot, sram}
+      {:error, _reason} -> {:boot, :none}
+    end
+  end
+
+  # The cable is the one nondeterministic input this emulator has: what a
+  # movie cannot promise to deal again, it refuses to record.
+  defp linked?(ctx), do: Map.has_key?(ctx.ram, :link)
+
+  defp refused(ctx, what), do: %{ctx | note: {"#{what} unavailable: link cable plugged in", 120}}
+
   # The actions chosen in the menu take the same paths as the direct
   # shortcuts — the menu is only another way of pressing a key.
   defp menu_action(:save_state, ctx), do: apply_event({:key, :save_state}, ctx)
@@ -715,9 +891,12 @@ defmodule Atomboy.Play do
   # on no terminal output setting at all.
   defp crlf(text), do: :binary.replace(text, "\n", "\r\n", [:global])
 
+  # The battery is written and the last frame dumped; the context comes back
+  # so that whoever drove the loop can see where it stopped.
   defp finish(ctx) do
     Save.flush(ctx.ram, ctx.sav)
     dump(ctx)
+    ctx
   end
 
   defp dump(%{dump: path, last_frame: pixels}) when is_binary(path) and is_binary(pixels) do
@@ -764,7 +943,7 @@ defmodule Atomboy.Play do
           " ⌚ " <> watch_line(ctx.watch, ram) <> "   "
 
         true ->
-          " ✚ arrows · x A · c B · ⏎ Start · ␣ Select · s/r state · ⇥ turbo · p pause · w watch · q quit   "
+          " ✚ arrows · x A · c B · ⏎ Start · ␣ Select · s/r state · ⇥ turbo · p pause · . step · w watch · q quit   "
       end
 
     [
@@ -774,6 +953,7 @@ defmodule Atomboy.Play do
       if(ctx.audio, do: " · ♪", else: ""),
       if(Map.has_key?(ram, :link), do: " · ⇄", else: ""),
       if(ctx.turbo, do: " · »»" <> turbo_mark(ctx.turbo_speed), else: ""),
+      movie_mark(ctx.movie),
       if(ctx.paused, do: " · ⏸ pause", else: ""),
       note,
       keys,
@@ -785,6 +965,12 @@ defmodule Atomboy.Play do
   # just says it is going.
   defp turbo_mark(:uncapped), do: ""
   defp turbo_mark(speed), do: "#{speed}×"
+
+  # A recording says how long it has grown; a replay says how far along it
+  # is, because the only thing a viewer wants to know is how much is left.
+  defp movie_mark({:recording, movie}), do: " · ●#{Movie.frames(movie)}"
+  defp movie_mark({:replaying, movie, cursor}), do: " · ▶#{cursor}/#{Movie.frames(movie)}"
+  defp movie_mark(nil), do: ""
 
   @doc """
   The watch's text: every named cell and the byte it holds, right now.
