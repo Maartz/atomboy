@@ -1306,6 +1306,12 @@ final class ScreenView: NSView {
     override func keyUp(with event: NSEvent) {
         if engine?.handleKey(event, pressed: false) != true { super.keyUp(with: event) }
     }
+
+    // Does this window show the game? Only those windows play the
+    // hide-the-traffic-lights game; every other window keeps its chrome.
+    static func hosted(in view: NSView) -> Bool {
+        view is ScreenView || view.subviews.contains { hosted(in: $0) }
+    }
 }
 
 struct Screen: NSViewRepresentable {
@@ -1360,6 +1366,51 @@ struct HUD: View {
 }
 
 // ── Settings (⌘,): the macOS convention, persisted ───────────────────────────
+
+// An invisible passenger in the Settings window, there to insist on ordinary
+// chrome: a titled, closable frame with a close button that is actually
+// visible, and Esc as a second way out next to ⌘W. The game window may hide
+// its traffic lights; this window never does.
+final class SettingsChromeView: NSView {
+    private var escape: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        guard let window else {
+            releaseEscape()
+            return
+        }
+
+        window.styleMask.insert([.titled, .closable])
+        window.titleVisibility = .visible
+
+        if let close = window.standardWindowButton(.closeButton) {
+            close.isHidden = false
+            close.alphaValue = 1
+        }
+
+        guard escape == nil else { return }
+
+        escape = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak window] event in
+            guard event.keyCode == 53, event.window === window else { return event }
+            window?.performClose(nil)
+            return nil
+        }
+    }
+
+    private func releaseEscape() {
+        if let escape { NSEvent.removeMonitor(escape) }
+        escape = nil
+    }
+
+    deinit { releaseEscape() }
+}
+
+struct SettingsChrome: NSViewRepresentable {
+    func makeNSView(context: Context) -> SettingsChromeView { SettingsChromeView() }
+    func updateNSView(_ view: SettingsChromeView, context: Context) {}
+}
 
 struct GeneralSettings: View {
     // Legacy French UserDefaults key — kept for data compatibility.
@@ -1941,8 +1992,15 @@ struct MainScene: View {
 
     // The traffic lights follow the HUD's rule: visible on hover, wiped
     // during play — they used to bite into the battle UI.
+    //
+    // Only the game windows take part. This used to sweep every window the
+    // app owns, so the Settings window lost its close button the moment the
+    // pointer left the screen — and it has no hover of its own to earn it
+    // back.
     private func trafficLights(visible: Bool) {
         for window in NSApp.windows {
+            guard let content = window.contentView, ScreenView.hosted(in: content) else { continue }
+
             for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
                 window.standardWindowButton(button)?.animator().alphaValue = visible ? 1 : 0
             }
@@ -2138,6 +2196,7 @@ struct AtomboyApp: App {
                     .tabItem { Label("GameShark Codes", systemImage: "wand.and.stars") }
             }
             .frame(width: 440)
+            .background(SettingsChrome())
         }
     }
 }
