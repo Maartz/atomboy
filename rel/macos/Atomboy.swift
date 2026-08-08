@@ -779,6 +779,10 @@ final class Engine: ObservableObject {
     func button(_ key: Character, pressed: Bool) {
         let op: UInt8 = pressed ? UInt8(ascii: "+") : UInt8(ascii: "-")
         try? input?.write(contentsOf: Data([op, UInt8(key.asciiValue ?? 0)]))
+        // Every gamepad edge passes through here, including the releases a
+        // disconnect fakes — so the drawn console cannot be left holding a
+        // button no hand is on.
+        ConsoleState.shared.apply(key, pressed: pressed)
     }
 
     // ── The gamepad: GameController, edges only ──────────────────────────────
@@ -979,12 +983,14 @@ final class Engine: ObservableObject {
         guard wants, !isIdle, !backgroundPaused else { return }
         press("P")
         backgroundPaused = true
+        ConsoleState.shared.pause(true)
     }
 
     func enteredForeground() {
         guard backgroundPaused else { return }
         press("P")
         backgroundPaused = false
+        ConsoleState.shared.pause(false)
     }
 
     enum LinkMode {
@@ -1041,6 +1047,9 @@ final class Engine: ObservableObject {
 
         p.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
+                // The battery light goes out with the engine, whatever
+                // happens next.
+                ConsoleState.shared.power(false)
                 // A cable that never connected (the engine's two-minute
                 // accept timeout, a refused join) is not a reason to lose
                 // the game: relaunch it plain instead of quitting.
@@ -1058,6 +1067,11 @@ final class Engine: ObservableObject {
         game = rom.deletingPathExtension().lastPathComponent
         noteRecent(rom)
         try? p.run()
+
+        // Power on: the drawn console's LED follows the process, and no
+        // button survives the boot.
+        ConsoleState.shared.power(p.isRunning)
+        ConsoleState.shared.releaseAll()
 
         // The persisted settings catch up with the freshly born engine.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -1130,6 +1144,8 @@ final class Engine: ObservableObject {
         try? input?.close()
         process?.terminate()
         process = nil
+        ConsoleState.shared.power(false)
+        ConsoleState.shared.releaseAll()
     }
 
     // ── The cable: plugged at boot, like the real one ────────────────────────
@@ -1243,17 +1259,19 @@ final class Engine: ObservableObject {
 
     // ── The keyboard, relayed ────────────────────────────────────────────────
 
-    func handleKey(_ event: NSEvent, pressed: Bool) -> Bool {
-        guard let key = Engine.key(event) else { return false }
-        let op: UInt8 = pressed ? UInt8(ascii: "+") : UInt8(ascii: "-")
-        try? input?.write(contentsOf: Data([op, key]))
-        return true
-    }
-
     // The bindings live in Keybind — the Controls tab rewrites them, this
     // simply asks. Esc is handled by the view before it ever gets here.
-    private static func key(_ event: NSEvent) -> UInt8? {
-        Keybind.letter(for: event.keyCode).flatMap(\.asciiValue)
+    func handleKey(_ event: NSEvent, pressed: Bool) -> Bool {
+        guard let key = Keybind.letter(for: event.keyCode) else { return false }
+        let op: UInt8 = pressed ? UInt8(ascii: "+") : UInt8(ascii: "-")
+        try? input?.write(contentsOf: Data([op, UInt8(key.asciiValue ?? 0)]))
+
+        // The drawn console feels what the engine feels. Reading the letter
+        // rather than the key code is what makes a remapped key still move
+        // the right piece of plastic.
+        ConsoleState.shared.apply(key, pressed: pressed)
+        if pressed, key == "P" { ConsoleState.shared.togglePause() }
+        return true
     }
 }
 
