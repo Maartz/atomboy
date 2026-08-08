@@ -63,6 +63,7 @@ defmodule Atomboy.Play do
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
+  alias Atomboy.Play.Turbo
   alias Atomboy.Link
   alias Atomboy.PPU
   alias Atomboy.Save
@@ -186,6 +187,9 @@ defmodule Atomboy.Play do
            dims: terminal_dims(tty),
            size_ok: Keyword.has_key?(opts, :frames),
            turbo: false,
+           # How fast "fast forward" is: 2, 4, 8, or `:uncapped` — the
+           # suspended deadline that has always been turbo's speed.
+           turbo_speed: Keyword.get(opts, :turbo_speed, :uncapped),
            paused: false,
            history: [],
            note: nil,
@@ -392,8 +396,9 @@ defmodule Atomboy.Play do
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
     ram = Codes.applique(ram)
 
-    # In turbo, one frame in four is displayed — rendering is the cost.
-    render? = not ctx.turbo or rem(ctx.frame, 4) == 0
+    # In turbo, one frame per speed step is displayed — rendering is the
+    # cost — and one in four when the deadline is suspended.
+    render? = Turbo.render?(ctx.frame, ctx.turbo, ctx.turbo_speed)
 
     # An unknown opcode kills the game, not the progress: the cartridge's
     # battery is written before letting the crash report fly.
@@ -418,15 +423,19 @@ defmodule Atomboy.Play do
     # at a true 32,768 Hz. Relative pacing drifts by ~0.7% and starves the
     # audio buffer within half a minute. After an outright stall (> 100 ms),
     # the deadline realigns: no catch-up sprint.
-    # Turbo suspends the deadline — emulation runs as fast as the BEAM can.
+    # Uncapped turbo suspends the deadline — emulation runs as fast as the
+    # BEAM can. A capped turbo keeps the same pacing, only shorter: the
+    # frame is owed after @frame_us divided by the multiplier.
     deadline =
-      if ctx.turbo do
-        ctx.deadline
-      else
-        now = System.monotonic_time(:microsecond)
-        deadline = max(ctx.deadline, now - 100_000)
-        if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
-        deadline + @frame_us
+      case Turbo.frame_us(ctx.turbo, ctx.turbo_speed) do
+        :suspended ->
+          ctx.deadline
+
+        frame_us ->
+          now = System.monotonic_time(:microsecond)
+          deadline = max(ctx.deadline, now - 100_000)
+          if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+          deadline + frame_us
       end
 
     hold = for {key, left} <- ctx.hold, left > 1, into: %{}, do: {key, left - 1}
@@ -592,11 +601,15 @@ defmodule Atomboy.Play do
   # out — clean buffer, no inherited starvation.
   # The cable demands the tempo: two consoles in turbo drift apart and the
   # serial protocol tears — so turbo is unavailable while plugged in.
-  defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press] do
-    if Map.has_key?(ctx.ram, :link) do
-      %{ctx | note: {"turbo unavailable: link cable plugged in", 120}}
-    else
-      turbo_toggle(ctx)
+  # Two grammars, one switch: the bare keystroke of a terminal with no
+  # releases to give toggles, while press and release engage turbo while
+  # held. `Turbo.asked/3` tells them apart — and refuses the cable.
+  defp apply_event({tag, :turbo}, ctx) when tag in [:key, :press, :release] do
+    case Turbo.asked(tag, ctx.turbo, Map.has_key?(ctx.ram, :link)) do
+      :none -> ctx
+      :refused -> %{ctx | note: {"turbo unavailable: link cable plugged in", 120}}
+      :on -> turbo_set(ctx, true)
+      :off -> turbo_set(ctx, false)
     end
   end
 
@@ -656,9 +669,7 @@ defmodule Atomboy.Play do
     end
   end
 
-  defp turbo_toggle(ctx) do
-    turbo = not ctx.turbo
-
+  defp turbo_set(ctx, turbo) do
     audio =
       if turbo do
         Audio.close(ctx.audio)
@@ -762,13 +773,18 @@ defmodule Atomboy.Play do
       :io_lib.format(~c"~5.1f fps · bank ~2..0B", [ctx.fps, bank]),
       if(ctx.audio, do: " · ♪", else: ""),
       if(Map.has_key?(ram, :link), do: " · ⇄", else: ""),
-      if(ctx.turbo, do: " · »»", else: ""),
+      if(ctx.turbo, do: " · »»" <> turbo_mark(ctx.turbo_speed), else: ""),
       if(ctx.paused, do: " · ⏸ pause", else: ""),
       note,
       keys,
       "\e[K"
     ]
   end
+
+  # A capped turbo says how fast it is going; the uncapped one, as always,
+  # just says it is going.
+  defp turbo_mark(:uncapped), do: ""
+  defp turbo_mark(speed), do: "#{speed}×"
 
   @doc """
   The watch's text: every named cell and the byte it holds, right now.

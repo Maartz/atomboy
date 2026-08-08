@@ -54,4 +54,68 @@ defmodule Atomboy.ServerTest do
     {_frames, _pcm, panels} = split(stream, 0, 0, [])
     assert panels == [Enum.find_index(Atomboy.LCD.presets(), &(&1 == :pocket))]
   end
+
+  # The loop drains its mailbox before the first frame, and the stdin
+  # reader is nothing but a process filling that mailbox: an op posted
+  # before `run/2` arrives exactly as one read off the wire would.
+  defp send_ops(ops), do: Enum.each(ops, &send(self(), &1))
+
+  @tag :tmp_dir
+  test "a capped turbo emits one frame per speed step, and no sound", %{tmp_dir: dir} do
+    rom = spinning_rom(dir)
+
+    stream =
+      capture_io([encoding: :latin1], fn ->
+        send_ops([{:key, ?T, 2}, {:key, ?+, ?T}])
+        assert :ok = Atomboy.Server.run(rom, frames: 4)
+      end)
+
+    {frames, pcm, _panels} = split(stream, 0, 0, [])
+    assert frames == 2
+    assert pcm == 0
+  end
+
+  @tag :tmp_dir
+  test "turbo is held: the release gives the frames and the sound back", %{tmp_dir: dir} do
+    rom = spinning_rom(dir)
+
+    stream =
+      capture_io([encoding: :latin1], fn ->
+        send_ops([{:key, ?T, 4}, {:key, ?+, ?T}, {:key, ?-, ?T}])
+        assert :ok = Atomboy.Server.run(rom, frames: 4)
+      end)
+
+    {frames, pcm, _panels} = split(stream, 0, 0, [])
+    assert frames == 4
+    assert pcm > 0
+  end
+
+  @tag :tmp_dir
+  test "a turbo speed nobody knows leaves the speed where it stands", %{tmp_dir: dir} do
+    rom = spinning_rom(dir)
+
+    stream =
+      capture_io([encoding: :latin1], fn ->
+        send_ops([{:key, ?T, 2}, {:key, ?T, 3}, {:key, ?+, ?T}])
+        assert :ok = Atomboy.Server.run(rom, frames: 4)
+      end)
+
+    # Still the 2× asked for first — not uncapped's one frame in four.
+    {frames, _pcm, _panels} = split(stream, 0, 0, [])
+    assert frames == 2
+  end
+
+  @tag :tmp_dir
+  test "--turbo caps the speed of a server started from the command line", %{tmp_dir: dir} do
+    rom = spinning_rom(dir)
+
+    stream =
+      capture_io([encoding: :latin1], fn ->
+        send_ops([{:key, ?+, ?T}])
+        assert :ok = Atomboy.Server.run(rom, frames: 4, turbo_speed: 2)
+      end)
+
+    {frames, _pcm, _panels} = split(stream, 0, 0, [])
+    assert frames == 2
+  end
 end

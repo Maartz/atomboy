@@ -32,11 +32,14 @@ defmodule Atomboy.Server do
   (release). Keys: `?U ?D ?L ?R` the directions, `?A ?B` the buttons, `?S`
   Start, `?E` Select, `?M` the menu, `?W` rewind (held), `?P` pause — plus
   the direct actions for the native menu bar: `?s`/`?r` save/load state,
-  `?1`-`?9` the slot. Three operations carry a value rather than a key:
-  `<<?V, v>>` sets the mixer volume (0-100), `<<?X, mask>>` the four voices
-  (bits 0-3), `<<?N, i>>` the panel preset (the same index `?P` announces),
-  `<<?G, v>>` the contrast dial (0-100; above 100 returns to the preset's
-  resting point)
+  `?1`-`?9` the slot. `?T`, turbo, is held rather than latched: `<<?+, ?T>>`
+  engages it and `<<?-, ?T>>` lets it go. Five operations carry a value
+  rather than a key: `<<?V, v>>` sets the mixer volume (0-100), `<<?X,
+  mask>>` the four voices (bits 0-3), `<<?N, i>>` the panel preset (the same
+  index `?P` announces), `<<?G, v>>` the contrast dial (0-100; above 100
+  returns to the preset's resting point), `<<?T, n>>` the turbo speed (2, 4
+  or 8, or 0 for uncapped — an op byte in the first position, where the
+  keys' `?T` never stands)
   — the shell's native settings use these. The end of input (shell closed)
   stops the game cleanly — save written.
 
@@ -68,6 +71,7 @@ defmodule Atomboy.Server do
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
+  alias Atomboy.Play.Turbo
   alias Atomboy.PPU
   alias Atomboy.Save
   alias Atomboy.Screen
@@ -147,6 +151,9 @@ defmodule Atomboy.Server do
             history: [],
             last_frame: nil,
             turbo: false,
+            # The shell resends the chosen speed on every boot (`?T`); the
+            # flag is here for a server started from the command line.
+            turbo_speed: Keyword.get(opts, :turbo_speed, :uncapped),
             # What a power cycle must remember: the machine flags of boot.
             reset: %{
               dmg: Keyword.get(opts, :dmg, false),
@@ -202,8 +209,9 @@ defmodule Atomboy.Server do
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
     ram = Codes.applique(ram)
 
-    # In turbo: one frame emitted in four, no PCM, no deadline.
-    render? = not ctx.turbo or rem(ctx.frame, 4) == 0
+    # In turbo: one frame emitted per speed step (one in four uncapped),
+    # no PCM, and a deadline divided — or suspended.
+    render? = Turbo.render?(ctx.frame, ctx.turbo, ctx.turbo_speed)
 
     {pixels, state, ram} =
       try do
@@ -227,13 +235,15 @@ defmodule Atomboy.Server do
     ctx = if render?, do: emit_frame(ctx, pixels), else: ctx
 
     deadline =
-      if ctx.turbo do
-        ctx.deadline
-      else
-        now = System.monotonic_time(:microsecond)
-        deadline = max(ctx.deadline, now - 100_000)
-        if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
-        deadline + @frame_us
+      case Turbo.frame_us(ctx.turbo, ctx.turbo_speed) do
+        :suspended ->
+          ctx.deadline
+
+        frame_us ->
+          now = System.monotonic_time(:microsecond)
+          deadline = max(ctx.deadline, now - 100_000)
+          if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+          deadline + frame_us
       end
 
     ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
@@ -346,6 +356,12 @@ defmodule Atomboy.Server do
       {:key, ?G, v} ->
         drain(recompile(%{ctx | dial: if(v <= 100, do: v, else: nil)}))
 
+      # The turbo speed: ?T carries 2, 4 or 8 — or 0, the suspended
+      # deadline turbo has always run at. A multiplier nobody knows leaves
+      # the speed where it stands.
+      {:key, ?T, value} ->
+        drain(turbo_speed(ctx, value))
+
       # The save browser: list, save, load, delete, profile, export.
       {:library, :list} ->
         drain(emit_library(ctx))
@@ -389,6 +405,18 @@ defmodule Atomboy.Server do
     end
   end
 
+  # Changing speed mid-sprint re-anchors the deadline: the suspended one
+  # is minutes behind, and the loop would try to pay that off in a burst.
+  defp turbo_speed(ctx, value) do
+    case Turbo.speed(value) do
+      {:ok, speed} ->
+        %{ctx | turbo_speed: speed, deadline: System.monotonic_time(:microsecond) + @frame_us}
+
+      :error ->
+        ctx
+    end
+  end
+
   defp press(ctx, _op, nil), do: ctx
 
   defp press(%{menu: menu} = ctx, ?+, key) when menu != nil do
@@ -418,15 +446,19 @@ defmodule Atomboy.Server do
 
   defp press(ctx, ?+, :pause), do: press(ctx, ?+, :menu)
 
-  # Turbo: unavailable with the cable plugged in (the serial protocol
-  # demands the tempo); on the way out, the audio pacing restarts from zero
-  # — no catch-up burst inherited from the sprint.
-  defp press(ctx, ?+, :turbo) do
-    cond do
-      Map.has_key?(ctx.ram, :link) ->
-        ctx
+  # Turbo is held, not latched: the shell sends `+T` while the key or the
+  # shoulder is down and `-T` when it comes up. Unavailable with the cable
+  # plugged in (the serial protocol demands the tempo); on the way out, the
+  # audio pacing restarts from zero — no catch-up burst inherited from the
+  # sprint.
+  defp press(ctx, op, :turbo) when op in [?+, ?-] do
+    tag = if op == ?+, do: :press, else: :release
 
-      ctx.turbo ->
+    case Turbo.asked(tag, ctx.turbo, Map.has_key?(ctx.ram, :link)) do
+      :on ->
+        %{ctx | turbo: true}
+
+      :off ->
         %{
           ctx
           | turbo: false,
@@ -434,8 +466,8 @@ defmodule Atomboy.Server do
             deadline: System.monotonic_time(:microsecond) + @frame_us
         }
 
-      true ->
-        %{ctx | turbo: true}
+      _none_or_refused ->
+        ctx
     end
   end
 

@@ -31,6 +31,7 @@ defmodule Atomboy.Window do
   alias Atomboy.Menu
   alias Atomboy.Play.Audio
   alias Atomboy.Play.Input
+  alias Atomboy.Play.Turbo
   alias Atomboy.PPU
   alias Atomboy.Save
   alias Atomboy.Screen
@@ -148,6 +149,9 @@ defmodule Atomboy.Window do
       max_frames: Keyword.get(opts, :frames, :infinity),
       dump: Keyword.get(opts, :dump),
       turbo: false,
+      # The `--turbo` flag: 2, 4, 8 — or `:uncapped`, the suspended
+      # deadline that has always been turbo's speed.
+      turbo_speed: Keyword.get(opts, :turbo_speed, :uncapped),
       paused: false,
       menu: nil,
       history: [],
@@ -249,7 +253,7 @@ defmodule Atomboy.Window do
     ram = Joypad.set(ctx.ram, Input.dpad_lines(held), Input.button_lines(held))
     ram = Codes.applique(ram)
 
-    render? = not ctx.turbo or rem(ctx.frame, 4) == 0
+    render? = Turbo.render?(ctx.frame, ctx.turbo, ctx.turbo_speed)
 
     # A derailment kills the game, not the progress: the cartridge's battery
     # is written before letting the crash report fly.
@@ -276,13 +280,15 @@ defmodule Atomboy.Window do
       end
 
     deadline =
-      if ctx.turbo do
-        ctx.deadline
-      else
-        now = System.monotonic_time(:microsecond)
-        deadline = max(ctx.deadline, now - 100_000)
-        if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
-        deadline + @frame_us
+      case Turbo.frame_us(ctx.turbo, ctx.turbo_speed) do
+        :suspended ->
+          ctx.deadline
+
+        frame_us ->
+          now = System.monotonic_time(:microsecond)
+          deadline = max(ctx.deadline, now - 100_000)
+          if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+          deadline + frame_us
       end
 
     ram = if rem(ctx.frame, 600) == 599, do: Save.flush(ram, ctx.sav), else: ram
@@ -440,6 +446,11 @@ defmodule Atomboy.Window do
         ghost: nil
     }
 
+  # A capped turbo says how fast it is going; the uncapped one just says
+  # it is going.
+  defp turbo_mark(:uncapped), do: ""
+  defp turbo_mark(speed), do: "#{speed}×"
+
   defp turbo_toggle(ctx) do
     turbo = not ctx.turbo
 
@@ -490,7 +501,7 @@ defmodule Atomboy.Window do
 
     extras =
       [
-        if(ctx.turbo, do: "»»"),
+        if(ctx.turbo, do: "»»" <> turbo_mark(ctx.turbo_speed)),
         if(ctx.paused, do: "⏸"),
         if(ctx.audio, do: "♪"),
         if(Map.has_key?(ram, :link), do: "⇄"),

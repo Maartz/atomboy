@@ -122,13 +122,15 @@ defmodule Atomboy.CLI do
           save: :string,
           library: :string,
           dial: :integer,
-          codes: :string
+          codes: :string,
+          turbo: :integer
         ]
       )
 
     with {:ok, opts} <- palette(opts),
          {:ok, opts} <- panel(opts),
          {:ok, opts} <- dial(opts),
+         {:ok, opts} <- turbo(opts),
          {:ok, rom} <- rom(argv) do
       {:ok, rom, opts}
     end
@@ -191,6 +193,26 @@ defmodule Atomboy.CLI do
     end
   end
 
+  # How fast fast forward runs. Absent, turbo keeps its historical speed:
+  # the deadline suspended, as fast as the machine goes.
+  defp turbo(opts) do
+    case Keyword.pop(opts, :turbo) do
+      {nil, opts} ->
+        {:ok, opts}
+
+      {value, opts} ->
+        speeds = Atomboy.Play.Turbo.speeds()
+
+        if value in speeds do
+          {:ok, Keyword.put(opts, :turbo_speed, value)}
+        else
+          {:error,
+           "unknown turbo speed: #{value} " <>
+             "(#{Enum.join(speeds, ", ")} — leave it out for uncapped)"}
+        end
+    end
+  end
+
   defp rom([rom]) do
     if File.exists?(rom) do
       {:ok, rom}
@@ -204,7 +226,7 @@ defmodule Atomboy.CLI do
      "usage: atomboy <rom.gb> [--window] [--dmg] [--listen [port]] " <>
        "[--link host:port] [--save name] [--library dir] [--hold N] [--frames N] " <>
        "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb|crt] " <>
-       "[--dial 0-100] " <>
+       "[--dial 0-100] [--turbo 2|4|8] " <>
        "[--codes 01VVLLHH,…]"}
   end
 end

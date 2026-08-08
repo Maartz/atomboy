@@ -45,6 +45,9 @@ defmodule Mix.Tasks.Atomboy.Play do
       encoding that keeps the terminal at 60 fps). Also on the PANEL row of
       the menu.
     * `--dump f.pgm` — write the last frame as an image on exit.
+    * `--turbo 2|4|8` — how fast fast-forward runs: two, four or eight times
+      the console's cadence, the screen keeping its own rate. Left out, `Tab`
+      runs as fast as the machine allows, as it always has.
     * `--save name` — a save profile: `.sav` and `.state` become
       `rom.name.sav`/`rom.name.state`. Essential for linking two instances of
       the same game on one machine — two players, two save files. And in
@@ -59,8 +62,8 @@ defmodule Mix.Tasks.Atomboy.Play do
 
     * `s` freezes the whole machine into a `.state` next to the ROM, `r`
       revives it — save before a boss, retry forever.
-    * `Tab` toggles fast-forward (quarter rendering, sound muted) — intros go
-      by in seconds.
+    * `Tab` toggles fast-forward (part of the frames drawn, sound muted) —
+      intros go by in seconds. `--turbo` picks how fast.
     * `Backspace`, held down, rewinds — up to forty seconds back, ten frames
       per step. Died on a boss? Turn back time.
     * `p` pauses.
