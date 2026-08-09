@@ -161,6 +161,34 @@ wrong; test ROMs never read the RTC so the Task 2 property didn't catch it).
    with identical frame CRCs. Mutation: make replay serve the wall clock —
    the new determinism test must die.
 
+## Task 8 — The export moves into the house (added 2026-08-09)
+
+*Rule from Maartz: every feature lives in Atomboy.app first — the terminal
+is secondary. The export shipped as a mix task only; this task puts it in
+the app. Files: `lib/mix/tasks/atomboy.export.ex` (extract the core),
+new `lib/atomboy/export.ex`, `lib/atomboy/cli.ex`, `rel/macos/Atomboy.swift`,
+tests.*
+
+1. Extract the replay+encode core out of the mix task into `Atomboy.Export`
+   (a lib module callable without Mix — a burrito release has no `mix`);
+   the mix task becomes a thin argument-parsing wrapper. Behavior identical,
+   export tests keep passing against the lib module.
+2. CLI: `--export out.mp4` combined with `--replay take.tas` runs the export
+   headlessly and exits (no window, no server) — this is the door the shell
+   uses, since the app talks to its bundled `atomboy-moteur` binary.
+   Progress on stderr; clear errors (ffmpeg missing, wrong ROM) on stderr
+   with nonzero exit.
+3. Shell: File → Export Movie… — NSOpenPanel for the `.tas`, NSSavePanel
+   for the destination (mp4/gif by chosen extension), then the shell
+   launches a SECOND engine process with `--replay --export` (the playing
+   game is untouched), a small progress sheet reads the stderr lines, and
+   a completion note reveals the file in Finder. ffmpeg discovered on the
+   user's PATH the way the engine does it; a missing ffmpeg surfaces as a
+   dialog naming `brew install ffmpeg`.
+4. Tests: the extraction proves itself by the existing export tests running
+   against the lib module; CLI flag combinations (`--export` without
+   `--replay` refused, exit codes); Swift typecheck.
+
 ## Task 6 — The checklist and the sign-off
 
 *Last. Fixes only.* Record a real session (a commercial ROM by hand),
