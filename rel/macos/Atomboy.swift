@@ -32,6 +32,7 @@ import AVFoundation
 import GameController
 import Metal
 import QuartzCore
+import UniformTypeIdentifiers
 
 let WIDTH = 160
 let HEIGHT = 144
@@ -762,6 +763,18 @@ final class Engine: ObservableObject {
     // The port both sides of the cable agree on — the engine's
     // Link.default_port, coupled the same knowing way as "atomboy-moteur".
     static let linkPort: UInt16 = 7373
+    // "atomboy-moteur", not "atomboy": APFS is case-insensitive, and
+    // "atomboy" would clobber the "Atomboy" shell (learned the hard way).
+    // The name is also baked into bin/build and into shipped bundles —
+    // renaming it takes a coordinated change on both sides. The game runs
+    // one of these; an export runs a second one of its own.
+    static let binary = Bundle.main.bundleURL
+        .appendingPathComponent("Contents/MacOS/atomboy-moteur")
+    // The export watches itself in a sheet, and the sheet is raised by the
+    // export rather than by the menu item: a panel the person cancelled
+    // never opens one.
+    @Published var exportRequested = false
+    let exporter = ExportJob()
     private(set) var currentROM: URL?
     // A link attempt that dies (the 120 s accept timeout, a refused
     // connection) relaunches the game without the cable instead of
@@ -1094,13 +1107,8 @@ final class Engine: ObservableObject {
         linkAttempt = linkMode != nil
         hosting = false
 
-        // "atomboy-moteur", not "atomboy": APFS is case-insensitive, and
-        // "atomboy" would clobber the "Atomboy" shell (learned the hard way).
-        // The name is also baked into bin/build and into shipped bundles —
-        // renaming it takes a coordinated change on both sides.
         let p = Process()
-        p.executableURL = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/atomboy-moteur")
+        p.executableURL = Engine.binary
         // `--serveur` is the engine's own CLI flag: it stays as it is.
         var arguments = [rom.path, "--serveur"]
 
@@ -1962,6 +1970,222 @@ struct LinkSheet: View {
     }
 }
 
+// ── The export: a second engine, and a sheet to watch it work ────────────────
+
+// The app owns no `mix`, so rendering a take is not a function call here: it
+// is the bundled engine launched a second time with `--replay … --export …`,
+// the one door that replays a movie into a file with no window and no
+// protocol. The game being played is never touched — this is another process
+// with a machine of its own, and all the two share is a ROM on disk.
+final class ExportJob: ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case running
+        case done(URL)
+        case failed(String)
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    // The last thing the engine said, cleaned of the carriage returns it
+    // redraws its progress with.
+    @Published private(set) var line = ""
+    @Published private(set) var fraction: Double?
+    @Published private(set) var destination: URL?
+
+    private var process: Process?
+    private var transcript = ""
+
+    func start(rom: URL, movie: URL, to out: URL) {
+        cancel()
+        transcript = ""
+        line = "Starting a second engine…"
+        fraction = nil
+        destination = out
+        phase = .running
+
+        let p = Process()
+        p.executableURL = Engine.binary
+        p.arguments = [rom.path, "--replay", movie.path, "--export", out.path]
+        p.currentDirectoryURL = out.deletingLastPathComponent()
+
+        // The engine finds ffmpeg on PATH, and an app launched from the
+        // Finder inherits a PATH with no Homebrew in it — so both places
+        // brew installs to are named here. Otherwise "installed" and "found"
+        // would mean one thing from a terminal and another from the Dock.
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] =
+            (environment["PATH"] ?? "/usr/bin:/bin") + ":/opt/homebrew/bin:/usr/local/bin"
+        p.environment = environment
+
+        // Nothing is read from this engine's stdout — it speaks no protocol —
+        // and nothing is ever typed at it: an export waiting on a keystroke
+        // would wait forever behind a sheet that has no keyboard.
+        p.standardOutput = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+
+        let errors = Pipe()
+        p.standardError = errors
+        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async { self?.absorb(text) }
+        }
+
+        p.terminationHandler = { [weak self] finished in
+            let status = finished.terminationStatus
+            DispatchQueue.main.async { self?.ended(status: status, out: out) }
+        }
+
+        process = p
+
+        do {
+            try p.run()
+        } catch {
+            phase = .failed("The engine would not start: \(error.localizedDescription)")
+        }
+    }
+
+    // Closing the sheet on a running export stops it. The half-written file
+    // is the engine's to leave behind; the temp streams it was filling go
+    // with the process.
+    func cancel() {
+        guard let process, process.isRunning else { return }
+        process.terminationHandler = nil
+        process.terminate()
+        self.process = nil
+        phase = .idle
+    }
+
+    private func absorb(_ text: String) {
+        transcript += text
+        line = ExportJob.lines(of: text).last ?? line
+        fraction = ExportJob.progress(in: line)
+    }
+
+    private func ended(status: Int32, out: URL) {
+        process = nil
+
+        if status == 0 {
+            fraction = 1
+            phase = .done(out)
+        } else {
+            phase = .failed(trouble())
+        }
+    }
+
+    // What went wrong, told to somebody who is not reading a terminal. A
+    // missing ffmpeg is worth translating rather than quoting: the fix is a
+    // command to type somewhere else entirely, and the engine's own line
+    // says "PATH", which is not a word this dialog should be using.
+    private func trouble() -> String {
+        if transcript.contains("ffmpeg is not on the PATH") {
+            return """
+                Exporting video needs ffmpeg, and this Mac does not have it.
+
+                In Terminal:  brew install ffmpeg
+
+                Then try the export again.
+                """
+        }
+
+        let tail = ExportJob.lines(of: transcript)
+            .filter { !$0.hasPrefix("replaying") }
+            .suffix(8)
+
+        return tail.isEmpty ? "The export stopped without saying why." : tail.joined(separator: "\n")
+    }
+
+    // The engine draws in place: carriage returns and a clear-to-end-of-line,
+    // which are directions to a terminal and noise in a label.
+    private static func lines(of text: String) -> [String] {
+        text
+            .replacingOccurrences(of: "\u{1B}[K", with: "")
+            .split(whereSeparator: { $0 == "\r" || $0 == "\n" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    // "replaying 120/240 frames" — the one line worth a bar. The closing
+    // note carries a path, and a path has slashes of its own, so only that
+    // first word is trusted to mean counting.
+    private static func progress(in line: String) -> Double? {
+        guard line.hasPrefix("replaying"),
+              let counts = line.split(separator: " ").first(where: { $0.contains("/") })
+        else { return nil }
+
+        let parts = counts.split(separator: "/")
+
+        guard parts.count == 2, let done = Double(parts[0]), let total = Double(parts[1]),
+              total > 0
+        else { return nil }
+
+        return done / total
+    }
+}
+
+struct ExportSheet: View {
+    @ObservedObject var job: ExportJob
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Export Movie").font(.title2.bold())
+
+            switch job.phase {
+            case .failed(let trouble):
+                Label(trouble, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .textSelection(.enabled)
+
+            default:
+                if let destination = job.destination {
+                    Text(destination.lastPathComponent)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                ProgressView(value: job.fraction ?? 0, total: 1)
+                    .progressViewStyle(.linear)
+                    .opacity(job.fraction == nil ? 0.35 : 1)
+
+                Text(job.line)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Text("The game keeps playing: this is a second machine, replaying the take.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Button(isRunning ? "Cancel" : "Close") {
+                    job.cancel()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 440, height: 240)
+        // The reward for waiting is the file itself, revealed where it
+        // landed — so success closes the sheet instead of announcing itself.
+        .onChange(of: job.phase) {
+            if case .done(let url) = job.phase {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+                dismiss()
+            }
+        }
+    }
+
+    private var isRunning: Bool { job.phase == .running }
+}
+
 struct ControlsSettings: View {
     @State private var recording: String?
     @State private var monitor: Any?
@@ -2284,6 +2508,9 @@ struct MainScene: View {
         .sheet(isPresented: $engine.linkRequested) {
             LinkSheet(engine: engine)
         }
+        .sheet(isPresented: $engine.exportRequested) {
+            ExportSheet(job: engine.exporter)
+        }
         // A ROM dropped on the screen slots in like a cartridge.
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard let provider = providers.first, provider.canLoadObject(ofClass: URL.self)
@@ -2397,6 +2624,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine.replayMovie(url)
         }
     }
+
+    // A take on disk turned into a file to keep: the movie first, then where
+    // it lands — and the extension chosen there is what says video or GIF,
+    // since that is exactly how the engine reads it.
+    //
+    // The panels ask by content type rather than by `allowedFileTypes`: the
+    // older calls above are deprecated, and new ones are not worth adding to
+    // the pile. `.tas` belongs to nobody, so it is named by its extension
+    // and macOS invents the type.
+    func exportMovie() {
+        guard let rom = engine.currentROM else { return }
+
+        let open = NSOpenPanel()
+        open.title = "Choose a movie to export"
+        if let tas = UTType(filenameExtension: "tas") { open.allowedContentTypes = [tas] }
+        guard open.runModal() == .OK, let movie = open.url else { return }
+
+        let save = NSSavePanel()
+        save.title = "Export Movie"
+        save.allowedContentTypes = [.mpeg4Movie, .gif]
+        save.nameFieldStringValue = movie.deletingPathExtension().lastPathComponent + ".mp4"
+        guard save.runModal() == .OK, let out = save.url else { return }
+
+        engine.exporter.start(rom: rom, movie: movie, to: out)
+        engine.exportRequested = true
+    }
 }
 
 extension Engine {
@@ -2423,6 +2676,12 @@ struct FileCommands: Commands {
 
             Button("Saves…") { engine.savesRequested = true }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(engine.isIdle)
+
+            // The export renders a take against the cartridge in the drive,
+            // so with no cartridge there is nothing to render it against.
+            Button("Export Movie…") { delegate.exportMovie() }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(engine.isIdle)
 
             Menu("Recent ROMs") {

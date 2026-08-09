@@ -13,6 +13,7 @@ defmodule Atomboy.CLI do
       atomboy zelda.gb --window --panel dmg
       atomboy tetris.gb --record run.tas
       atomboy tetris.gb --replay run.tas
+      atomboy tetris.gb --replay run.tas --export run.mp4
 
   Arguments arrive through `:init.get_plain_arguments/0` — the path that
   does not depend on the Burrito module at runtime. Only starts in prod:
@@ -43,24 +44,10 @@ defmodule Atomboy.CLI do
   def main(args) do
     case parse(args) do
       {:ok, rom, opts} ->
-        {window, opts} = Keyword.pop(opts, :window, false)
-        {server, opts} = Keyword.pop(opts, :server, false)
-
-        runner =
-          cond do
-            server -> Atomboy.Server
-            window -> Atomboy.Window
-            true -> Atomboy.Play
-          end
-
         try do
-          case runner.run(rom, opts) do
-            :ok ->
-              0
-
-            {:error, message} ->
-              IO.puts(:stderr, message)
-              1
+          case Keyword.pop(opts, :export) do
+            {nil, opts} -> play(rom, opts)
+            {out, opts} -> export(rom, out, opts)
           end
         rescue
           e ->
@@ -81,6 +68,55 @@ defmodule Atomboy.CLI do
       {:error, message} ->
         IO.puts(:stderr, message)
         2
+    end
+  end
+
+  defp play(rom, opts) do
+    {window, opts} = Keyword.pop(opts, :window, false)
+    {server, opts} = Keyword.pop(opts, :server, false)
+
+    runner =
+      cond do
+        server -> Atomboy.Server
+        window -> Atomboy.Window
+        true -> Atomboy.Play
+      end
+
+    case runner.run(rom, opts) do
+      :ok ->
+        0
+
+      {:error, message} ->
+        IO.puts(:stderr, message)
+        1
+    end
+  end
+
+  # `--replay take.tas --export run.mp4`: the movie rendered into a file,
+  # and then nothing. This is the door the app uses — it owns no `mix`, so
+  # the export core is a library and this is where the shipped binary
+  # reaches it — and it is deliberately none of the other three runners: no
+  # window opens, no server protocol is spoken, and nobody reads stdin, so
+  # an export is as at home under a Finder-launched app as in a terminal.
+  #
+  # Everything the user is told goes to stderr, progress lines included:
+  # the app's progress sheet reads that stream, and a terminal shows it
+  # whatever stdout was redirected into.
+  defp export(rom, out, opts) do
+    with {:ok, plan} <-
+           Atomboy.Export.plan(
+             tas: Keyword.fetch!(opts, :replay),
+             rom: rom,
+             out: out,
+             scale: Keyword.get(opts, :scale)
+           ),
+         {:ok, note} <- Atomboy.Export.run(plan) do
+      IO.puts(:stderr, note)
+      0
+    else
+      {:error, message} ->
+        IO.puts(:stderr, message)
+        1
     end
   end
 
@@ -127,7 +163,9 @@ defmodule Atomboy.CLI do
           codes: :string,
           turbo: :integer,
           record: :string,
-          replay: :string
+          replay: :string,
+          export: :string,
+          scale: :integer
         ]
       )
 
@@ -136,6 +174,7 @@ defmodule Atomboy.CLI do
          {:ok, opts} <- dial(opts),
          {:ok, opts} <- turbo(opts),
          {:ok, opts} <- movie(opts),
+         {:ok, opts} <- export_flags(opts),
          {:ok, rom} <- rom(argv) do
       {:ok, rom, opts}
     end
@@ -246,6 +285,36 @@ defmodule Atomboy.CLI do
     end
   end
 
+  # The export's own two flags. `--export` is a verb about a take, so it
+  # asks for one: there is no such thing as exporting the session somebody
+  # is about to play, and a live game is not going anywhere near a file
+  # named here. And an export writes a file and exits — a window or a
+  # server would be a promise this run never keeps, so they are refused
+  # rather than quietly ignored.
+  defp export_flags(opts) do
+    export = Keyword.get(opts, :export)
+    scale = Keyword.get(opts, :scale)
+
+    cond do
+      export && is_nil(Keyword.get(opts, :replay)) ->
+        {:error,
+         "--export renders a movie, so it needs one: name the take with\n" <>
+           "--replay take.tas (a session being played is not a movie yet)"}
+
+      export && (Keyword.get(opts, :window, false) or Keyword.get(opts, :server, false)) ->
+        {:error, "--export writes a file and exits: it opens no window and speaks no protocol"}
+
+      scale && is_nil(export) ->
+        {:error, "--scale belongs to --export: it is the size of the video, not of the window"}
+
+      scale && scale < 1 ->
+        {:error, "--scale #{scale}: a whole number of pixels per pixel, 1 or more."}
+
+      true ->
+        {:ok, opts}
+    end
+  end
+
   defp rom([rom]) do
     if File.exists?(rom) do
       {:ok, rom}
@@ -260,7 +329,7 @@ defmodule Atomboy.CLI do
        "[--link host:port] [--save name] [--library dir] [--hold N] [--frames N] " <>
        "[--dump f.pgm] [--no-sound] [--palette dmg|gray] [--panel raw|dmg|pocket|cgb|crt] " <>
        "[--dial 0-100] [--turbo 2|4|8] " <>
-       "[--record take.tas] [--replay take.tas] " <>
+       "[--record take.tas] [--replay take.tas [--export run.mp4|run.gif [--scale N]]] " <>
        "[--codes 01VVLLHH,…]"}
   end
 end

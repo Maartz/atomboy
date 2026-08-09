@@ -1,7 +1,11 @@
 defmodule Atomboy.CLITest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureIO
+
   alias Atomboy.CLI
+  alias Atomboy.Movie
+  alias Atomboy.Screen
 
   @rom "test/fixtures/dmg-acid2.gb"
 
@@ -98,5 +102,134 @@ defmodule Atomboy.CLITest do
         assert message =~ "cannot share a session"
       end
     end
+  end
+
+  # The door the app knocks on: the shell has no `mix`, so "Export Movie…"
+  # launches a second engine with these very flags. What is checked here is
+  # what that engine agrees to do, and the number it exits with — the
+  # replay and the encode themselves belong to `export_test.exs`.
+  describe "the export door" do
+    @tag :tmp_dir
+    test "--replay and --export together name a movie and a file", %{tmp_dir: dir} do
+      take = written(dir)
+      out = Path.join(dir, "run.mp4")
+
+      assert {:ok, @rom, opts} = CLI.parse([@rom, "--replay", take, "--export", out])
+      assert opts[:export] == out
+      assert opts[:replay] == take
+    end
+
+    @tag :tmp_dir
+    test "--scale rides along with the export", %{tmp_dir: dir} do
+      take = written(dir)
+
+      assert {:ok, @rom, opts} =
+               CLI.parse([
+                 @rom,
+                 "--replay",
+                 take,
+                 "--export",
+                 Path.join(dir, "run.gif"),
+                 "--scale",
+                 "3"
+               ])
+
+      assert opts[:scale] == 3
+    end
+
+    @tag :tmp_dir
+    test "an export with no take to export is refused by name", %{tmp_dir: dir} do
+      assert {:error, message} = CLI.parse([@rom, "--export", Path.join(dir, "run.mp4")])
+      assert message =~ "--export renders a movie"
+      assert message =~ "--replay take.tas"
+    end
+
+    @tag :tmp_dir
+    test "an export opens no window and speaks no protocol", %{tmp_dir: dir} do
+      take = written(dir)
+      out = Path.join(dir, "run.mp4")
+
+      for flag <- ["--window", "--server"] do
+        assert {:error, message} =
+                 CLI.parse([@rom, "--replay", take, "--export", out, flag])
+
+        assert message =~ "writes a file and exits"
+      end
+    end
+
+    @tag :tmp_dir
+    test "--scale without an export has nothing to size", %{tmp_dir: dir} do
+      assert {:error, message} = CLI.parse([@rom, "--replay", written(dir), "--scale", "3"])
+      assert message =~ "--scale belongs to --export"
+    end
+
+    @tag :tmp_dir
+    test "a scale of no pixels at all is refused", %{tmp_dir: dir} do
+      take = written(dir)
+      out = Path.join(dir, "run.mp4")
+
+      assert {:error, message} =
+               CLI.parse([@rom, "--replay", take, "--export", out, "--scale", "0"])
+
+      assert message =~ "1 or more"
+    end
+
+    @tag :tmp_dir
+    test "a refused export exits 2 and says so on stderr", %{tmp_dir: dir} do
+      out = Path.join(dir, "run.mp4")
+
+      assert capture_io(:stderr, fn ->
+               assert CLI.main([@rom, "--export", out]) == 2
+             end) =~ "--export renders a movie"
+
+      refute File.exists?(out)
+    end
+
+    @tag :tmp_dir
+    test "a format nobody can write exits 1, with nothing replayed", %{tmp_dir: dir} do
+      take = written(dir)
+
+      assert capture_io(:stderr, fn ->
+               assert CLI.main([@rom, "--replay", take, "--export", Path.join(dir, "run.webm")]) ==
+                        1
+             end) =~ "neither .mp4 nor .gif"
+    end
+
+    if System.find_executable("ffmpeg") do
+      @tag :ffmpeg
+      @tag :tmp_dir
+      test "a take goes in, a file comes out, and the exit code is zero", %{tmp_dir: dir} do
+        take = written(dir)
+        out = Path.join(dir, "run.mp4")
+
+        stderr =
+          capture_io(:stderr, fn ->
+            assert CLI.main([@rom, "--replay", take, "--export", out, "--scale", "1"]) == 0
+          end)
+
+        assert File.regular?(out)
+        # The progress lines and the closing note, both on the stream the
+        # app's sheet reads.
+        assert stderr =~ "replaying"
+        assert stderr =~ "#{out} — 8 frames"
+      end
+    end
+  end
+
+  # ── The bench ───────────────────────────────────────────────────────────────
+
+  # A short take on the fixture cartridge, on disk where a flag can name it.
+  defp written(dir) do
+    path = Path.join(dir, "run.tas")
+
+    movie =
+      Enum.reduce(
+        [0x00, 0x00, 0x01, 0x01, 0x10, 0x10, 0x00, 0x00],
+        Movie.new(Screen.load(@rom), {:boot, :none}),
+        &Movie.append_frame(&2, &1)
+      )
+
+    :ok = Movie.write(movie, path)
+    path
   end
 end

@@ -1,11 +1,12 @@
 defmodule Atomboy.ExportTest do
   use ExUnit.Case
 
+  alias Atomboy.Export
   alias Atomboy.Library
   alias Atomboy.Movie
   alias Atomboy.Play
   alias Atomboy.Screen
-  alias Mix.Tasks.Atomboy.Export
+  alias Mix.Tasks.Atomboy.Export, as: ExportTask
 
   @moduletag :tmp_dir
 
@@ -106,7 +107,7 @@ defmodule Atomboy.ExportTest do
       tas = written(dir, movie(dir))
 
       assert_raise Mix.Error, ~r/--rom is required/, fn ->
-        Export.run([tas, "--out", Path.join(dir, "run.mp4")])
+        ExportTask.run([tas, "--out", Path.join(dir, "run.mp4")])
       end
     end
 
@@ -114,7 +115,7 @@ defmodule Atomboy.ExportTest do
       tas = written(dir, movie(dir))
 
       assert_raise Mix.Error, ~r/--out is required/, fn ->
-        Export.run([tas, "--rom", rom_path(dir)])
+        ExportTask.run([tas, "--rom", rom_path(dir)])
       end
     end
 
@@ -122,7 +123,7 @@ defmodule Atomboy.ExportTest do
       tas = written(dir, movie(dir))
 
       assert_raise Mix.Error, ~r/\.webm is neither \.mp4 nor \.gif/, fn ->
-        Export.run([tas, "--rom", rom_path(dir), "--out", Path.join(dir, "run.webm")])
+        ExportTask.run([tas, "--rom", rom_path(dir), "--out", Path.join(dir, "run.webm")])
       end
     end
 
@@ -133,13 +134,13 @@ defmodule Atomboy.ExportTest do
       File.write!(stranger, rom("SOMETHING ELSE"))
 
       assert_raise Mix.Error, ~r/recorded on another cartridge/, fn ->
-        Export.run([tas, "--rom", stranger, "--out", Path.join(dir, "run.mp4")])
+        ExportTask.run([tas, "--rom", stranger, "--out", Path.join(dir, "run.mp4")])
       end
     end
 
     test "no movie at that path", %{tmp_dir: dir} do
       assert_raise Mix.Error, ~r/no movie at/, fn ->
-        Export.run([
+        ExportTask.run([
           Path.join(dir, "ghost.tas"),
           "--rom",
           rom_path(dir),
@@ -156,7 +157,7 @@ defmodule Atomboy.ExportTest do
       System.put_env("PATH", Path.join(dir, "nothing-here"))
 
       assert_raise Mix.Error, ~r/ffmpeg is not on the PATH/, fn ->
-        Export.run([tas, "--rom", rom_path(dir), "--out", Path.join(dir, "run.mp4")])
+        ExportTask.run([tas, "--rom", rom_path(dir), "--out", Path.join(dir, "run.mp4")])
       end
     end
   end
@@ -172,7 +173,7 @@ defmodule Atomboy.ExportTest do
         tas = written(dir, movie(dir))
         out = Path.join(dir, "run.mp4")
 
-        Export.run([tas, "--rom", rom_path(dir), "--out", out])
+        ExportTask.run([tas, "--rom", rom_path(dir), "--out", out])
 
         assert File.regular?(out)
         # 160×144 doubled: the default scale for a video meant to be watched.
@@ -186,7 +187,7 @@ defmodule Atomboy.ExportTest do
         tas = written(dir, movie(dir))
         out = Path.join(dir, "run.gif")
 
-        Export.run([tas, "--rom", rom_path(dir), "--out", out, "--scale", "3"])
+        ExportTask.run([tas, "--rom", rom_path(dir), "--out", out, "--scale", "3"])
 
         assert File.regular?(out)
         assert <<"GIF89a", width::16-little, height::16-little, _rest::binary>> = File.read!(out)
