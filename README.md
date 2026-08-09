@@ -1,193 +1,32 @@
 # Atomboy
 
 A Game Boy and Game Boy Color emulator written in Elixir — playable, with
-sound, in your terminal or in a native window. Two copies can even trade
-Pokémon over a TCP link cable.
+sound, in a native macOS app, in a window, or in your terminal. Two copies can
+trade Pokémon over a TCP link cable. The unusual bet: **the emulated CPU is
+BEAM code**, generated from one instruction table into an oracle, a fast loop,
+a compiler's assembler and a RISC-V emitter, so none of the four can drift
+apart.
 
 <p align="center"><img src="docs/demo.gif" width="320" alt="Pokémon Silver running in atomboy"></p>
 
-The unusual bet: **the emulated CPU is BEAM code.** The SM83 decoder is not
-written by hand — it is generated from a data table into two backends (a
-readable oracle and a fast tail-call loop), validated against ~500,000
-[SingleStepTests](https://github.com/SingleStepTests/sm83) vectors, and kept
-honest by cross-equivalence on random programs. Everything else (PPU, APU,
-MBCs, link cable) is plain immutable Elixir on top of it.
+## Highlights
 
-## What works
-
-- **CPU** — all 501 SM83 opcodes, interrupts, timers. blargg `cpu_instrs`:
-  11/11.
-- **Video** — full DMG PPU (background, window, sprites, raster tricks) and
-  full CGB color mode. [dmg-acid2](https://github.com/mattcurrie/dmg-acid2)
-  and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) both render
-  pixel-perfect, frozen as golden tests.
-- **Audio** — all four channels (pulse ×2, wave, noise), streamed to `ffplay`,
-  paced by the wall clock so it never starves.
-- **Cartridges** — MBC1, MBC3 (with real-time clock), MBC5; battery saves as
-  standard `.sav` files, compatible with other emulators.
-- **Game Boy Color** — CGB boot, VRAM/WRAM banking, color palettes, double
-  speed, GDMA/HDMA. Pokémon Gold/Silver/Crystal run in full color.
-- **Link cable over TCP** — the serial port speaks through a socket, resolved
-  at scanline granularity with hardware-true transfer pacing. Verified with
-  the hardest client there is: complete Pokémon gen-2 trades through the
-  Cable Club, both directions, including re-trading a link-received Pokémon.
-- **Comfort** — save states (9 slots), rewind (hold Backspace, 40 seconds of
-  history), turbo, pause, save profiles so two players can share one ROM.
-- **Two front ends** — a terminal renderer (real pixels via the kitty
-  graphics protocol on Ghostty/kitty/WezTerm, ANSI half-blocks elsewhere) and
-  a native window (wxWidgets, ships with OTP).
-- **Single-file binaries** — Burrito wraps the app and the BEAM into one
-  executable per platform. No Erlang required to play.
-
-## Potion — writing Game Boy games in Elixir
-
-<p align="center"><img src="docs/potion.gif" width="320" alt="A Potion-compiled square walking around under d-pad control"></p>
-
-Atomboy now runs in both directions. **Potion** is a language in the
-lineage of Andy Gavin's GOOL (the Lisp that Crash Bandicoot was written
-in): the surface is Elixir, the semantics are the console's, and the
-output is a real 32 KB cartridge — header, Nintendo logo, checksums —
-that runs in atomboy or on hardware via flashcart:
-
-```elixir
-defmodule Hero do
-  use Potion
-
-  defactor :hero do
-    variables x: 80, y: 72
-
-    every_frame do
-      if pressed?(:right), do: x = x + 1
-      if pressed?(:left), do: x = x - 1
-      if pressed?(:up), do: y = y - 1
-      if pressed?(:down), do: y = y + 1
-      sprite(0, x: x, y: y, tile: 0)
-    end
-  end
-end
-```
-
-`mix run games/hero.exs` compiles that into `games/hero.gb` — the GIF
-above is that ROM, running in atomboy. Variables are WRAM cells,
-`x = x + 1` is three SM83 instructions that wrap at 255, and anything
-the console cannot do is refused at `mix compile` time with a message
-that explains what Potion knows. The assembler is derived from the same
-instruction table as the emulator's decoder, so the two can never
-disagree; the emulator is the compiler's test harness, down to
-pixel-exact assertions on the rendered frame.
-
-The machinery lives under `lib/potion/` — the reversed instruction table
-(`Potion.Assembler`), the cartridge builder (`Potion.ROM`), a GOOL-style
-kernel with a vblank heartbeat, OAM DMA from HRAM and one slot per actor
-(`Potion.Runtime`), the macro compiler (`Potion.Compiler`), and a PNG
-reader written rather than depended on (`Potion.PNG`, `Potion.Tiles`).
-
-### Pong, and the language it asked for
-
-`games/pong.exs` is the second milestone and a whole game: a title
-screen, a rally, an opponent that can lose, and GAME OVER at five
-points. Every piece of the language beyond the square above was
-something Pong asked for — `and` after a collision needed three nested
-ifs to ask one question, absolute jumps after that same block overran
-the 127 bytes a relative jump reaches, states and `on_enter` because a
-title screen wants painting once rather than sixty times a second,
-`text` and a drawn tile sheet, `beep` for a note, and the named routine
-so the collision stops being written twice.
-
-```elixir
-tiles from: "art/pong.png", names: [:ball, :paddle]
-
-state :title do
-  on_enter do
-    text(4, 12, "PRESS START")
-  end
-
-  every_frame do
-    if pressed?(:start), do: become(:playing)
-  end
-end
-
-if bx <= 16 and by >= ptop and by <= pbot do
-  vx = 1
-  beep(:e5)
-  bounce()
-end
-```
-
-### The console stays hot
-
-```
-ELIXIR_ERL_OPTIONS="-noinput" mix atomboy.live games/pong.exs
-```
-
-Play the game, edit the file, save it: the running console picks up the
-new cartridge without restarting. The ball keeps its position, the score
-its count, and what you changed is different on the next frame — the
-trick GOAL played on the PlayStation, which cost six lines here because
-`Screen.frame/4` already takes the ROM as an argument every frame.
-
-`docs/pipeline.md` follows one line — `if pressed?(:right), do: x = x +
-1` — from Elixir to the thirty-nine bytes it becomes, with every listing
-generated by the compiler rather than typed out. `docs/sound.md` is the
-sound system on one page: four channels, three voices, the notation, and
-what was measured rather than described.
-
-## The native core — the emulator compiled to RISC-V, by Elixir
-
-The same instruction table that generates the BEAM decoder and Potion's
-assembler also generates a **complete native emulator in RV32
-assembly**, emitted by plain Elixir. No C, no linker, no compiler
-toolchain in the loop: `lib/atomboy/native/` builds a bootable image
-out of encoded instructions and runs it under `qemu-system-riscv32`.
-
-Why: the ESP32-C6 port hit 12% of real time under AtomVM, and the wall
-was the interpreter, not the silicon — roughly a megabyte of native
-interpreter fighting a 32 KB instruction cache. A purpose-built SM83
-interpreter is a fraction of that size, so the ceiling moves.
-
-What exists, and how it is checked:
-
-| | |
-|---|---|
-| `rv32.ex` | the instruction encoder, verified against `riscv64-unknown-elf-as` |
-| `asm.ex`, `image.ex` | labels, and a bootable image with no C and no linker |
-| `alu.ex` | the flag arithmetic, checked exhaustively — 892,928 cases, compared inside the guest |
-| `interp.ex` | all 501 opcodes, dispatched in constant time through a jump table |
-| `ppu.ex` | the DMG scanline renderer: dmg-acid2 comes out pixel-identical to the Elixir PPU |
-| `machine.ex` | the machine cadence — 154 lines of 456 T-cycles, LY, vblank, timers, joypad |
-
-Everything is validated differentially against the Elixir emulator as
-oracle, with the comparison run **inside** the guest so a few hundred
-cases cost one boot instead of a serial port full of pictures.
-
-The measurements, under `qemu -icount shift=0` (retired instructions,
-not seconds — qemu is not cycle-accurate, so timing it would measure
-the host):
-
-| | |
-|---|---|
-| 22 | RV32 instructions per SM83 instruction |
-| 339,517 | instructions per frame, CPU and cadence |
-| 976,255 | instructions per frame with the renderer — 58.6 M/s at 60 fps |
-| 16,040 bytes | of generated code: 49% of the C6's instruction cache |
-
-Against a 160 MHz C6 that is about 37% of the core at one instruction
-per cycle, with the cache half empty. What qemu cannot tell us is the
-real IPC on silicon — flash latency, cache misses, branch prediction —
-so the number is a green light, not a victory.
-
-And the two compilers meet: `games/hero.gb`, compiled from Elixir by
-Potion, **runs and displays on the generated native core**, its frame
-byte-identical to the one the BEAM emulator draws.
-
-```sh
-mix atomboy.native            # assemble and run the native core under qemu
-mix atomboy.native.bench      # the number: RV32 instructions per SM83 instruction
-```
-
-Needs `qemu-system-riscv32` and `riscv64-unknown-elf-as` (Homebrew);
-without them the native tests exclude themselves and the suite stays
-green.
+- **A complete emulator** — all 501 SM83 opcodes, the full DMG and CGB PPU,
+  four audio channels, MBC1/3/5 with battery saves. blargg's `cpu_instrs`
+  11/11; dmg-acid2 and cgb-acid2 pixel-perfect and frozen as golden tests.
+- **A macOS app that looks like a console** — a drawn body around the screen
+  (⌘B), four of them following the panel presets, on top of an LCD simulation
+  none of the other emulators have: response curve, dot structure, crosstalk,
+  a contrast dial.
+- **A time machine** — frame-perfect `.tas` movies, re-recording, frame
+  advance, and Export Movie to MP4 or GIF.
+- **The multiverse** — ⌘D forks the running game into four live universes,
+  same buttons, different luck; listen to one, commit it, or walk it back.
+- **Potion** — a GOOL-lineage language whose surface is Elixir and whose
+  output is a real 32 KB cartridge. Six games written in it live in `games/`.
+- **A native core** — the same instruction table emits a complete emulator in
+  RV32 assembly, which runs under qemu and on an ESP32-C6 with a panel and a
+  speaker.
 
 ## Installing
 
@@ -200,143 +39,49 @@ brew install maartz/tap/atomboy-cli         # the terminal binary
 
 Or grab a binary from the
 [releases](https://github.com/Maartz/atomboy/releases) — `atomboy_linux_x64`,
-`atomboy_macos_arm`, or `Atomboy.app.zip`.
+`atomboy_macos_arm`, or `Atomboy.app.zip`. Single-file executables: Burrito
+wraps the app and the BEAM together, so no Erlang is required to play.
 
-## Playing
-
-On macOS, the nicest way is the native app — `bin/build --fast --app`
-produces `burrito_out/Atomboy.app`: a SwiftUI shell (full-bleed pixels
-under the window's rounded corners, a Liquid Glass hover HUD, sound
-through AVAudioEngine — no ffplay needed) driving the BEAM engine over a
-pipe. Drag it to /Applications, double-click, pick a ROM — or open a
-`.gb`/`.gbc` file with it. Cmd-, opens Settings: the sound mixer, and
-GameShark codes saved per game.
-
-Everywhere else (and for the terminal aficionados), the standalone binary:
-
-```sh
-atomboy game.gb                 # terminal renderer
-atomboy game.gbc --window      # native window (wxWidgets)
-```
-
-| Key | | Key | |
-|---|---|---|---|
-| Arrows | D-pad | Esc / `m` | menu |
-| `x` | A | `s` / `r` | save / load state |
-| `c` | B | `1`-`9` | pick state slot |
-| Enter | Start | Backspace (hold) | rewind |
-| Space | Select | Tab | turbo |
-| `p` | pause | `q` | quit |
-
-Esc opens an in-game menu — drawn into the Game Boy frame itself, so it
-looks the same in the terminal and in the window: resume, save/load state,
-state slot, palette, a sound mixer (master volume plus each of the four
-voices), quit. Navigate with the D-pad, confirm with A, close with B.
-
-Useful options:
-
-| Option | |
-|---|---|
-| `--window` | native window instead of the terminal |
-| `--palette gray` | neutral grays instead of the DMG green |
-| `--dmg` | force original Game Boy mode for CGB-flagged ROMs |
-| `--save <name>` | save profile — own `.sav`/`.state` per player |
-| `--sound` / `--no-sound | force sound on/off |
-| `--codes 01FF16D1,…` | GameShark codes, applied every frame |
-
-Sound needs `ffplay` (ships with ffmpeg) on the PATH; without it the game
-plays silently.
-
-### Link cable
-
-One side listens, the other calls:
-
-```sh
-atomboy argent.gbc --window --listen            # waits on port 7373
-atomboy argent.gbc --window --link host:7373    # connects
-```
-
-Use `--save` on both sides if they share the same ROM file. Turbo is
-unavailable while the cable is plugged — the protocol is a paced duet.
-
-## Building
-
-With Docker, nothing to install:
+From source, with Docker and nothing else installed:
 
 ```sh
 docker build --output type=local,dest=burrito_out .
 ```
 
-drops a standalone `atomboy_linux_x64` into `burrito_out/`. Pass
-`--build-arg ATOMBOY_SHA=$(git rev-parse --short HEAD)` to stamp the version.
-
-Natively (needs Elixir 1.18/OTP 26, `xz`, and zig 0.16.0 — installed via
-`mise` automatically):
+Natively (Elixir 1.18/OTP 26, `xz` and zig 0.16.0, installed via `mise`):
 
 ```sh
-bin/build                # tests, then binaries in burrito_out/
-bin/build --fast         # skip the tests
-bin/build --install      # also copy to ~/.local/bin/atomboy
-bin/build --app          # also assemble Atomboy.app (macOS, needs swiftc)
+bin/build --fast --app      # binaries in burrito_out/, plus Atomboy.app
 ```
 
-Or straight from the repo without building a release:
+The rest of the build and test commands are in
+[the design page](docs/design.md#building-and-testing).
+
+## Playing
+
+Double-click Atomboy.app and pick a ROM — or drop a `.gb`/`.gbc` on it, or
+open one with it. ⌘, is Settings, Esc is the panel behind the glass, and
+everything else is in [Emulator features](docs/features.md).
+
+In a terminal, or anywhere that is not a Mac:
 
 ```sh
-bin/play game.gb         # mix, with the right VM flags for the terminal
+atomboy game.gb                 # terminal renderer
+atomboy game.gbc --window       # native window (wxWidgets)
 ```
 
-## Development
+Sound in the terminal and the wx window needs `ffplay` (ships with ffmpeg) on
+the PATH; the app has its own audio and needs nothing.
 
-```sh
-mix atomboy.corpus         # fetch SM83 vectors (~160 MB) + test ROMs, once
-mix test                   # ~500,000 vectors + cross-equivalence + goldens
-mix test --include blargg  # the cpu_instrs ROMs on top
-```
-
-| Task | |
-|---|---|
-| `mix atomboy.play rom.gb` | play from the repo (`--frames`, `--dump` for harnesses) |
-| `mix atomboy.screen rom.gb [n]` | render n frames, `--debug` for blank-screen autopsies |
-| `mix atomboy.progress` | opcode coverage grid for both tables |
-| `mix atomboy.bench [n]` | CPU throughput in instructions/s |
-
-### How the CPU is organized
+## The four pages
 
 | | |
 |---|---|
-| `cpu/table.ex` | **what you edit** — the instructions, as pure data |
-| `cpu/insn.ex` | the struct describing one instruction (compile time only) |
-| `cpu/gen.ex` | translates an instruction into function clauses |
-| `cpu.ex` | hosts the generated oracle |
-| `cpu/loop.ex`, `cpu/cart_loop.ex` | the generated fast loops (flat / cartridge semantics) |
-| `cpu/state.ex` | processor state |
+| [Emulator features](docs/features.md) | everything you can do while playing: bodies, panels, saves, rewind, turbo, link cable, the time machine, the clock, the multiverse |
+| [Emulator design](docs/design.md) | how it is built: the generated CPU, the panel model, the protocol behind the app, the testing philosophy |
+| [Potion](docs/potion.md) | writing Game Boy games in Elixir, and the games written that way |
+| [The native core](docs/native.md) | the emulator emitted as RV32 assembly, under qemu and on an ESP32-C6 |
 
-Adding an opcode family means entries in `table.ex` and `body/1` clauses in
-`gen.ex`. The fast loop is never tested directly: it inherits correctness
-from the oracle through cross-equivalence on random programs — state, memory
-and cycle counts must match exactly, exceptions included.
-
-### Testing philosophy
-
-Per-opcode vectors first: a failure names the opcode and the bit, where a
-test ROM only says "failed". Test ROMs (blargg, the acid2 pair) come second,
-for what unit vectors cannot see: sequencing, timers, interrupts, rendering.
-Golden CRCs freeze known-good frames. The link cable is tested against real
-sockets, and was debugged against the pokegold/pokecrystal disassemblies as
-the protocol oracle.
-
-## The AtomVM heritage
-
-Atomboy started life targeting [AtomVM](https://www.atomvm.net/) on ESP32 —
-that is why the CPU is generated, why the memory API never changed shape,
-and why `mix atomboy.atomvm` (packages and runs the app on a generic_unix
-AtomVM build) and `mix atomboy.esp32` (flashes an ESP32 or ESP32-C6, with a
-riscv32 AOT pipeline) still exist and work. The ESP32-C6 POC reached 12% of
-real time with native AOT: the ceiling was the interpreter, not the hardware.
-
-That diagnosis is what the native core above acts on — and it is why the
-microcontroller is back on the table rather than filed away as a
-curiosity. The AtomVM route asked a general-purpose VM to run an
-emulator; the native route generates the emulator itself, which is the
-one thing that fits in the cache.
+And two deep dives on Potion, each following one thing all the way down:
+[from Elixir to a cartridge](docs/pipeline.md) and
+[sound in Potion](docs/sound.md).
