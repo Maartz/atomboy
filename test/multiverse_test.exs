@@ -9,6 +9,7 @@ defmodule Atomboy.MultiverseTest do
   alias Atomboy.Library
   alias Atomboy.Movie
   alias Atomboy.Screen
+  alias Atomboy.Server.Universe
 
   @moduletag :tmp_dir
 
@@ -272,8 +273,8 @@ defmodule Atomboy.MultiverseTest do
       lcd = LCD.compile(:raw, :dmg, false, nil)
       machine = warmed(rom)
 
-      one = per_frame(fn -> step(rom, lcd, [machine]) end)
-      four = per_frame(fn -> step(rom, lcd, List.duplicate(machine, 4)) end)
+      one = per_frame(lcd, [Universe.open(rom, machine)])
+      four = per_frame(lcd, Enum.map(1..4, fn _n -> Universe.open(rom, machine) end))
 
       IO.puts("""
 
@@ -406,25 +407,23 @@ defmodule Atomboy.MultiverseTest do
 
   # ── The measurement ─────────────────────────────────────────────────────────
 
-  # The split's own step, lifted out of the loop: the machines in parallel,
-  # each rendering its own frame and turning it into RGB where the work can
-  # be spread. Timed here without the loop's pacing, which would hide it.
-  defp step(rom, lcd, machines) do
-    machines
-    |> Enum.map(fn {state, ram, apu} ->
-      Task.async(fn ->
-        {pixels, state, ram} = Screen.frame(state, rom, ram, true)
-        {Screen.to_rgb(pixels, :dmg, lcd), state, ram, apu}
-      end)
-    end)
-    |> Task.await_many(30_000)
-  end
+  # The split's own step, exactly as the loop takes it: the universes asked
+  # in turn and awaited afterwards, each rendering its own frame and turning
+  # it into RGB inside its own process. Timed without the loop's pacing,
+  # which would hide it — and against processes that keep their machines, so
+  # what is measured is the work and not a copy of the memory map.
+  defp per_frame(lcd, universes) do
+    work = fn ->
+      universes
+      |> Enum.map(&Universe.step(&1, 0xFF, 0xFF, :dmg, lcd, 0))
+      |> Enum.map(&Universe.await(&1, 30_000))
+    end
 
-  defp per_frame(work) do
     # A warm-up round out of the measurement: the first pass pays for code
     # loading and for the schedulers waking up.
     work.()
-    {us, _} = :timer.tc(fn -> Enum.each(1..20, fn _ -> work.() end) end)
+    {us, _} = :timer.tc(fn -> Enum.each(1..20, fn _n -> work.() end) end)
+    Enum.each(universes, &Universe.close/1)
     us / 20
   end
 

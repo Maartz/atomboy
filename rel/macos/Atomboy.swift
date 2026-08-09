@@ -873,6 +873,9 @@ final class Engine: ObservableObject {
     private var process: Process?
     private var input: FileHandle?
     private var buffer = Data()
+    // Set while `receive` is walking the buffer, so a helping of stream that
+    // arrives from inside a draw only lengthens it and never re-reads it.
+    private var draining = false
 
     private let audio = AVAudioEngine()
     private let player = AVAudioPlayerNode()
@@ -1379,61 +1382,81 @@ final class Engine: ObservableObject {
 
     // ── The incoming stream: frames and PCM, sliced as they arrive ───────────
 
+    // The stream is walked with a cursor and cut once, at the end. Cutting
+    // the front off a Data moves every byte behind it, so a buffer holding
+    // more than one record paid for its own length again on every record it
+    // gave up — and during a split it holds four screens' worth a frame, so
+    // any moment the desk falls behind turns that into the square of what
+    // arrived. The parse itself is unchanged, record for record.
     private func receive(_ data: Data) {
         buffer.append(data)
 
-        while true {
-            guard let tag = buffer.first else { return }
+        // A draw or a re-aspect can pump the run loop, and a second helping
+        // of stream can land inside this one. The nested call appends and
+        // leaves; the walk below simply finds the buffer longer than it was,
+        // which is exactly what it would have found next time round.
+        guard !draining else { return }
+        draining = true
+
+        var at = 0
+        defer {
+            draining = false
+            if at > 0 { buffer.removeSubrange(0..<at) }
+        }
+
+        while at < buffer.count {
+            let tag = buffer[at]
+            let left = buffer.count - at
 
             if tag == UInt8(ascii: "F") {
-                guard buffer.count >= 1 + FRAME_BYTES else { return }
-                draw(buffer.subdata(in: 1..<(1 + FRAME_BYTES)))
-                buffer.removeSubrange(0..<(1 + FRAME_BYTES))
+                guard left >= 1 + FRAME_BYTES else { return }
+                draw(buffer.subdata(in: (at + 1)..<(at + 1 + FRAME_BYTES)))
+                at += 1 + FRAME_BYTES
             } else if tag == UInt8(ascii: "A") {
-                guard buffer.count >= 3 else { return }
-                let n = Int(buffer[1]) << 8 | Int(buffer[2])
-                guard buffer.count >= 3 + n else { return }
-                play(buffer.subdata(in: 3..<(3 + n)))
-                buffer.removeSubrange(0..<(3 + n))
+                guard left >= 3 else { return }
+                let n = Int(buffer[at + 1]) << 8 | Int(buffer[at + 2])
+                guard left >= 3 + n else { return }
+                play(buffer.subdata(in: (at + 3)..<(at + 3 + n)))
+                at += 3 + n
             } else if tag == UInt8(ascii: "J") {
-                guard buffer.count >= 5 else { return }
+                guard left >= 5 else { return }
                 let n =
-                    Int(buffer[1]) << 24 | Int(buffer[2]) << 16 | Int(buffer[3]) << 8
-                    | Int(buffer[4])
-                guard buffer.count >= 5 + n else { return }
-                let payload = buffer.subdata(in: 5..<(5 + n))
+                    Int(buffer[at + 1]) << 24 | Int(buffer[at + 2]) << 16
+                    | Int(buffer[at + 3]) << 8 | Int(buffer[at + 4])
+                guard left >= 5 + n else { return }
+                let payload = buffer.subdata(in: (at + 5)..<(at + 5 + n))
                 if let info = try? JSONDecoder().decode(LibraryInfo.self, from: payload) {
                     library = info
                 }
-                buffer.removeSubrange(0..<(5 + n))
+                at += 5 + n
             } else if tag == UInt8(ascii: "U") {
                 // A frame with its universe written on it. The focused one is
                 // also the picture ⌘C would copy — the others are futures
                 // nobody has chosen yet.
-                guard buffer.count >= 2 + FRAME_BYTES else { return }
-                let universe = Int(buffer[1])
-                let rgb = buffer.subdata(in: 2..<(2 + FRAME_BYTES))
+                guard left >= 2 + FRAME_BYTES else { return }
+                let universe = Int(buffer[at + 1])
+                let rgb = buffer.subdata(in: (at + 2)..<(at + 2 + FRAME_BYTES))
                 if universe == split.focus { lastFrame = rgb }
                 screen(universe: universe).draw(rgb)
-                buffer.removeSubrange(0..<(2 + FRAME_BYTES))
+                at += 2 + FRAME_BYTES
             } else if tag == UInt8(ascii: "P") {
-                guard buffer.count >= 2 else { return }
-                let preset = Int(buffer[1])
+                guard left >= 2 else { return }
+                let preset = Int(buffer[at + 1])
                 screen.metal?.panel(preset)
                 for universe in forked { universe.metal?.panel(preset) }
                 ShellState.shared.follow(panel: preset)
-                buffer.removeSubrange(0..<2)
+                at += 2
             } else if tag == UInt8(ascii: "R") {
-                guard buffer.count >= 2 else { return }
-                movie = MovieState(rawValue: buffer[1]) ?? .idle
-                buffer.removeSubrange(0..<2)
+                guard left >= 2 else { return }
+                movie = MovieState(rawValue: buffer[at + 1]) ?? .idle
+                at += 2
             } else if tag == UInt8(ascii: "S") {
-                guard buffer.count >= 3 else { return }
-                announce(Split(active: buffer[1] != 0, focus: Int(buffer[2])))
-                buffer.removeSubrange(0..<3)
+                guard left >= 3 else { return }
+                announce(Split(active: buffer[at + 1] != 0, focus: Int(buffer[at + 2])))
+                at += 3
             } else {
                 // Stream out of sync: drop the byte and catch up.
-                buffer.removeFirst()
+                at += 1
             }
         }
     }

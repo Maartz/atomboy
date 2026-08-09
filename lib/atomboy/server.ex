@@ -2,23 +2,27 @@ defmodule Atomboy.Server.Split do
   @moduledoc """
   Four machines where there was one.
 
-  A machine is the `{state, ram, apu}` trio a snapshot freezes, and a split
+  A universe is a machine — the `{state, ram, apu}` trio a snapshot freezes
+  — kept by a process of its own (`Atomboy.Server.Universe`), and a split
   is four of them plus the one being listened to. The list is ordered by
   universe: index 0 is the unperturbed original — the future that would
   have happened anyway — and 1 to 3 were nudged apart at the divider.
 
-  The struct is the whole of the split's state: no frame counter of its
-  own (the four are stepped together, so the loop's own counter speaks for
-  all of them) and no memory of what was live before the fork, because
-  universe 0 already is it.
+  The struct holds the four processes, never the four machines: a memory
+  map costs its full size every time it crosses between processes, and a
+  loop that handed four of them out and took four of them back every frame
+  paid that price sixty times a second. Here the machines stay put and the
+  pictures travel.
+
+  It is the whole of the split's state besides: no frame counter of its own
+  (the four are stepped together, so the loop's own counter speaks for all
+  of them) and no memory of what was live before the fork, because universe
+  0 already is it.
   """
 
-  @typedoc "The trio a snapshot freezes: registers, memory map, sound."
-  @type machine :: {struct(), map(), struct()}
+  @type t :: %__MODULE__{universes: [pid()], focus: 0..3}
 
-  @type t :: %__MODULE__{machines: [machine()], focus: 0..3}
-
-  defstruct machines: [], focus: 0
+  defstruct universes: [], focus: 0
 end
 
 defmodule Atomboy.Server do
@@ -170,6 +174,7 @@ defmodule Atomboy.Server do
   alias Atomboy.Save
   alias Atomboy.Screen
   alias Atomboy.Server.Split
+  alias Atomboy.Server.Universe
 
   @frame_us 16_742
 
@@ -343,6 +348,12 @@ defmodule Atomboy.Server do
         if MapSet.member?(ctx.down, :rewind), do: rewind_step(ctx), else: step(ctx)
     end
   end
+
+  # A session that ends inside a split ends on the universe the player was
+  # listening to: the same machine a commit would have installed, asked for
+  # once on the way out. Nothing else in the loop reads the split's machines,
+  # so this is where they come home.
+  defp finish(%{split: %Split{}} = ctx), do: finish(commit(ctx, ctx.split.focus))
 
   defp finish(ctx) do
     Save.flush(ctx.ram, ctx.sav)
@@ -556,12 +567,20 @@ defmodule Atomboy.Server do
     {ctx, dpad, btns} = Play.pad(ctx, held)
     ctx = announce_movie(ctx)
 
-    stepped = advance(ctx, dpad, btns)
-    {machines, audio} = voiced(ctx, stepped)
+    # The frame's worth of sound, owed by the wall clock and drawn by the
+    # one universe being listened to. The other three are asked for none —
+    # which still runs their APU over its captured triggers, so an unheard
+    # machine stays coherent and a switch of focus never lands in the
+    # middle of a note nobody played.
+    {audio, needed} = Audio.cadence(ctx.audio)
+    stepped = advance(ctx, dpad, btns, needed)
+
+    {_pixels, _rgb, pcm} = Enum.at(stepped, ctx.split.focus)
+    if byte_size(pcm) > 0, do: IO.binwrite(:stdio, [<<?A, byte_size(pcm)::16-big>>, pcm])
 
     stepped
     |> Enum.with_index()
-    |> Enum.each(fn {{_pixels, rgb, _machine}, universe} -> emit_universe(universe, rgb) end)
+    |> Enum.each(fn {{_pixels, rgb, _pcm}, universe} -> emit_universe(universe, rgb) end)
 
     # The same absolute pacing the single machine keeps: four universes are
     # four times the work, never four times the speed.
@@ -569,20 +588,17 @@ defmodule Atomboy.Server do
     deadline = max(ctx.deadline, now - 100_000)
     if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
 
-    # The focused universe mirrored into the loop's own machine — the one a
-    # crash flushes and the one the session's last save is taken from. The
-    # battery itself is left alone until the split is over: a cartridge must
-    # not be written from a future that is still up for abandoning.
-    {state, ram, apu} = Enum.at(machines, ctx.split.focus)
-    {pixels, _rgb, _machine} = Enum.at(stepped, ctx.split.focus)
+    # The picture is mirrored into the loop; the machine behind it is not.
+    # `state`, `ram` and `apu` stand where the fork left them for as long as
+    # the split does, and the focused universe is asked for its machine only
+    # when one is actually needed — a commit, a derailment, the end of the
+    # session. The battery is left alone throughout: a cartridge must not be
+    # written from a future that is still up for abandoning.
+    {pixels, _rgb, _pcm} = Enum.at(stepped, ctx.split.focus)
 
     %{
       ctx
-      | split: %Split{ctx.split | machines: machines},
-        state: state,
-        ram: ram,
-        apu: apu,
-        audio: audio,
+      | audio: %{audio | sent: audio.sent + needed},
         frame: ctx.frame + 1,
         deadline: deadline + @frame_us,
         last_frame: pixels
@@ -590,67 +606,44 @@ defmodule Atomboy.Server do
     |> loop()
   end
 
-  # The four machines stepped at once, one `Task` each: the BEAM's schedulers
-  # put them on four cores and the frame costs what the slowest universe
-  # costs rather than what all four do. Awaited before this function returns,
-  # so the four can never be at different frame counts — lockstep is not
-  # bookkeeping here, it is the shape of the code.
+  # The four universes stepped at once: every one is asked before any one is
+  # awaited, which is what puts them on four cores, and all four are back
+  # before this function returns — so they can never be at different frame
+  # counts. Lockstep is not bookkeeping here, it is the shape of the code.
   #
-  # The picture is turned into RGB inside the task too: it is pure, it is a
-  # quarter of the work, and doing it here would serialise what the split
-  # exists to spread.
-  defp advance(ctx, dpad, btns) do
-    ctx.split.machines
-    |> Enum.map(fn {state, ram, apu} ->
-      Task.async(fn -> one_universe(ctx, {state, ram, apu}, dpad, btns) end)
+  # What crosses is a pad byte out and pictures back. The pictures are
+  # binaries the size of a screen, which the runtime passes by reference:
+  # the frame costs what the slowest universe costs, and no longer what four
+  # memory maps cost to copy.
+  defp advance(ctx, dpad, btns, needed) do
+    ctx.split.universes
+    |> Enum.with_index()
+    |> Enum.map(fn {universe, index} ->
+      samples = if index == ctx.split.focus, do: needed, else: 0
+      Universe.step(universe, dpad, btns, ctx.palette, ctx.lcd, samples)
     end)
-    |> Task.await_many(@split_await)
+    |> Enum.map(&Universe.await(&1, @split_await))
     |> Enum.map(&landed(ctx, &1))
-  end
-
-  defp one_universe(ctx, {state, ram, apu}, dpad, btns) do
-    ram =
-      ram
-      |> CartLoop.rtc_live()
-      |> Joypad.set(dpad, btns)
-      |> Codes.applique()
-
-    {pixels, state, ram} = Screen.frame(state, ctx.rom, ram, true)
-    {:ok, pixels, Screen.to_rgb(pixels, ctx.palette, ctx.lcd), state, ram, apu}
-  rescue
-    e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Derailed] ->
-      {:derailed, e, __STACKTRACE__}
   end
 
   # A universe that ran off the rails takes the session with it — but not the
   # battery: the machine the player was listening to is written first, exactly
   # as the single loop writes it before letting the crash report fly. The
-  # exception is carried out of the task rather than allowed to kill it,
-  # because an exit out of `Task.await_many` would arrive here with the
-  # cartridge unsaved.
-  defp landed(_ctx, {:ok, pixels, rgb, state, ram, apu}), do: {pixels, rgb, {state, ram, apu}}
+  # exception is carried back across the barrier rather than allowed to kill
+  # the process holding it, because an exit would arrive here with the
+  # cartridge unsaved — and with nobody left to say where the machine stood.
+  defp landed(_ctx, {:ok, pixels, rgb, pcm}), do: {pixels, rgb, pcm}
 
   defp landed(ctx, {:derailed, error, stacktrace}) do
-    Save.flush(ctx.ram, ctx.sav)
+    {_state, ram, _apu} = focused_machine(ctx)
+    Save.flush(ram, ctx.sav)
     reraise error, stacktrace
   end
 
-  # The sound of the universe being listened to, and only that one. The other
-  # three still consume their captured triggers — an unheard machine's APU has
-  # to stay coherent, or a focus switch would land in the middle of a note
-  # nobody ever played.
-  defp voiced(ctx, stepped) do
-    stepped
-    |> Enum.with_index()
-    |> Enum.map_reduce(ctx.audio, fn {{_pixels, _rgb, {state, ram, apu}}, universe}, audio ->
-      if universe == ctx.split.focus do
-        {ram, apu, audio} = sound(ram, apu, audio)
-        {{state, ram, apu}, audio}
-      else
-        {_pcm, ram, apu} = APU.samples(ram, apu, 0)
-        {{state, ram, apu}, audio}
-      end
-    end)
+  defp focused_machine(ctx) do
+    ctx.split.universes
+    |> Enum.at(ctx.split.focus)
+    |> Universe.machine(@split_await)
   end
 
   # A frame with its universe written on it. `?F` is left alone: a shell that
@@ -698,8 +691,12 @@ defmodule Atomboy.Server do
     if Map.has_key?(ctx.ram, :link) do
       split_refuse(ctx, "the fork")
     else
-      machines = Enum.map(@nudges, &nudged({ctx.state, ctx.ram, ctx.apu}, &1))
-      %{ctx | split: %Split{machines: machines, focus: 0}}
+      universes =
+        Enum.map(@nudges, fn nudge ->
+          Universe.open(ctx.rom, nudged({ctx.state, ctx.ram, ctx.apu}, nudge))
+        end)
+
+      %{ctx | split: %Split{universes: universes, focus: 0}}
     end
   end
 
@@ -736,7 +733,9 @@ defmodule Atomboy.Server do
   defp commit(%{split: nil} = ctx, _k), do: ctx
 
   defp commit(ctx, k) do
-    {state, ram, apu} = Enum.at(ctx.split.machines, k)
+    {state, ram, apu} = ctx.split.universes |> Enum.at(k) |> Universe.machine(@split_await)
+    Enum.each(ctx.split.universes, &Universe.close/1)
+
     %{ctx | split: nil, state: state, ram: ram, apu: apu}
   end
 
