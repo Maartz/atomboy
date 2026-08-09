@@ -1476,6 +1476,9 @@ struct HUDButton: View {
     // A button that stays down after the click says so: the glyph takes the
     // accent colour and a faint tablet behind it.
     var active = false
+    // A verb the moment cannot honour goes pale and stops answering, rather
+    // than leaving a hole in the row where it stood a second ago.
+    var disabled = false
     let action: () -> Void
 
     var body: some View {
@@ -1483,6 +1486,7 @@ struct HUDButton: View {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(active ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                .opacity(disabled ? 0.35 : 1)
                 .frame(width: 34, height: 30)
                 .background {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -1491,6 +1495,7 @@ struct HUDButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
         .help(tooltip)
         .accessibilityLabel(tooltip)
         .accessibilityAddTraits(active ? .isSelected : [])
@@ -1527,6 +1532,20 @@ struct HUD: View {
                 tooltip: engine.turboLatched ? "Turbo — on (Tab)" : "Turbo (Tab)",
                 active: engine.turboLatched
             ) { engine.toggleTurbo() }
+            // The reel out of the drawer and onto the glass, next to turbo
+            // because they are the two things a hand reaches for mid-game: one
+            // click starts the take on the machine as it stands, the next stops
+            // it and files it. It lights the way turbo does — from the engine's
+            // answer, never from the click — and while a movie is playing back
+            // there is nothing to record over, so the button sits it out.
+            HUDButton(
+                symbol: "record.circle",
+                tooltip: recordTooltip,
+                active: engine.movie == .recording,
+                disabled: engine.movie == .replaying
+            ) {
+                if engine.movie == .recording { engine.stopMovie() } else { engine.recordMovie() }
+            }
             HUDButton(symbol: "square.and.arrow.down", tooltip: "Save State (⌘S)") { engine.press("s") }
             HUDButton(symbol: "arrow.counterclockwise", tooltip: "Load State (⌘R)") { engine.press("r") }
             HUDButton(symbol: "square.stack", tooltip: "Saves (⌘⇧S)") { engine.savesRequested = true }
@@ -1535,6 +1554,17 @@ struct HUD: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .modifier(Glass())
+    }
+
+    // The same three words the menu item wears, with the key that reaches it
+    // — a tooltip that reads "Record Movie" while one is already being written
+    // would be the button lying about what the click does.
+    private var recordTooltip: String {
+        switch engine.movie {
+        case .idle: return "Record Movie (⇧⌘R)"
+        case .recording: return "Stop Recording & Save (⇧⌘R)"
+        case .replaying: return "Replaying a movie"
+        }
     }
 }
 
@@ -1561,6 +1591,16 @@ struct MovieCommands: View {
             .disabled(engine.isIdle)
 
             Button("Replay Movie…") { delegate.chooseMovie() }
+                .disabled(engine.isIdle)
+
+            // One frame, bought while the world is held still. The same byte
+            // the '.' key sends, so the engine cannot tell the two apart: it
+            // moves the machine while paused and is politely ignored while it
+            // runs. The equivalent wears ⌘ like every other item in this menu
+            // — a bare '.' in the menu bar would be taken out of the mouths of
+            // the app's own text fields, where a save is given its name.
+            Button("Frame Advance") { engine.press(".") }
+                .keyboardShortcut(".")
                 .disabled(engine.isIdle)
         }
     }
