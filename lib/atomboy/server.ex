@@ -1,3 +1,26 @@
+defmodule Atomboy.Server.Split do
+  @moduledoc """
+  Four machines where there was one.
+
+  A machine is the `{state, ram, apu}` trio a snapshot freezes, and a split
+  is four of them plus the one being listened to. The list is ordered by
+  universe: index 0 is the unperturbed original — the future that would
+  have happened anyway — and 1 to 3 were nudged apart at the divider.
+
+  The struct is the whole of the split's state: no frame counter of its
+  own (the four are stepped together, so the loop's own counter speaks for
+  all of them) and no memory of what was live before the fork, because
+  universe 0 already is it.
+  """
+
+  @typedoc "The trio a snapshot freezes: registers, memory map, sound."
+  @type machine :: {struct(), map(), struct()}
+
+  @type t :: %__MODULE__{machines: [machine()], focus: 0..3}
+
+  defstruct machines: [], focus: 0
+end
+
 defmodule Atomboy.Server do
   @moduledoc """
   Server mode: atomboy as the engine behind a native shell.
@@ -8,9 +31,11 @@ defmodule Atomboy.Server do
   ## Output (stdout)
 
       <<?F, rgb::binary-69120>>          one 160×144 frame in RGB24
+      <<?U, universe, rgb::binary-69120>>  the same, from one of four
       <<?A, n::16-big, pcm::binary-n>>   s16le stereo PCM at 32,768 Hz
       <<?P, preset>>                     the panel, announced
       <<?R, state>>                      the movie: 0 idle, 1 recording, 2 replaying
+      <<?S, split, focus>>               the multiverse, answered
 
   The RGB comes out of the same `Screen.to_rgb` as the window — palette
   included, overlay menu included: the shell draws, it knows nothing. The
@@ -88,6 +113,41 @@ defmodule Atomboy.Server do
   one — a recorded run is told the same time on every replay, and the
   shell greys the control out for the duration.
 
+  ## The multiverse
+
+  One operation, `<<?S, verb::4, universe::4>>`, holds all four verbs:
+
+      0x00  fork    — four copies of the live machine, and the split begins
+      0x1k  focus k — which universe is heard (and mirrored into the loop)
+      0x2k  commit k — keep machine k, drop the other three
+      0x30  abort   — commit universe 0, the future that would have happened
+
+  A fork copies the machine four times and nudges each copy's *internal*
+  divider counter by 0, 17, 37 and 59 T-cycles. Universe 0 takes the zero,
+  and takes it as a no-op: not one key of its map moves, so it runs the
+  frames the unsplit session would have run, byte for byte. The other
+  three read DIV a shade out of phase from there on, and a game whose luck
+  is drawn off timing draws different luck.
+
+  While a split is up, the same joypad reaches all four machines through
+  the same seam, the four are stepped **in parallel** (one `Task` each,
+  awaited before the frame ends, so they are always at the same frame
+  count), and every frame leaves as `?U` — the bare `?F` is untouched, so
+  ordinary play is byte for byte the stream it always was. `?A` is
+  unchanged too: only the focused universe is heard.
+
+  Refused while split, each with a note: a second fork, a movie (recording
+  and replay both), a state written or loaded, a pull off the rewind ring,
+  and turbo — every one of them hides an "in which universe?" this version
+  does not answer. And the other way round: a fork is refused while a take
+  records or replays, while the cable is plugged, while turbo is engaged,
+  and while a split is already up.
+
+  Every `?S` operation is answered with `<<?S, split, focus>>` — 1 or 0 for
+  whether four machines are running, and which one is heard — whether it
+  was honoured or refused. The shell is never optimistic about a click: a
+  refused fork answers "still one machine", and the UI stays where it was.
+
   Everything else is the usual machinery: menu inside the frame, states,
   mixer, link cable (`--listen`/`--link` work in server mode too).
   """
@@ -109,8 +169,21 @@ defmodule Atomboy.Server do
   alias Atomboy.PPU
   alias Atomboy.Save
   alias Atomboy.Screen
+  alias Atomboy.Server.Split
 
   @frame_us 16_742
+
+  # The visible divider byte. The counter behind it lives under `:div_acc`,
+  # which is where a fork's nudge actually lands — see `nudged/2`.
+  @div 0xFF04
+
+  # What the four universes are offset by, in T-cycles of divider. Universe
+  # 0 first, and its zero is load-bearing.
+  @nudges [0, 17, 37, 59]
+
+  # How long the loop waits for four machines to finish a frame. A frame is
+  # milliseconds; this is the length of a hang, not of a slow machine.
+  @split_await 30_000
 
   @keys %{
           ?U => :up,
@@ -207,6 +280,12 @@ defmodule Atomboy.Server do
             note: nil,
             # The one frame `?.` buys while the menu holds the world still.
             advance: false,
+            # Nothing, or the four machines a fork put where this one was.
+            # While it stands, `state`, `ram` and `apu` above mirror the
+            # focused universe at the end of every frame — so the battery
+            # that is autosaved, the machine a crash flushes and the one a
+            # commit lands on are all the future the player is listening to.
+            split: nil,
             # What a power cycle must remember: the codes of boot.
             reset: %{codes: Keyword.get(opts, :codes, "")},
             deadline: System.monotonic_time(:microsecond) + @frame_us
@@ -258,6 +337,8 @@ defmodule Atomboy.Server do
       ctx when ctx.menu != nil ->
         menu_idle(ctx)
 
+      # A split refuses the rewind key at the door (`press/3`), so a held
+      # rewind cannot be standing here while four machines run.
       ctx ->
         if MapSet.member?(ctx.down, :rewind), do: rewind_step(ctx), else: step(ctx)
     end
@@ -268,6 +349,8 @@ defmodule Atomboy.Server do
     written(ctx)
     :ok
   end
+
+  defp step(%{split: %Split{}} = ctx), do: split_step(ctx)
 
   defp step(ctx) do
     held = MapSet.to_list(ctx.down)
@@ -457,6 +540,215 @@ defmodule Atomboy.Server do
 
   defp remember(ctx), do: ctx
 
+  # ── The multiverse ──────────────────────────────────────────────────────────
+
+  # One frame, four times over. The pad is settled once — through the play
+  # loop's own seam, so a split reads exactly the buttons the single machine
+  # would have read — and handed to every universe unchanged: the fork is in
+  # the machines' luck, never in the player's hands.
+  #
+  # The ring does not grow while the split is up. Its entries are the shared
+  # past every universe came out of, which is why a commit keeps them; a
+  # snapshot of one universe among four would be a machine the other three
+  # never stood at, and the rewind key is refused for that very reason.
+  defp split_step(ctx) do
+    held = MapSet.to_list(ctx.down)
+    {ctx, dpad, btns} = Play.pad(ctx, held)
+    ctx = announce_movie(ctx)
+
+    stepped = advance(ctx, dpad, btns)
+    {machines, audio} = voiced(ctx, stepped)
+
+    stepped
+    |> Enum.with_index()
+    |> Enum.each(fn {{_pixels, rgb, _machine}, universe} -> emit_universe(universe, rgb) end)
+
+    # The same absolute pacing the single machine keeps: four universes are
+    # four times the work, never four times the speed.
+    now = System.monotonic_time(:microsecond)
+    deadline = max(ctx.deadline, now - 100_000)
+    if deadline > now + 999, do: Process.sleep(div(deadline - now, 1000))
+
+    # The focused universe mirrored into the loop's own machine — the one a
+    # crash flushes and the one the session's last save is taken from. The
+    # battery itself is left alone until the split is over: a cartridge must
+    # not be written from a future that is still up for abandoning.
+    {state, ram, apu} = Enum.at(machines, ctx.split.focus)
+    {pixels, _rgb, _machine} = Enum.at(stepped, ctx.split.focus)
+
+    %{
+      ctx
+      | split: %Split{ctx.split | machines: machines},
+        state: state,
+        ram: ram,
+        apu: apu,
+        audio: audio,
+        frame: ctx.frame + 1,
+        deadline: deadline + @frame_us,
+        last_frame: pixels
+    }
+    |> loop()
+  end
+
+  # The four machines stepped at once, one `Task` each: the BEAM's schedulers
+  # put them on four cores and the frame costs what the slowest universe
+  # costs rather than what all four do. Awaited before this function returns,
+  # so the four can never be at different frame counts — lockstep is not
+  # bookkeeping here, it is the shape of the code.
+  #
+  # The picture is turned into RGB inside the task too: it is pure, it is a
+  # quarter of the work, and doing it here would serialise what the split
+  # exists to spread.
+  defp advance(ctx, dpad, btns) do
+    ctx.split.machines
+    |> Enum.map(fn {state, ram, apu} ->
+      Task.async(fn -> one_universe(ctx, {state, ram, apu}, dpad, btns) end)
+    end)
+    |> Task.await_many(@split_await)
+    |> Enum.map(&landed(ctx, &1))
+  end
+
+  defp one_universe(ctx, {state, ram, apu}, dpad, btns) do
+    ram =
+      ram
+      |> CartLoop.rtc_live()
+      |> Joypad.set(dpad, btns)
+      |> Codes.applique()
+
+    {pixels, state, ram} = Screen.frame(state, ctx.rom, ram, true)
+    {:ok, pixels, Screen.to_rgb(pixels, ctx.palette, ctx.lcd), state, ram, apu}
+  rescue
+    e in [Atomboy.CPU.Unimplemented, Atomboy.CPU.Derailed] ->
+      {:derailed, e, __STACKTRACE__}
+  end
+
+  # A universe that ran off the rails takes the session with it — but not the
+  # battery: the machine the player was listening to is written first, exactly
+  # as the single loop writes it before letting the crash report fly. The
+  # exception is carried out of the task rather than allowed to kill it,
+  # because an exit out of `Task.await_many` would arrive here with the
+  # cartridge unsaved.
+  defp landed(_ctx, {:ok, pixels, rgb, state, ram, apu}), do: {pixels, rgb, {state, ram, apu}}
+
+  defp landed(ctx, {:derailed, error, stacktrace}) do
+    Save.flush(ctx.ram, ctx.sav)
+    reraise error, stacktrace
+  end
+
+  # The sound of the universe being listened to, and only that one. The other
+  # three still consume their captured triggers — an unheard machine's APU has
+  # to stay coherent, or a focus switch would land in the middle of a note
+  # nobody ever played.
+  defp voiced(ctx, stepped) do
+    stepped
+    |> Enum.with_index()
+    |> Enum.map_reduce(ctx.audio, fn {{_pixels, _rgb, {state, ram, apu}}, universe}, audio ->
+      if universe == ctx.split.focus do
+        {ram, apu, audio} = sound(ram, apu, audio)
+        {{state, ram, apu}, audio}
+      else
+        {_pcm, ram, apu} = APU.samples(ram, apu, 0)
+        {{state, ram, apu}, audio}
+      end
+    end)
+  end
+
+  # A frame with its universe written on it. `?F` is left alone: a shell that
+  # knows nothing of splits reads the stream it always read.
+  defp emit_universe(universe, rgb), do: IO.binwrite(:stdio, [<<?U, universe>>, rgb])
+
+  # The engine's answer to a `?S`, honoured or refused: how many machines are
+  # running and which one is heard. Sent on every operation rather than only
+  # on the ones that changed something, because the question a refusal
+  # answers is precisely "did that click do anything?".
+  defp announce_split(ctx) do
+    case ctx.split do
+      %Split{focus: focus} -> IO.binwrite(:stdio, <<?S, 1, focus>>)
+      nil -> IO.binwrite(:stdio, <<?S, 0, 0>>)
+    end
+
+    ctx
+  end
+
+  # The four verbs, in one value byte: the verb in the high nibble, the
+  # universe in the low one.
+  defp split_op(ctx, value) do
+    case {bsr(value, 4), value &&& 0x0F} do
+      {0, _any} -> fork(ctx)
+      {1, k} when k in 0..3 -> focused(ctx, k)
+      {2, k} when k in 0..3 -> commit(ctx, k)
+      # Abort is not a verb of its own: it is commit 0, and universe 0 is the
+      # future that would have happened anyway.
+      {3, _any} -> commit(ctx, 0)
+      _unknown -> ctx
+    end
+  end
+
+  # Four copies of the live machine, three of them nudged. Refused by
+  # everything that would leave "in which universe?" unanswered: a take being
+  # written or read, the cable, a split already up — and turbo, which is
+  # refused the other way round too. Dropping turbo silently to make room for
+  # a fork would answer a question the player did not ask, and a split
+  # sprinting at eight times the rate is four screens nobody can watch.
+  defp fork(%{split: %Split{}} = ctx), do: split_refuse(ctx, "a second fork")
+  defp fork(%{movie: movie} = ctx) when movie != nil, do: split_refuse(ctx, "the fork")
+  defp fork(%{turbo: true} = ctx), do: split_refuse(ctx, "the fork")
+
+  defp fork(ctx) do
+    if Map.has_key?(ctx.ram, :link) do
+      split_refuse(ctx, "the fork")
+    else
+      machines = Enum.map(@nudges, &nudged({ctx.state, ctx.ram, ctx.apu}, &1))
+      %{ctx | split: %Split{machines: machines, focus: 0}}
+    end
+  end
+
+  # The nudge, on the counter and not on the byte. What 0xFF04 shows is the
+  # top half of a sixteen-bit counter the hardware ticks every T-cycle; here
+  # the bottom half is `:div_acc`, the T-cycles the timer has not yet carried
+  # (`Atomboy.Timer.advance/2`). Offsetting the pair moves the *phase* of
+  # every future DIV read — which is what a game that seeds its randomness on
+  # the divider actually reads — where writing 0xFF04 alone would be overrun
+  # by the next carry and forgotten.
+  #
+  # Universe 0 takes the zero and takes it whole: not one key of the map is
+  # touched, not even to write back what was already there, because the proof
+  # that a split changes nothing is a proof about this exact map.
+  defp nudged(machine, 0), do: machine
+
+  defp nudged({state, ram, apu}, offset) do
+    counter = bsl(Map.get(ram, @div, 0), 8) ||| Map.get(ram, :div_acc, 0)
+    counter = counter + offset &&& 0xFFFF
+
+    {state, ram |> Map.put(@div, bsr(counter, 8)) |> Map.put(:div_acc, counter &&& 0xFF), apu}
+  end
+
+  # Which universe is heard. The mirror follows at the end of the next frame,
+  # which is soon enough: nothing between here and there reads it.
+  defp focused(%{split: nil} = ctx, _k), do: ctx
+  defp focused(ctx, k), do: %{ctx | split: %Split{ctx.split | focus: k}}
+
+  # Machine k kept, the other three dropped. Nothing is added on the way in:
+  # a fork copies the live memory map, which never carries the take's stamp
+  # (only a *frozen* machine does — `Play.stamp/2`), and a commit is not the
+  # place for one to be invented. The rewind ring survives untouched, because
+  # every entry on it is from the past all four universes shared.
+  defp commit(%{split: nil} = ctx, _k), do: ctx
+
+  defp commit(ctx, k) do
+    {state, ram, apu} = Enum.at(ctx.split.machines, k)
+    %{ctx | split: nil, state: state, ram: ram, apu: apu}
+  end
+
+  # The note the shared functions write. The shell has no status line to put
+  # it on — it learns the same news from the `?S` answer — but a refusal that
+  # says nothing anywhere is a refusal nobody can debug.
+  defp split_refuse(ctx, what),
+    do: %{ctx | note: {"#{what} unavailable: the reality is split", 120}}
+
+  defp split?(%{split: %Split{}}), do: true
+  defp split?(_ctx), do: false
+
   # ── The keys ────────────────────────────────────────────────────────────────
 
   defp drain(ctx) do
@@ -502,19 +794,17 @@ defmodule Atomboy.Server do
       {:key, ?T, value} ->
         drain(turbo_speed(ctx, value))
 
+      # The multiverse: fork, focus, commit, abort — one op, four verbs, and
+      # the engine's own answer to every one of them.
+      {:key, ?S, value} ->
+        drain(announce_split(split_op(ctx, value)))
+
       # The save browser: list, save, load, delete, profile, export.
       {:library, :list} ->
         drain(emit_library(ctx))
 
       {:library, :save, name} ->
-        Library.save_state(
-          ctx.lib,
-          name,
-          {ctx.state, Play.stamp(ctx, ctx.ram), ctx.apu},
-          Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
-        )
-
-        drain(emit_library(ctx))
+        drain(emit_library(save_named(ctx, name)))
 
       {:library, :load, name} ->
         drain(load_named(ctx, name))
@@ -533,15 +823,20 @@ defmodule Atomboy.Server do
       # The movie ops. Recording starts on the machine as it stands — the
       # player who clicked is mid-game — and stopping writes the take into
       # the game's folder, which is where the shell's open panel will find
-      # it again.
+      # it again. Both directions of one refusal meet here too: a take
+      # cannot begin over four machines, and a fork cannot begin over a take.
       {:key, ?R, 1} ->
-        drain(announce_movie(Play.start_recording(ctx)))
+        if split?(ctx),
+          do: drain(split_refuse(ctx, "recording")),
+          else: drain(announce_movie(Play.start_recording(ctx)))
 
       {:key, ?R, _stop} ->
         drain(announce_movie(elem(Play.stop_and_save(ctx), 1)))
 
       {:movie, :replay, path} ->
-        drain(announce_movie(Play.replay(ctx, path)))
+        if split?(ctx),
+          do: drain(split_refuse(ctx, "replay")),
+          else: drain(announce_movie(Play.replay(ctx, path)))
 
       {:key, op, key} ->
         case press(ctx, op, Map.get(@keys, key)) do
@@ -615,6 +910,17 @@ defmodule Atomboy.Server do
   # plugged in (the serial protocol demands the tempo); on the way out, the
   # audio pacing restarts from zero — no catch-up burst inherited from the
   # sprint.
+  #
+  # Refused while split, and the split is refused while turbo runs: four
+  # machines at eight times the rate are four screens nobody can watch, and
+  # the pacing a fork inherits has to be the one the player was playing at.
+  defp press(%{split: %Split{}} = ctx, ?+, :turbo), do: split_refuse(ctx, "turbo")
+  defp press(%{split: %Split{}} = ctx, ?-, :turbo), do: ctx
+
+  # The rewind key never joins the held set while the reality is split: a
+  # pull off the ring is a state load, and a state load has no universe.
+  defp press(%{split: %Split{}} = ctx, ?+, :rewind), do: split_refuse(ctx, "rewind")
+
   defp press(ctx, op, :turbo) when op in [?+, ?-] do
     tag = if op == ?+, do: :press, else: :release
 
@@ -644,16 +950,9 @@ defmodule Atomboy.Server do
 
   defp menu_action(_action, :quit), do: :quit
 
-  defp menu_action(:save_state, ctx) do
-    Library.save_state(
-      ctx.lib,
-      slot_name(ctx),
-      {ctx.state, Play.stamp(ctx, ctx.ram), ctx.apu},
-      Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
-    )
-
-    ctx
-  end
+  # The slot's own save and load go through the browser's doors, refusals
+  # included — the menu is another way of pressing a key, not another rule.
+  defp menu_action(:save_state, ctx), do: save_named(ctx, slot_name(ctx))
 
   defp menu_action(:load_state, ctx), do: load_named(ctx, slot_name(ctx))
 
@@ -680,9 +979,31 @@ defmodule Atomboy.Server do
         | lcd: LCD.compile(ctx.lcd.preset, ctx.palette, Map.get(ctx.ram, :cgb, false), ctx.dial)
       })
 
+  # A machine frozen under its name, portrait included. Refused while the
+  # reality is split: four machines have four presents, and a file that names
+  # one of them without saying which is a file nobody can load back.
+  defp save_named(%{split: %Split{}} = ctx, _name), do: split_refuse(ctx, "saving a state")
+
+  defp save_named(ctx, name) do
+    Library.save_state(
+      ctx.lib,
+      name,
+      {ctx.state, Play.stamp(ctx, ctx.ram), ctx.apu},
+      Library.screenshot(ctx.last_frame, ctx.palette, ctx.lcd)
+    )
+
+    ctx
+  end
+
   # A state by name, through the play loop's own door: the cable survives
   # the trip through time, the take's stamp comes off the machine before
   # the cartridge ever sees it, and a state loaded mid-take re-records.
+  #
+  # Refused while split, for the mirror image of the reason a save is: a
+  # machine landing into one of four universes would leave the other three
+  # standing somewhere the player never played.
+  defp load_named(%{split: %Split{}} = ctx, _name), do: split_refuse(ctx, "loading a state")
+
   defp load_named(ctx, name) do
     case Library.load_state(ctx.lib, name) do
       {:ok, frozen} ->
