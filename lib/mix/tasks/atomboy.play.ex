@@ -20,15 +20,23 @@ defmodule Mix.Tasks.Atomboy.Play do
 
   ## Saves
 
-  The cartridge's battery-backed RAM lives in a `.sav` next to the ROM — the
-  emulator convention, so the files travel both ways. Reloaded on launch,
-  written on exit and every ~10 s as soon as the game has written something.
+  The cartridge's battery-backed RAM lives in the library: one folder per
+  game, keyed by the header rather than by the file's name, so the saves
+  follow a ROM that moves or is renamed. On a game's first sight whatever
+  the sidecar convention left next to the ROM is copied in — the emulator
+  convention, so the files travel both ways — and a library root that
+  cannot be written falls back to those sidecar files entirely. Reloaded on
+  launch, written on exit and every ~10 s as soon as the game has written
+  something.
 
   ## Options
 
     * `--window` — play in a real window (wxWidgets) rather than in the
       terminal: real keyboard events, crisp pixels at scale, and none of the
       terminal's prerequisites (neither `bin/play` nor a minimum size).
+    * `--server` — draw nothing and speak the binary protocol of
+      `Atomboy.Server` on stdout instead: the door a native shell comes
+      through, not a way to play from a terminal.
     * `--hold N` — hold frames per keystroke (default 10), for terminals
       without the kitty keyboard protocol; with it (Ghostty…), key state is
       real and this setting no longer matters.
@@ -44,15 +52,32 @@ defmodule Mix.Tasks.Atomboy.Play do
       sharp: hundreds of in-between colours would defeat the run-length
       encoding that keeps the terminal at 60 fps). Also on the PANEL row of
       the menu.
+    * `--dial 0-100` — the contrast wheel under the DMG's thumb: turned up,
+      every shade slides toward the darkest; turned down, toward the bare
+      reflector. Only means anything on a panel — `raw` is the absence of
+      one.
+    * `--dmg` — force the monochrome machine on a cartridge that would have
+      woken in colour.
     * `--dump f.pgm` — write the last frame as an image on exit.
+    * `--dump-every N` — and write that same file every N frames while the
+      game runs: an eye on the session from outside.
     * `--turbo 2|4|8` — how fast fast-forward runs: two, four or eight times
       the console's cadence, the screen keeping its own rate. Left out, `Tab`
       runs as fast as the machine allows, as it always has.
-    * `--save name` — a save profile: `.sav` and `.state` become
-      `rom.name.sav`/`rom.name.state`. Essential for linking two instances of
-      the same game on one machine — two players, two save files. And in
-      game, keys `1`-`9` pick the current state slot for s/r — nine snapshots
-      per save.
+    * `--codes 01VVLLHH,…` — GameShark pokes, written before every frame;
+      an unreadable one is reported on stderr and ignored.
+    * `--save name` — a save profile: the battery becomes `name.sav` in the
+      game's library folder, with its own states beside it. Essential for
+      linking two instances of the same game on one machine — two players,
+      two save files. And in game, keys `1`-`9` pick the current state slot
+      for s/r — nine snapshots per profile.
+    * `--library dir` — where that library lives; the platform's user-data
+      folder otherwise.
+    * `--record take.tas` / `--replay take.tas` — the movie: one joypad byte
+      per frame from the boot on, and a replay deals the very same frames
+      back. Not with the cable plugged in — the other console is the one
+      input no track can promise to deal again. `mix atomboy.export` turns a
+      take into an MP4 or a GIF.
     * `--listen [port]` / `--link host:port` — the link cable over TCP: one
       side listens (7373 by default), the other calls, and the two consoles
       trade their serial bytes just as they did over the real cable — Pokémon
@@ -60,8 +85,8 @@ defmodule Mix.Tasks.Atomboy.Play do
 
   ## In game
 
-    * `s` freezes the whole machine into a `.state` next to the ROM, `r`
-      revives it — save before a boss, retry forever.
+    * `s` freezes the whole machine into the current slot's state in the
+      library, `r` revives it — save before a boss, retry forever.
     * `Tab` toggles fast-forward (part of the frames drawn, sound muted) —
       intros go by in seconds. `--turbo` picks how fast.
     * `Backspace`, held down, rewinds — up to forty seconds back, ten frames

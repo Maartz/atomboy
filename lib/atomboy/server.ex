@@ -48,7 +48,7 @@ defmodule Atomboy.Server do
   stderr — stdout stays a pure binary stream.
 
   `?P` carries the index into `Atomboy.LCD.presets/0` (0 raw, 1 dmg,
-  2 pocket, 3 cgb), sent before the first frame and again whenever the
+  2 pocket, 3 cgb, 4 crt), sent before the first frame and again whenever the
   menu changes it. It exists because the response curve does *not* run
   here: unlike the window, the server ships its frames un-ghosted. The
   shell owns the display, so the shell owns time — its shader applies the
