@@ -370,6 +370,16 @@ final class MetalScreen {
         lock.unlock()
     }
 
+    // Forget the last frame without changing panels: the next one arrives
+    // ghost-free. A screen that has been dark through a whole split has a
+    // memory two minutes stale, and a ghost of the future somebody did not
+    // choose is not a ghost of anything.
+    func reseed() {
+        lock.lock()
+        seed = true
+        lock.unlock()
+    }
+
     // The view resized (or moved to another display): the drawable follows
     // the device pixels. The next frame repaints — at 60 Hz it is never
     // far away.
@@ -519,6 +529,77 @@ final class MetalScreen {
         commands.present(drawable)
         commands.commit()
     }
+}
+
+// ── One picture, and the pipeline behind it ──────────────────────────────────
+
+// A screen the engine can draw into: the Metal panel when the device wakes,
+// the plain CALayer when it does not. Ordinary play has one of these. A split
+// hands one to each of four universes, and they are FOUR REAL PIPELINES
+// rather than one shared blitter, because the response pass ping-pongs
+// through a pair of textures that *are* that screen's memory of the last
+// frame. Share them and four futures smear into one ghost — the one thing
+// the panel simulation exists to get right, lost exactly where four pictures
+// of the same game most need telling apart. The cost of the honest answer is
+// four command queues and about 370 KB of texture, made once at the first
+// fork and kept for the next one.
+final class UniverseScreen {
+    let metal: MetalScreen?
+    let layer: CALayer
+
+    init() {
+        if let metal = MetalScreen() {
+            self.metal = metal
+            layer = metal.layer
+        } else {
+            metal = nil
+            let fallback = CALayer()
+            fallback.magnificationFilter = .nearest
+            fallback.contentsGravity = .resizeAspect
+            fallback.backgroundColor = NSColor.black.cgColor
+            layer = fallback
+        }
+    }
+
+    func draw(_ rgb: Data) {
+        if let metal {
+            metal.submit(rgb)
+            return
+        }
+
+        guard let provider = CGDataProvider(data: rgb as CFData),
+              let image = CGImage(
+                  width: WIDTH, height: HEIGHT, bitsPerComponent: 8, bitsPerPixel: 24,
+                  bytesPerRow: WIDTH * 3, space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: false,
+                  intent: .defaultIntent)
+        else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.contents = image
+        CATransaction.commit()
+    }
+}
+
+// ── The multiverse, as the shell knows it ────────────────────────────────────
+
+// The four verbs of a fork, in the value byte the engine reads: the verb in
+// the high nibble, the universe in the low one.
+enum SplitVerb: UInt8 {
+    case fork = 0
+    case focus = 1
+    case commit = 2
+    case abort = 3
+}
+
+// The engine's answer to a '?S': whether four machines are running, and which
+// one is heard. Only the announcement ever writes this — a refused fork
+// answers "still one machine", and the stage stays where it was.
+struct Split: Equatable {
+    var active = false
+    var focus = 0
 }
 
 // ── The engine ────────────────────────────────────────────────────────────────
@@ -740,10 +821,8 @@ enum MovieState: UInt8 {
 }
 
 final class Engine: ObservableObject {
-    // The Metal path when the device wakes, the CALayer otherwise — one
-    // `layer` either way, and the view never knows which it got.
-    let metal = MetalScreen()
-    let layer: CALayer
+    // The one machine's picture. Four more are made at the first fork.
+    let screen = UniverseScreen()
     @Published var settingsRequested = false
     @Published var savesRequested = false
     @Published var library: LibraryInfo?
@@ -759,6 +838,14 @@ final class Engine: ObservableObject {
     // outright while the link cable is plugged. A badge lit at the click
     // site would light for a refusal too, so this one waits to be told.
     @Published private(set) var movie: MovieState = .idle
+    // Four machines, or one — and which of the four is heard. Same contract
+    // as the take above, and for the same reason: the fork is refused often
+    // enough that a stage lit at the click site would light for a refusal.
+    @Published private(set) var split = Split()
+    // Whether this engine was launched with the cable out, either end of it.
+    // The fork refuses a linked machine, and the menu says so before the
+    // click rather than after.
+    @Published private(set) var linked = false
     let link = LinkCenter()
     // The port both sides of the cable agree on — the engine's
     // Link.default_port, coupled the same knowing way as "atomboy-moteur".
@@ -793,17 +880,17 @@ final class Engine: ObservableObject {
         commonFormat: .pcmFormatFloat32, sampleRate: 32768, channels: 2, interleaved: false)!
     private var audioStarted = false
 
-    init() {
-        if let metal {
-            layer = metal.layer
-        } else {
-            let fallback = CALayer()
-            fallback.magnificationFilter = .nearest
-            fallback.contentsGravity = .resizeAspect
-            fallback.backgroundColor = NSColor.black.cgColor
-            layer = fallback
-        }
+    // The four universes' pictures, made at the first fork and kept: a second
+    // split reuses the same pipelines, re-seeded so nobody inherits a ghost
+    // from a future that was not chosen.
+    private var forked: [UniverseScreen] = []
 
+    func screen(universe: Int) -> UniverseScreen {
+        if forked.isEmpty { forked = (0..<4).map { _ in UniverseScreen() } }
+        return forked[max(0, min(3, universe))]
+    }
+
+    init() {
         attachGamepads()
     }
 
@@ -981,6 +1068,18 @@ final class Engine: ObservableObject {
         try? input?.write(contentsOf: data)
     }
 
+    // ── The multiverse: one op out, the truth announced back ─────────────────
+
+    // 'S' carries all four verbs in one value byte — fork, focus k, commit k,
+    // abort — the verb in the high nibble and the universe in the low one.
+    // Nothing here touches `split`: the engine answers every one of these,
+    // honoured or refused, and that answer is the only thing the stage
+    // believes.
+    func sendSplit(_ verb: SplitVerb, universe: Int = 0) {
+        let k = UInt8(max(0, min(3, universe)))
+        try? input?.write(contentsOf: Data([UInt8(ascii: "S"), verb.rawValue << 4 | k]))
+    }
+
     // ── The console's clock: one op out, persisted per game ──────────────────
 
     // 'H' carries how far the console is from real time, in signed seconds:
@@ -1106,6 +1205,7 @@ final class Engine: ObservableObject {
         currentROM = rom
         linkAttempt = linkMode != nil
         hosting = false
+        linked = linkMode != nil
 
         let p = Process()
         p.executableURL = Engine.binary
@@ -1173,9 +1273,11 @@ final class Engine: ObservableObject {
         ConsoleState.shared.releaseAll()
         // A new engine holds nothing: the latch cannot survive the machine it
         // was pressed against, and neither can a take — the one that was
-        // running belonged to the process that just died.
+        // running belonged to the process that just died. Nor can a split:
+        // the other three machines died with the first.
         setLatched(false)
         movie = .idle
+        announce(Split())
 
         // The persisted settings catch up with the freshly born engine.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -1254,6 +1356,8 @@ final class Engine: ObservableObject {
         ConsoleState.shared.releaseAll()
         setLatched(false)
         movie = .idle
+        linked = false
+        announce(Split())
     }
 
     // ── The cable: plugged at boot, like the real one ────────────────────────
@@ -1302,15 +1406,31 @@ final class Engine: ObservableObject {
                     library = info
                 }
                 buffer.removeSubrange(0..<(5 + n))
+            } else if tag == UInt8(ascii: "U") {
+                // A frame with its universe written on it. The focused one is
+                // also the picture ⌘C would copy — the others are futures
+                // nobody has chosen yet.
+                guard buffer.count >= 2 + FRAME_BYTES else { return }
+                let universe = Int(buffer[1])
+                let rgb = buffer.subdata(in: 2..<(2 + FRAME_BYTES))
+                if universe == split.focus { lastFrame = rgb }
+                screen(universe: universe).draw(rgb)
+                buffer.removeSubrange(0..<(2 + FRAME_BYTES))
             } else if tag == UInt8(ascii: "P") {
                 guard buffer.count >= 2 else { return }
-                metal?.panel(Int(buffer[1]))
-                ShellState.shared.follow(panel: Int(buffer[1]))
+                let preset = Int(buffer[1])
+                screen.metal?.panel(preset)
+                for universe in forked { universe.metal?.panel(preset) }
+                ShellState.shared.follow(panel: preset)
                 buffer.removeSubrange(0..<2)
             } else if tag == UInt8(ascii: "R") {
                 guard buffer.count >= 2 else { return }
                 movie = MovieState(rawValue: buffer[1]) ?? .idle
                 buffer.removeSubrange(0..<2)
+            } else if tag == UInt8(ascii: "S") {
+                guard buffer.count >= 3 else { return }
+                announce(Split(active: buffer[1] != 0, focus: Int(buffer[2])))
+                buffer.removeSubrange(0..<3)
             } else {
                 // Stream out of sync: drop the byte and catch up.
                 buffer.removeFirst()
@@ -1320,25 +1440,27 @@ final class Engine: ObservableObject {
 
     private func draw(_ rgb: Data) {
         lastFrame = rgb
+        screen.draw(rgb)
+    }
 
-        if let metal {
-            metal.submit(rgb)
-            return
+    // The engine said how many machines are running. The window re-aspects
+    // from here, and the screens on either side of the change are told to
+    // forget: the four are about to show four futures, and the one is about
+    // to show whichever future was chosen — neither should ghost through
+    // what the other was displaying.
+    private func announce(_ truth: Split) {
+        guard truth != split else { return }
+
+        if truth.active != split.active {
+            if truth.active {
+                for universe in 0..<4 { screen(universe: universe).metal?.reseed() }
+            } else {
+                screen.metal?.reseed()
+            }
+            ShellState.shared.follow(split: truth.active)
         }
 
-        guard let provider = CGDataProvider(data: rgb as CFData),
-              let image = CGImage(
-                  width: WIDTH, height: HEIGHT, bitsPerComponent: 8, bitsPerPixel: 24,
-                  bytesPerRow: WIDTH * 3, space: CGColorSpaceCreateDeviceRGB(),
-                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                  provider: provider, decode: nil, shouldInterpolate: false,
-                  intent: .defaultIntent)
-        else { return }
-
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.contents = image
-        CATransaction.commit()
+        split = truth
     }
 
     private func play(_ pcm: Data) {
@@ -1393,11 +1515,15 @@ final class Engine: ObservableObject {
 
 final class ScreenView: NSView {
     var engine: Engine?
+    // Which picture this view shows: the machine's, or one of four universes'
+    // during a split.
+    var screen: UniverseScreen?
+    var universe: Int?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func makeBackingLayer() -> CALayer {
-        engine?.layer ?? CALayer()
+        screen?.layer ?? CALayer()
     }
 
     // The window keeps its aspect ratio: no black bars — and the keyboard
@@ -1407,6 +1533,13 @@ final class ScreenView: NSView {
     // console's silhouette when a body is worn.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+
+        // Four universes land in one window, and the window only needs
+        // telling once. Universe 0 does the honours for the stage — somebody
+        // has to hold the keyboard while the single screen is unmounted, or
+        // a split would be a game nobody can play out of.
+        guard universe == nil || universe == 0 else { return }
+
         ShellState.shared.lockAspect(of: window)
         window?.isMovableByWindowBackground = true
         window?.makeFirstResponder(self)
@@ -1422,16 +1555,25 @@ final class ScreenView: NSView {
     // resizes and through moves to a display with another scale factor.
     override func layout() {
         super.layout()
-        engine?.metal?.resize(bounds.size, contentsScale: window?.backingScaleFactor ?? 2)
+        screen?.metal?.resize(bounds.size, contentsScale: window?.backingScaleFactor ?? 2)
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        engine?.metal?.resize(bounds.size, contentsScale: window?.backingScaleFactor ?? 2)
+        screen?.metal?.resize(bounds.size, contentsScale: window?.backingScaleFactor ?? 2)
     }
 
     override func keyDown(with event: NSEvent) {
         if event.isARepeat { return }
+
+        // Esc, while four machines run, is the way back to one — asked here,
+        // in the game view's own key handling, before Esc can mean anything
+        // else. No global monitor: the Settings window keeps its own Esc, and
+        // this one never reaches past the game.
+        if event.keyCode == 53, engine?.split.active == true {
+            engine?.sendSplit(.abort)
+            return
+        }
 
         // Esc (or m): the NATIVE panel, not the engine's pixel menu — in a
         // macOS app, settings speak SwiftUI.
@@ -1456,16 +1598,85 @@ final class ScreenView: NSView {
 
 struct Screen: NSViewRepresentable {
     let engine: Engine
+    // Set by the split stage, through the environment rather than through
+    // every body view's signature: a mini console asks for its universe's
+    // picture, and the four bodies stay ignorant of the multiverse.
+    @Environment(\.universe) private var universe
 
     func makeNSView(context: Context) -> ScreenView {
         let view = ScreenView()
         view.engine = engine
+        view.universe = universe
+        view.screen = universe.map { engine.screen(universe: $0) } ?? engine.screen
         view.wantsLayer = true
-        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        // Only the view that holds the keyboard asks for it — the other three
+        // universes would only take it off each other.
+        if universe == nil || universe == 0 {
+            DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        }
         return view
     }
 
     func updateNSView(_ view: ScreenView, context: Context) {}
+}
+
+// ── A click on a console, while the reality is split ─────────────────────────
+
+// The one clickable thing this app draws — and it lives here rather than in
+// Shell.swift, which draws plastic and holds to the rule that a drawn control
+// is a mirror. This is not a drawn control: it is an invisible sheet over one
+// of four consoles, and the whole of its craft is in NOT taking the desk away.
+//
+// The window has no title bar: the plastic, and the air beside it, is what
+// you grab to move the thing. So this view never swallows a mouse-down — it
+// hands the press straight to the window's own drag loop, which returns when
+// the button comes up, and a window that did not move is how we know nobody
+// dragged. Only then was it a click.
+//
+// The second press of a double-click arrives on its own, with the count
+// already at two, after the first has asked for focus. Focus and then commit
+// on the same console is precisely what a double-click means there, and
+// buying the distinction the other way would cost every single click the wait
+// for a second one that usually never comes.
+final class ConsoleTapView: NSView {
+    var onClick: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    // Nothing here wants the keyboard: the screen view keeps it through
+    // every click.
+    override var acceptsFirstResponder: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+
+        if event.clickCount >= 2 {
+            onDoubleClick?()
+            return
+        }
+
+        let before = window.frame.origin
+        window.performDrag(with: event)
+        let after = window.frame.origin
+
+        if abs(after.x - before.x) < 2, abs(after.y - before.y) < 2 { onClick?() }
+    }
+}
+
+struct ConsoleTap: NSViewRepresentable {
+    let onClick: () -> Void
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> ConsoleTapView {
+        let view = ConsoleTapView()
+        view.onClick = onClick
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ view: ConsoleTapView, context: Context) {
+        view.onClick = onClick
+        view.onDoubleClick = onDoubleClick
+    }
 }
 
 // ── The glass HUD: the controls on hover, the screen otherwise ───────────────
@@ -1521,16 +1732,41 @@ struct MovieBadge: View {
     }
 }
 
+// Four machines running, said the way the take above says itself: a light,
+// not a button. Which universe is heard is the one thing about a split the
+// glass has room for — the choosing happens on the consoles themselves.
+struct SplitBadge: View {
+    let split: Split
+
+    var body: some View {
+        if split.active {
+            Image(systemName: "square.split.2x2")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.tint)
+                .frame(width: 22, height: 30)
+                .help("Four universes — listening to \(split.focus + 1)")
+                .accessibilityLabel("Four universes, listening to universe \(split.focus + 1)")
+        }
+    }
+}
+
 struct HUD: View {
     @ObservedObject var engine: Engine
+
+    // Everything on this row that would have to answer "in which universe?"
+    // is refused by the engine while four machines run. The glass says so
+    // before the click rather than swallowing it.
+    private var split: Bool { engine.split.active }
 
     var body: some View {
         HStack(spacing: 2) {
             MovieBadge(state: engine.movie)
+            SplitBadge(split: engine.split)
             HUDButton(
                 symbol: "forward.fill",
                 tooltip: engine.turboLatched ? "Turbo — on (Tab)" : "Turbo (Tab)",
-                active: engine.turboLatched
+                active: engine.turboLatched,
+                disabled: split
             ) { engine.toggleTurbo() }
             // The reel out of the drawer and onto the glass, next to turbo
             // because they are the two things a hand reaches for mid-game: one
@@ -1542,13 +1778,19 @@ struct HUD: View {
                 symbol: "record.circle",
                 tooltip: recordTooltip,
                 active: engine.movie == .recording,
-                disabled: engine.movie == .replaying
+                disabled: engine.movie == .replaying || split
             ) {
                 if engine.movie == .recording { engine.stopMovie() } else { engine.recordMovie() }
             }
-            HUDButton(symbol: "square.and.arrow.down", tooltip: "Save State (⌘S)") { engine.press("s") }
-            HUDButton(symbol: "arrow.counterclockwise", tooltip: "Load State (⌘R)") { engine.press("r") }
-            HUDButton(symbol: "square.stack", tooltip: "Saves (⌘⇧S)") { engine.savesRequested = true }
+            HUDButton(
+                symbol: "square.and.arrow.down", tooltip: "Save State (⌘S)", disabled: split
+            ) { engine.press("s") }
+            HUDButton(
+                symbol: "arrow.counterclockwise", tooltip: "Load State (⌘R)", disabled: split
+            ) { engine.press("r") }
+            HUDButton(symbol: "square.stack", tooltip: "Saves (⌘⇧S)", disabled: split) {
+                engine.savesRequested = true
+            }
             HUDButton(symbol: "slider.horizontal.3", tooltip: "Settings (Esc)") { engine.settingsRequested.toggle() }
         }
         .padding(.horizontal, 10)
@@ -1582,16 +1824,21 @@ struct MovieCommands: View {
         self.engine = delegate.engine
     }
 
+    // A take asks "of which universe?" while four machines run, and the
+    // engine refuses it for exactly that reason. The HUD's reel is already
+    // pale; the menu item behind it says the same thing.
+    private var busy: Bool { engine.isIdle || engine.split.active }
+
     var body: some View {
         Group {
             Button(label) {
                 if engine.movie == .idle { engine.recordMovie() } else { engine.stopMovie() }
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
-            .disabled(engine.isIdle)
+            .disabled(busy)
 
             Button("Replay Movie…") { delegate.chooseMovie() }
-                .disabled(engine.isIdle)
+                .disabled(busy)
 
             // One frame, bought while the world is held still. The same byte
             // the '.' key sends, so the engine cannot tell the two apart: it
@@ -1610,6 +1857,43 @@ struct MovieCommands: View {
         case .idle: return "Record Movie"
         case .recording: return "Stop Recording & Save"
         case .replaying: return "Stop Replay"
+        }
+    }
+}
+
+// The multiverse in the menu bar. ⌘D forks the running game into four, and
+// while four are running these are the two ways back to one — the same two
+// the consoles themselves offer, for the hand that would rather read them
+// than know them.
+//
+// Every item is driven by what the engine last announced, which is the same
+// truth the stage draws itself from: a greyed ⌘D and a refusal note can
+// never disagree, because they are the same fact read twice.
+struct SplitCommands: View {
+    @ObservedObject var engine: Engine
+
+    // What a fork would leave ambiguous: a take being written or read, the
+    // cable, turbo's eight-times sprint across four screens, and a split
+    // already up. The engine refuses each of these at the door; the menu
+    // only mirrors it.
+    private var cannotFork: Bool {
+        engine.isIdle || engine.split.active || engine.movie != .idle || engine.linked
+            || engine.turboLatched
+    }
+
+    var body: some View {
+        Group {
+            Button("Split Reality") { engine.sendSplit(.fork) }
+                .keyboardShortcut("d")
+                .disabled(cannotFork)
+
+            Button("Commit This Future") {
+                engine.sendSplit(.commit, universe: engine.split.focus)
+            }
+            .disabled(!engine.split.active)
+
+            Button("Abort Split") { engine.sendSplit(.abort) }
+                .disabled(!engine.split.active)
         }
     }
 }
@@ -2805,6 +3089,10 @@ struct AtomboyApp: App {
                 Divider()
 
                 MovieCommands(delegate: delegate)
+
+                Divider()
+
+                SplitCommands(engine: delegate.engine)
 
                 Divider()
 

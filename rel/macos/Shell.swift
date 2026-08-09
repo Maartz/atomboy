@@ -236,10 +236,69 @@ struct BodyLayout {
     // this exact shape, so this only bites in fullscreen — where it centres
     // the console on black.
     func fit(in size: CGSize) -> CGSize {
-        let wide = CGSize(width: size.width, height: size.width / aspect)
+        SplitStageLayout.fit(cell: aspect, in: size)
+    }
+}
+
+// ── The stage four consoles stand on ─────────────────────────────────────────
+
+// When the engine forks, the window holds four bodies instead of one. Their
+// arrangement is a silhouette like any other — a ratio the window can lock
+// itself to — so it is written here, in the same units the bodies are: one
+// body's WIDTH is the unit, and everything else is a multiple of it.
+//
+// Two consoles across and two down, with a gap between them and a margin
+// round the lot. For a DMG that comes out at 0.639 against the body's own
+// 0.608: the desk keeps very nearly the shape it had, and each console lands
+// at about 44% of the width it used to have — the ~45% the design asked for,
+// arrived at rather than hard-coded.
+enum SplitStageLayout {
+    static let gap: CGFloat = 0.14
+    // Wide enough that the console being heard has somewhere to stand up
+    // into: it scales a little, and it carries a glow, and neither may meet
+    // the edge of the window.
+    static let margin: CGFloat = 0.10
+
+    // The whole stage, in body widths, for a body of this ratio.
+    static func span(cell: CGFloat) -> CGSize {
+        CGSize(width: 2 + gap + 2 * margin, height: 2 / cell + gap + 2 * margin)
+    }
+
+    static func aspect(cell: CGFloat) -> CGFloat {
+        let span = span(cell: cell)
+        return span.width / span.height
+    }
+
+    // One body's width in points, at whatever size the stage was given.
+    static func unit(cell: CGFloat, in size: CGSize) -> CGFloat {
+        let span = span(cell: cell)
+        return min(size.width / span.width, size.height / span.height)
+    }
+
+    // The largest rect of a given ratio that fits inside another — what a
+    // body does with a window it does not exactly match, and what the
+    // committed console grows into. A cell is not always a body: with ⌘B off
+    // it is the panel's bare 10:9.
+    static func fit(cell: CGFloat, in size: CGSize) -> CGSize {
+        let wide = CGSize(width: size.width, height: size.width / cell)
         return wide.height <= size.height
             ? wide
-            : CGSize(width: size.height * aspect, height: size.height)
+            : CGSize(width: size.height * cell, height: size.height)
+    }
+}
+
+// Which of four consoles a body is, while the reality is split. The Screen
+// inside it reads this and asks the engine for that universe's picture — so
+// the four body views never learn that universes exist, and the split stage
+// is drawn by exactly the code a single console is drawn by.
+private struct UniverseKey: EnvironmentKey {
+    static let defaultValue: Int? = nil
+}
+
+extension EnvironmentValues {
+    var universe: Int? {
+        get { self[UniverseKey.self] }
+        set { self[UniverseKey.self] = newValue }
     }
 }
 
@@ -270,6 +329,14 @@ final class ShellState: ObservableObject {
     // drawing: a console in a window floats on the desktop with nothing
     // behind it, while a console in fullscreen is staged on black.
     @Published private(set) var fullscreen = false {
+        didSet { relockGameWindows() }
+    }
+
+    // Whether four machines are running. The window keeps its own copy of the
+    // engine's announcement because re-aspecting is window business — it has
+    // to happen whether or not any view is looking, and it happens through
+    // the same lockAspect every other change to the shape goes through.
+    @Published private(set) var split = false {
         didSet { relockGameWindows() }
     }
 
@@ -317,27 +384,51 @@ final class ShellState: ObservableObject {
         if body != console { console = body }
     }
 
-    // The window's content ratio: the body's silhouette when it is worn, the
+    // The engine forked, or came back together. Told by the '?S'
+    // announcement and by nothing else — a refused fork says "still one
+    // machine" and the window never moves.
+    func follow(split active: Bool) {
+        if split != active { split = active }
+    }
+
+    // What one console occupies: the body's silhouette when it is worn, the
     // panel's own 10:9 when it is not.
-    var aspect: CGFloat {
+    private var cellAspect: CGFloat {
         enabled ? layout.aspect : CGFloat(WIDTH) / CGFloat(HEIGHT)
+    }
+
+    // The window's content ratio: one console, or the stage the four of them
+    // stand on.
+    var aspect: CGFloat {
+        split ? SplitStageLayout.aspect(cell: cellAspect) : cellAspect
     }
 
     // How much of the content's height the picture itself takes. On a DMG the
     // screen is barely a quarter of the body — which is the whole reason a
     // toggle has to think before it resizes.
+    //
+    // A split is deliberately absent from this number. Four consoles change
+    // the window's SHAPE, not how much desk it takes: keeping every one of
+    // the four pictures at the size the single one had would want a window
+    // two and a bit times as wide, which is a wall and not a stage. So the
+    // fork re-aspects and leaves the height where it stands, and the
+    // consoles come out at 45% because the room they share has not grown.
     private var screenFraction: CGFloat { enabled ? layout.screen.height : 1 }
 
     // What the last lock left on screen: the memory that lets ⌘B keep the
-    // GAME the same size instead of the window.
+    // GAME the same size instead of the window, and lets a change of ratio
+    // alone still reach the frame.
     private var appliedFraction: CGFloat = 1
+    private var appliedAspect: CGFloat = 0
 
     // The window learns its shape here — called when the screen view lands in
-    // a window, and again whenever the mode or the body changes.
+    // a window, and again whenever the mode, the body or the number of
+    // machines changes.
     func lockAspect(of window: NSWindow?) {
         guard let window else { return }
 
-        window.contentAspectRatio = NSSize(width: aspect, height: 1)
+        let ratio = aspect
+        window.contentAspectRatio = NSSize(width: ratio, height: 1)
         dress(window)
 
         // Fullscreen has no ratio to give: the shell letterboxes itself on
@@ -347,22 +438,30 @@ final class ShellState: ObservableObject {
         let content = window.contentRect(forFrameRect: window.frame).size
         let fraction = screenFraction
         guard content.height > 0 else { return }
-        guard abs(fraction - appliedFraction) > 0.0001 else {
+
+        let room = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        var height = content.height
+
+        if abs(fraction - appliedFraction) > 0.0001 {
+            // The picture keeps its size and the plastic grows around it —
+            // clamped to the display, because a DMG built around a 3× screen
+            // is most of a metre of console.
+            height = content.height * appliedFraction / fraction
+            if room.height > 0 { height = min(height, room.height * 0.9) }
+            appliedFraction = fraction
+        } else if abs(ratio - appliedAspect) < 0.0001 {
             // Same mode as last time (a view remounting, a second window):
             // the ratio is set, nothing to resize.
             return
         }
 
-        // The picture keeps its size and the plastic grows around it —
-        // clamped to the display, because a DMG built around a 3× screen is
-        // most of a metre of console.
-        let room = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
-        var height = content.height * appliedFraction / fraction
-        if room.height > 0 { height = min(height, room.height * 0.9) }
-
+        // Otherwise only the ratio moved — a fork, or a commit. The ratio the
+        // window was just given is a promise about its NEXT resize and not an
+        // order about this one, so the frame is squared up here: same height,
+        // the width the new shape asks for.
+        appliedAspect = ratio
         window.setContentSize(
-            NSSize(width: (height * aspect).rounded(), height: height.rounded()))
-        appliedFraction = fraction
+            NSSize(width: (height * ratio).rounded(), height: height.rounded()))
 
         // setContentSize grows downward from the title bar's corner; a body
         // that tall walks off the bottom of the display. Bring it home.
@@ -517,20 +616,185 @@ struct ShellToggle: View {
 
 // ── The content: the body, or the bare screen ────────────────────────────────
 
+// What the window is showing: one console, four of them, or the half second
+// after a commit while the chosen one grows into the only one left. The
+// third case exists because the engine's announcement arrives all at once —
+// the split is over the instant it is said — and a future that simply
+// blinked into place would not look like a choice.
+enum SplitPhase: Equatable {
+    case single
+    case split(Int)
+    case collapsing(Int)
+}
+
 // What MainScene puts under the HUD. Plain mode is exactly the window this
 // app has always had — the Screen, edge to edge, nothing wrapped around it.
 struct ShellContent: View {
-    let engine: Engine
+    @ObservedObject var engine: Engine
     @ObservedObject private var shell = ShellState.shared
+    @State private var phase: SplitPhase = .single
+
+    init(engine: Engine) { self.engine = engine }
+
+    // How long the chosen console takes to become the whole window. The stage
+    // outlives the split by exactly this much.
+    private static let collapse = 0.4
 
     var body: some View {
-        if shell.enabled {
-            ConsoleView(
-                engine: engine, console: shell.console, layout: shell.layout,
-                letterboxed: shell.fullscreen)
+        ZStack {
+            if phase == .single {
+                if shell.enabled {
+                    ConsoleView(
+                        engine: engine, console: shell.console, layout: shell.layout,
+                        letterboxed: shell.fullscreen)
+                } else {
+                    Screen(engine: engine)
+                }
+            } else {
+                // One SplitStage across both split phases, on purpose: the
+                // collapse is a change of its arguments, and a view swapped
+                // out for another cannot animate into it.
+                SplitStage(
+                    engine: engine, console: shell.console, layout: shell.layout,
+                    letterboxed: shell.fullscreen, bodied: shell.enabled, focus: staged,
+                    collapsing: collapsing, duration: Self.collapse)
+            }
+        }
+        .onAppear { follow() }
+        .onChange(of: engine.split) { follow() }
+    }
+
+    private var staged: Int {
+        switch phase {
+        case .single: return 0
+        case .split(let focus), .collapsing(let focus): return focus
+        }
+    }
+
+    private var collapsing: Int? {
+        if case .collapsing(let chosen) = phase { return chosen }
+        return nil
+    }
+
+    // The engine spoke. Four machines means the stage, with whichever
+    // universe it says is heard; one machine means the stage has a last
+    // half second of work to do, on the console that was being heard when
+    // the announcement came — the engine reports focus 0 once the split is
+    // over, and the console that grows must be the one that was chosen.
+    private func follow() {
+        if engine.split.active {
+            phase = .split(engine.split.focus)
+            return
+        }
+
+        guard case .split(let chosen) = phase else { return }
+        phase = .collapsing(chosen)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.collapse + 0.02) {
+            if case .collapsing = phase { phase = .single }
+        }
+    }
+}
+
+// Four consoles on one desk. Each body is the current preset's, drawn by the
+// very views a single console is drawn by and reading the very same
+// ConsoleState — so all four D-pads rock together under one pair of thumbs.
+// That is the design and not an accident of sharing: the input is shared, so
+// the plastic is.
+struct SplitStage: View {
+    let engine: Engine
+    let console: ConsoleBody
+    let layout: BodyLayout
+    let letterboxed: Bool
+
+    // Whether the bodies are worn. ⌘B is not suspended by a fork: with the
+    // plastic off, the stage is four bare panels in the same 2×2, and the
+    // cell they are laid out in is the picture's own 10:9.
+    let bodied: Bool
+
+    // Which universe the engine says is heard. Truth, never a click: a click
+    // asks, and the highlight moves when the answer comes back.
+    let focus: Int
+
+    // The commit, mid-flight: the chosen console on its way to being the only
+    // one, the other three on their way out.
+    let collapsing: Int?
+    let duration: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            let cell = bodied ? layout.aspect : CGFloat(WIDTH) / CGFloat(HEIGHT)
+            let unit = SplitStageLayout.unit(cell: cell, in: geo.size)
+            let mini = CGSize(width: unit, height: unit / cell)
+            // Centre to centre: one body, plus the gap between two of them.
+            let step = CGSize(
+                width: unit * (1 + SplitStageLayout.gap),
+                height: mini.height + unit * SplitStageLayout.gap)
+            // Where the chosen console is going: exactly the frame the single
+            // console will occupy when the stage stands down, so the swap at
+            // the end of the collapse has nothing left to move.
+            let whole = SplitStageLayout.fit(cell: cell, in: geo.size)
+            let middle = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+
+            ZStack {
+                ForEach(0..<4, id: \.self) { universe in
+                    let chosen = collapsing == universe
+                    let leaving = collapsing != nil && !chosen
+                    let listened = collapsing == nil && focus == universe
+
+                    face
+                        .environment(\.universe, universe)
+                        // A single click asks for this universe; a double
+                        // click makes it the only one. Both are sent and
+                        // neither is believed — the stage redraws when the
+                        // engine answers.
+                        .overlay(
+                            ConsoleTap(
+                                onClick: { engine.sendSplit(.focus, universe: universe) },
+                                onDoubleClick: { engine.sendSplit(.commit, universe: universe) }
+                            )
+                        )
+                        .frame(
+                            width: chosen ? whole.width : mini.width,
+                            height: chosen ? whole.height : mini.height)
+                        // The console being heard stands a little proud of the
+                        // desk, under a light. The other three are held back
+                        // rather than lit differently: there is one
+                        // ConsoleState and one LED contract for all four, and
+                        // forking them to brighten a single lamp would cost
+                        // the D-pads their unison — which is the feature. So
+                        // the focused lamp is the brightest one on the desk
+                        // because the others were turned down, and no colour
+                        // is introduced that the plastic did not already have.
+                        .scaleEffect(listened ? 1.05 : 1)
+                        .shadow(
+                            color: .white.opacity(listened ? 0.28 : 0), radius: unit * 0.05)
+                        .opacity(leaving ? 0 : (listened || collapsing != nil ? 1 : 0.72))
+                        .position(chosen ? middle : slot(universe, step: step, in: geo.size))
+                }
+            }
+            .animation(.easeInOut(duration: duration), value: collapsing)
+            .animation(.easeOut(duration: 0.16), value: focus)
+        }
+        .background(letterboxed ? Color.black : Color.clear)
+    }
+
+    @ViewBuilder private var face: some View {
+        if bodied {
+            ConsoleBodyArt(engine: engine, console: console, layout: layout)
         } else {
             Screen(engine: engine)
         }
+    }
+
+    // Universe 0 top left, where the original belongs, and on round the
+    // clock. Two columns and two rows, centred on the stage.
+    private func slot(_ universe: Int, step: CGSize, in size: CGSize) -> CGPoint {
+        let column = CGFloat(universe % 2) - 0.5
+        let row = CGFloat(universe / 2) - 0.5
+        return CGPoint(
+            x: size.width / 2 + column * step.width,
+            y: size.height / 2 + row * step.height)
     }
 }
 
