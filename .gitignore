@@ -39,6 +39,10 @@ __pycache__/
 .claude/
 .DS_Store
 
+# Un rip filigrané : gardé sous la main, jamais commité — et non suivi, il
+# salissait `git status`, ce qui suffit à marquer une release comme sale.
+games/art/pineapple.png
+
 # ESP-IDF build output and the config it generates from sdkconfig.defaults.
 esp32/native/build/
 esp32/native/sdkconfig

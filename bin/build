@@ -122,11 +122,32 @@ if $release; then
     exit 1
   fi
   xcrun stapler staple "$bundle"
-  rm -f /tmp/Atomboy-release.zip burrito_out/Atomboy.zip
-  ditto -c -k --keepParent "$bundle" burrito_out/Atomboy.zip
+
+  # `--keepParent` keeps the parent it is GIVEN: zipped straight from
+  # /tmp/Atomboy-release.app, the archive expanded to "Atomboy-release.app"
+  # and the cask, which asks for "Atomboy.app", found nothing (v0.4.0, put
+  # right by hand). So the bundle takes its final name before the ditto.
+  # And the archive is named Atomboy.app.zip — the name the cask's url and
+  # the release asset already use; no more renaming after the fact.
+  stage=/tmp/atomboy-zip
+  rm -rf "$stage" /tmp/Atomboy-release.zip burrito_out/Atomboy.app.zip
+  mkdir -p "$stage"
+  mv "$bundle" "$stage/Atomboy.app"
+  ditto -c -k --keepParent "$stage/Atomboy.app" burrito_out/Atomboy.app.zip
+
+  # Nobody sees the top of the archive before the download, so ask now: one
+  # entry at the root, and it is the bundle the cask goes looking for.
+  top=$(unzip -l burrito_out/Atomboy.app.zip | awk 'NR > 3 && NF >= 4 {print $4}' \
+    | sed 's|/.*||' | sort -u)
+  [ "$top" = "Atomboy.app" ] || {
+    echo "the zip opens on '$top' and not on Atomboy.app — the cask would miss it" >&2
+    exit 1
+  }
+
   rm -rf burrito_out/Atomboy.app
-  mv "$bundle" burrito_out/Atomboy.app
-  echo "  burrito_out/Atomboy.zip — AirDrop it to any Mac; it double-clicks clean"
+  mv "$stage/Atomboy.app" burrito_out/Atomboy.app
+  rmdir "$stage"
+  echo "  burrito_out/Atomboy.app.zip — AirDrop it to any Mac; it double-clicks clean"
 fi
 
 echo "── binaries ──"

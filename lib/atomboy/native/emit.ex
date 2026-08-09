@@ -19,19 +19,20 @@ defmodule Atomboy.Native.Emit do
   order is a difference in semantics when two patterns
   chevauchent.
 
-  ## Ce qui est couvert aujourd'hui
+  ## What is covered today
 
-  239 des 500 instructions, en quatre vagues : les transferts entre registres et
+  All 500 instructions, in six waves: the register-to-register transfers and
   8-bit arithmetic, then everything touching the bus -- the `(HL)` column, the
   paired indirections, the high page, absolute addressing -- then 16-bit, the
-  stack and `RST`, and finally control flow with its conditional
-  conditionalles.
+  stack and `RST`, then control flow with its conditionals, then the whole `CB`
+  block, and last the instructions that talk to the interrupts -- `EI`, `DI`,
+  `HALT`, and `RETI`, a `RET` that sets IME on its way out.
 
-  Ce qui manque : le bloc `CB` tout entier, et les instructions qui parlent aux
-  interruptions — `EI`, `DI`, `HALT`, et `RETI`, qui est un `RET` posant IME et
-  so waits for the guest to run a state where IME is armed. They fall into
-  `:unsupported`, and dispatch sends them to `unknown_opcode` -- a partial
-  interpreter must say which one, not return a wrong answer.
+  Nothing is left over: `missing/0` returns an empty list, and `coverage/0`
+  carries the `0xCB` prefix because the extended block is emitted whole. The
+  catch-all clause returning `:unsupported` stays all the same, and dispatch
+  still sends what it catches to `unknown_opcode` -- should a hole ever come
+  back, the interpreter must say which opcode, not return a wrong answer.
   """
 
   import Bitwise
